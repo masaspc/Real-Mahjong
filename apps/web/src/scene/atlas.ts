@@ -1,12 +1,16 @@
-/** 34種＋赤ドラ3種＋裏面を収める牌面アトラス。 */
+/** 34種＋赤ドラ3種＋裏面＋牌体を収める牌面アトラス。 */
 export const ATLAS = {
   columns: 8,
   rows: 5,
-  cells: 38,
+  /** 34種 + 赤ドラ3 + 裏面1 + 牌体1 */
+  cells: 39,
 } as const;
 
 /** 裏面のセル。牌のエンコード（0..=36）とは重ならない。 */
 export const BACK_INDEX = 37;
+
+/** 牌面と同じマテリアルで描く、側面と上下の牌体セル。 */
+export const BODY_INDEX = 38;
 
 /** 牌のエンコード（0..=36）をアトラスのセル番号へ変換する。 */
 export function atlasIndexOf(encoded: number): number {
@@ -37,7 +41,7 @@ const SUIT_MARK = ["m", "p", "s"] as const;
 const HONOR_MARK = ["東", "南", "西", "北", "白", "發", "中"] as const;
 
 function labelOf(cellIndex: number): { text: string; red: boolean } {
-  if (cellIndex === BACK_INDEX) {
+  if (cellIndex === BACK_INDEX || cellIndex === BODY_INDEX) {
     return { text: "", red: false };
   }
   if (cellIndex >= 34) {
@@ -73,7 +77,12 @@ export function drawPlaceholderAtlas(size = 1024): HTMLCanvasElement {
     const y = row * cellH;
     const label = labelOf(cell);
 
-    ctx.fillStyle = cell === BACK_INDEX ? "#c9a227" : "#f6f1e3";
+    ctx.fillStyle =
+      cell === BACK_INDEX
+        ? "#c9a227"
+        : cell === BODY_INDEX
+          ? "#e8d9a0"
+          : "#f6f1e3";
     ctx.fillRect(x + 2, y + 2, cellW - 4, cellH - 4);
 
     if (label.text !== "") {

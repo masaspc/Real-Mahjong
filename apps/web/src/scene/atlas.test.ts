@@ -1,5 +1,11 @@
 import { describe, expect, it } from "vitest";
-import { ATLAS, BACK_INDEX, atlasIndexOf, uvOffsetOf } from "./atlas";
+import {
+  ATLAS,
+  BACK_INDEX,
+  BODY_INDEX,
+  atlasIndexOf,
+  uvOffsetOf,
+} from "./atlas";
 
 describe("atlasIndexOf", () => {
   it("maps every encoded tile to its own cell", () => {
@@ -14,11 +20,15 @@ describe("atlasIndexOf", () => {
     expect(seen.size).toBe(37);
   });
 
-  it("gives the back face its own cell", () => {
-    expect(BACK_INDEX).toBeGreaterThanOrEqual(0);
-    expect(BACK_INDEX).toBeLessThan(ATLAS.cells);
+  it("gives the back face and body their own cells", () => {
+    expect(BACK_INDEX).not.toBe(BODY_INDEX);
+    for (const cell of [BACK_INDEX, BODY_INDEX]) {
+      expect(cell).toBeGreaterThanOrEqual(0);
+      expect(cell).toBeLessThan(ATLAS.cells);
+    }
     for (let encoded = 0; encoded <= 36; encoded += 1) {
       expect(atlasIndexOf(encoded)).not.toBe(BACK_INDEX);
+      expect(atlasIndexOf(encoded)).not.toBe(BODY_INDEX);
     }
   });
 

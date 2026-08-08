@@ -1,5 +1,6 @@
 import { describe, expect, it } from "vitest";
 import { BufferGeometry } from "three";
+import { BODY_INDEX, uvOffsetOf } from "./atlas";
 import { TILE } from "./layout";
 import { applyFaceUv, createTileGeometry } from "./tile-geometry";
 
@@ -21,6 +22,18 @@ describe("createTileGeometry", () => {
     const uv = geometry.getAttribute("uv");
     expect(uv).toBeDefined();
     expect(uv.count).toBe(position.count);
+  });
+
+  it("maps every face to the body cell initially", () => {
+    const geometry = createTileGeometry();
+    const uv = geometry.getAttribute("uv");
+    const body = uvOffsetOf(BODY_INDEX);
+    for (let i = 0; i < uv.count; i += 1) {
+      expect(uv.getX(i)).toBeGreaterThanOrEqual(body.u);
+      expect(uv.getX(i)).toBeLessThanOrEqual(body.u + body.du);
+      expect(uv.getY(i)).toBeGreaterThanOrEqual(body.v);
+      expect(uv.getY(i)).toBeLessThanOrEqual(body.v + body.dv);
+    }
   });
 });
 
