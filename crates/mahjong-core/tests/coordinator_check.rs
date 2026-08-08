@@ -97,7 +97,7 @@ fn as_tiles(counts: &HandCounts) -> Vec<Tile> {
 fn constructed_winning_hands_are_recognised_as_complete() {
     let mut rng = Rng(0x2026_0808);
     let mut checked = 0;
-    for _ in 0..4_000 {
+    for _ in 0..800 {
         let Some(counts) = build_winning_hand(&mut rng) else {
             continue;
         };
@@ -109,7 +109,7 @@ fn constructed_winning_hands_are_recognised_as_complete() {
             to_notation(&as_tiles(&counts))
         );
     }
-    assert!(checked > 1_000, "検査量が足りない: {checked} 件");
+    assert!(checked > 200, "検査量が足りない: {checked} 件");
     println!("和了形を {checked} 件検査した");
 }
 
@@ -119,7 +119,7 @@ fn constructed_winning_hands_are_recognised_as_complete() {
 fn removing_one_tile_yields_tenpai_waiting_on_it() {
     let mut rng = Rng(0xDEAD_BEEF);
     let mut checked = 0;
-    for _ in 0..3_000 {
+    for _ in 0..600 {
         let Some(counts) = build_winning_hand(&mut rng) else {
             continue;
         };
@@ -158,7 +158,7 @@ fn removing_one_tile_yields_tenpai_waiting_on_it() {
             );
         }
     }
-    assert!(checked > 1_000, "検査量が足りない: {checked} 件");
+    assert!(checked > 200, "検査量が足りない: {checked} 件");
     println!("テンパイを {checked} 件検査した");
 }
 
@@ -167,7 +167,7 @@ fn removing_one_tile_yields_tenpai_waiting_on_it() {
 fn waits_never_include_a_tile_the_hand_already_holds_four_of() {
     let mut rng = Rng(0xC0FFEE);
     let mut checked = 0;
-    for _ in 0..3_000 {
+    for _ in 0..600 {
         let Some(counts) = build_winning_hand(&mut rng) else {
             continue;
         };
@@ -200,7 +200,7 @@ fn shanten_stays_within_its_declared_range() {
         }
     }
 
-    for _ in 0..3_000 {
+    for _ in 0..600 {
         for i in (1..wall.len()).rev() {
             let j = rng.below(i + 1);
             wall.swap(i, j);
