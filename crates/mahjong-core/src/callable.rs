@@ -19,20 +19,33 @@ pub fn chi_candidates(hand: &[Tile], discarded: Tile) -> Vec<[Tile; 2]> {
             continue;
         }
         let needed: Vec<u8> = (lowest..lowest + 3).filter(|n| *n != number).collect();
-        let mut picked = Vec::new();
-        for n in needed {
-            let Some(kind) = kind_in_same_suit(discarded.kind(), n) else {
-                picked.clear();
+
+        // 各必要牌について、手にある実物をすべて挙げる。
+        // 赤5と通常5では打点が変わるため、どちらを使うかはプレイヤーが選ぶ。
+        let mut choices: Vec<Vec<Tile>> = Vec::new();
+        for n in &needed {
+            let Some(kind) = kind_in_same_suit(discarded.kind(), *n) else {
+                choices.clear();
                 break;
             };
-            let Some(tile) = tiles_of_kind(hand, kind).into_iter().next() else {
-                picked.clear();
+            let available = tiles_of_kind(hand, kind);
+            if available.is_empty() {
+                choices.clear();
                 break;
-            };
-            picked.push(tile);
+            }
+            choices.push(available);
         }
-        if picked.len() == 2 {
-            out.push([picked[0], picked[1]]);
+        if choices.len() != 2 {
+            continue;
+        }
+
+        for first in &choices[0] {
+            for second in &choices[1] {
+                let pair = [*first, *second];
+                if !out.contains(&pair) {
+                    out.push(pair);
+                }
+            }
         }
     }
     out
@@ -121,6 +134,23 @@ mod tests {
             vec!["12p", "24p", "45p"]
         );
     }
+    /// 赤5と通常5では打点が変わる。どちらを使うかを選べるよう別候補で返す。
+    #[test]
+    fn chi_offers_both_the_red_and_the_normal_five() {
+        // 4p を鳴く。手に 3p と 5p(通常) と 0p(赤5) があるので 35p と 30p の2通り。
+        let hand = parse_hand("3p5p0p").unwrap();
+        let candidates = chi_candidates(&hand, parse_tile("4p").unwrap());
+        assert_eq!(
+            candidates.len(),
+            2,
+            "赤と通常の両方が候補になるべき: {:?}",
+            notation_of(&candidates)
+        );
+        let rendered = notation_of(&candidates);
+        assert!(rendered.contains(&"35p".to_owned()), "{rendered:?}");
+        assert!(rendered.contains(&"30p".to_owned()), "{rendered:?}");
+    }
+
     #[test]
     fn chi_does_not_cross_suits() {
         // 1p を含む順子は 123p だけ。2p3p が揃っていれば鳴ける。
