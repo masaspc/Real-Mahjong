@@ -813,10 +813,10 @@ mod tests {
     /// 槍槓のウィンドウはロン以外を受け付けない。
     ///
     /// **候補にロンしか無いから拒否される、では検査になっていない。**
-    /// ウィンドウの種類そのもので弾くことを確かめるため、候補には
-    /// ポンも載せたうえでポンの応答が通らないことを見る。
+    /// ポンも載せて `open` へ渡し、それが落とされた結果として
+    /// ポンの応答が通らないことを見る。
     #[test]
-    fn a_chankan_window_rejects_non_ron_even_when_offered() {
+    fn a_chankan_window_drops_non_ron_candidates() {
         let mut offered = ron_only();
         offered.push(ActionOption::Pon { candidates: vec![] });
         let mut w = ReactionWindow::open(
@@ -974,15 +974,21 @@ impl ReactionWindow {
         opened_at_ms: u64,
         deadline_ms: u64,
     ) -> Self {
-        // 槍槓のウィンドウにロン以外を載せるのは呼び出し側のバグ。
-        debug_assert!(
-            kind != WindowKind::Chankan
-                || candidates
-                    .iter()
-                    .flatten()
-                    .all(|o| matches!(o, ActionOption::Ron)),
-            "槍槓のウィンドウにロン以外の候補が載っている"
-        );
+        // 槍槓のウィンドウはロンしか受け付けない。
+        // debug_assert で呼び出し側の契約にすると、release では素通りし、
+        // debug ではテストが検証したい経路より先に落ちる。
+        // **ここで落として不変条件を構造で保証する。**
+        let candidates = if kind == WindowKind::Chankan {
+            candidates.map(|options| {
+                options
+                    .into_iter()
+                    .filter(|o| matches!(o, ActionOption::Ron))
+                    .collect()
+            })
+        } else {
+            candidates
+        };
+
         ReactionWindow {
             id,
             kind,
@@ -1023,11 +1029,8 @@ impl ReactionWindow {
             return Err(Rejection::AlreadyResponded);
         }
         // パスは候補を持つ席なら常に許す。
+        // 槍槓でロン以外が弾かれるのは、open が候補から落としているためである。
         if response != CallResponse::Pass {
-            // 槍槓のウィンドウはロンしか受け付けない。
-            if self.kind == WindowKind::Chankan && response != CallResponse::Ron {
-                return Err(Rejection::NotOffered);
-            }
             let wanted = priority_of_response(&response);
             let offered_here = offered.iter().any(|o| priority_of_option(o) == wanted);
             if !offered_here {
@@ -1116,7 +1119,7 @@ impl ReactionWindow {
 - [ ] **Step 4: テストが通ることを確認する**
 
 Run: `cargo test --package mahjong-engine reaction`
-Expected: 22テスト PASS
+Expected: 23テスト PASS
 
 - [ ] **Step 5: コミット**
 
