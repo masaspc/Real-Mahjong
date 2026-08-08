@@ -976,6 +976,8 @@ pub enum YakuId {
     Tenhou,
     Chiihou,
     KokushiMusou,
+    // 既定の変換では kokushi_musou13 になる。契約として読みやすい形を明示する。
+    #[serde(rename = "kokushi_musou_13")]
     KokushiMusou13,
     Suuankou,
     SuuankouTanki,
@@ -986,6 +988,7 @@ pub enum YakuId {
     Ryuuiisou,
     Chinroutou,
     ChuurenPoutou,
+    #[serde(rename = "chuuren_poutou_9")]
     ChuurenPoutou9,
     Suukantsu,
     // ドラ（役ではないが同じ枠で表示される）
