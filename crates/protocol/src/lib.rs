@@ -5,6 +5,7 @@
 
 pub mod client_event;
 pub mod command;
+pub mod effect;
 pub mod event;
 pub mod meld;
 pub mod notation;
