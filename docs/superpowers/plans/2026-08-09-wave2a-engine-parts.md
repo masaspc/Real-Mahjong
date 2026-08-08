@@ -810,23 +810,42 @@ mod tests {
         assert_eq!(w.resolve(400, MIN_WAIT), Outcome::Pending);
     }
 
-    /// 槍槓のウィンドウはロン以外の候補を受け付けない。
+    /// 槍槓のウィンドウはロン以外を受け付けない。
+    ///
+    /// **候補にロンしか無いから拒否される、では検査になっていない。**
+    /// ウィンドウの種類そのもので弾くことを確かめるため、候補には
+    /// ポンも載せたうえでポンの応答が通らないことを見る。
     #[test]
-    fn a_chankan_window_rejects_non_ron_candidates() {
+    fn a_chankan_window_rejects_non_ron_even_when_offered() {
+        let mut offered = ron_only();
+        offered.push(ActionOption::Pon { candidates: vec![] });
         let mut w = ReactionWindow::open(
             2,
             WindowKind::Chankan,
             Seat::new(0),
             parse_tile("5s").unwrap(),
-            [vec![], ron_only(), vec![], vec![]],
+            [vec![], offered, vec![], vec![]],
             0,
             5_000,
         );
-        assert!(matches!(
-            w.respond(Seat::new(1), pon_response()),
-            Err(Rejection::NotOffered)
-        ));
+        assert!(
+            matches!(
+                w.respond(Seat::new(1), pon_response()),
+                Err(Rejection::NotOffered)
+            ),
+            "槍槓でポンを受理した"
+        );
         assert!(w.respond(Seat::new(1), CallResponse::Ron).is_ok());
+    }
+
+    /// 打牌のウィンドウなら同じ候補でポンが通る。
+    /// 上のテストが「候補が無いから落ちた」のではないことを示す。
+    #[test]
+    fn the_same_options_allow_a_pon_on_a_discard_window() {
+        let mut offered = ron_only();
+        offered.push(ActionOption::Pon { candidates: vec![] });
+        let mut w = window([vec![], offered, vec![], vec![]]);
+        assert!(w.respond(Seat::new(1), pon_response()).is_ok());
     }
 
     /// 同順位が3件並んでも検出できる。最初に見たものとだけ比べると
@@ -955,6 +974,15 @@ impl ReactionWindow {
         opened_at_ms: u64,
         deadline_ms: u64,
     ) -> Self {
+        // 槍槓のウィンドウにロン以外を載せるのは呼び出し側のバグ。
+        debug_assert!(
+            kind != WindowKind::Chankan
+                || candidates
+                    .iter()
+                    .flatten()
+                    .all(|o| matches!(o, ActionOption::Ron)),
+            "槍槓のウィンドウにロン以外の候補が載っている"
+        );
         ReactionWindow {
             id,
             kind,
@@ -996,6 +1024,10 @@ impl ReactionWindow {
         }
         // パスは候補を持つ席なら常に許す。
         if response != CallResponse::Pass {
+            // 槍槓のウィンドウはロンしか受け付けない。
+            if self.kind == WindowKind::Chankan && response != CallResponse::Ron {
+                return Err(Rejection::NotOffered);
+            }
             let wanted = priority_of_response(&response);
             let offered_here = offered.iter().any(|o| priority_of_option(o) == wanted);
             if !offered_here {
@@ -1821,66 +1853,59 @@ impl RoundState {
     pub fn is_menzen(&self, seat: Seat) -> bool {
         self.seat(seat).melds.iter().all(|m| m.is_concealed())
     }
-}
-```
 
-**2. `seat_wind` は親からの距離で決まる。**
-
-```rust
-pub fn seat_wind(&self, seat: Seat) -> Wind {
-    let offset = (seat.index() + 4 - self.dealer.index()) % 4;
-    match offset {
-        0 => Wind::East,
-        1 => Wind::South,
-        2 => Wind::West,
-        _ => Wind::North,
+    /// **2. 自風は親からの距離で決まる。** 親が東、その下家が南。
+    pub fn seat_wind(&self, seat: Seat) -> Wind {
+        let offset = (seat.index() + 4 - self.dealer.index()) % 4;
+        match offset {
+            0 => Wind::East,
+            1 => Wind::South,
+            2 => Wind::West,
+            _ => Wind::North,
+        }
     }
-}
-```
 
-**3. `hand_context` は表のとおりに組み立てる。** 状況役の判定を進行側へ
-散らさず、ここに集約する。
+    /// **3. `hand_context` は表のとおりに組み立てる。**
+    /// 状況役の判定を進行側へ散らさず、ここに集約する。
+    pub fn hand_context(&self, seat: Seat, win_type: WinType) -> HandContext {
+        let is_tsumo = win_type == WinType::Tsumo;
+        let riichi = self
+            .seat(seat)
+            .riichi
+            .as_ref()
+            .filter(|r| r.step == RiichiStep::Accepted);
+        let exhausted = self.wall.live_remaining() == 0;
+        let first_draw_untouched =
+            self.draw_count[seat.index()] == 1 && !self.any_call_made;
 
-```rust
-pub fn hand_context(&self, seat: Seat, win_type: WinType) -> HandContext {
-    let is_tsumo = win_type == WinType::Tsumo;
-    let riichi = self
-        .seat(seat)
-        .riichi
-        .as_ref()
-        .filter(|r| r.step == RiichiStep::Accepted);
-    let exhausted = self.wall.live_remaining() == 0;
-    let first_draw_untouched = self.draw_count[seat.index()] == 1 && !self.any_call_made;
-
-    HandContext {
-        win_type,
-        seat_wind: self.seat_wind(seat),
-        round_wind: self.round.wind,
-        riichi: riichi.is_some(),
-        double_riichi: riichi.map(|r| r.double).unwrap_or(false),
-        ippatsu: riichi.map(|r| r.ippatsu).unwrap_or(false),
-        rinshan: is_tsumo && self.last_draw == Some((seat, DrawSource::DeadWall)),
-        chankan: !is_tsumo && self.pending_kan.is_some(),
-        haitei: is_tsumo && exhausted,
-        houtei: !is_tsumo && exhausted,
-        tenhou: is_tsumo && seat == self.dealer && first_draw_untouched,
-        chiihou: is_tsumo && seat != self.dealer && first_draw_untouched,
-        dora_indicators: self.wall.dora_indicators().to_vec(),
-        // 裏ドラはリーチが成立している席にだけ渡す。
-        ura_indicators: if riichi.is_some() {
-            self.wall.ura_indicators().to_vec()
-        } else {
-            Vec::new()
-        },
+        HandContext {
+            win_type,
+            seat_wind: self.seat_wind(seat),
+            round_wind: self.round.wind,
+            riichi: riichi.is_some(),
+            double_riichi: riichi.map(|r| r.double).unwrap_or(false),
+            ippatsu: riichi.map(|r| r.ippatsu).unwrap_or(false),
+            rinshan: is_tsumo && self.last_draw == Some((seat, DrawSource::DeadWall)),
+            chankan: !is_tsumo && self.pending_kan.is_some(),
+            haitei: is_tsumo && exhausted,
+            houtei: !is_tsumo && exhausted,
+            tenhou: is_tsumo && seat == self.dealer && first_draw_untouched,
+            chiihou: is_tsumo && seat != self.dealer && first_draw_untouched,
+            dora_indicators: self.wall.dora_indicators().to_vec(),
+            // 裏ドラはリーチが成立している席にだけ渡す。
+            ura_indicators: if riichi.is_some() {
+                self.wall.ura_indicators().to_vec()
+            } else {
+                Vec::new()
+            },
+        }
     }
-}
-```
 
-`begin_turn` は同巡内フリテンだけを消す。永続フリテンには触らない。
-
-```rust
-pub fn begin_turn(&mut self, seat: Seat) {
-    self.seats[seat.index()].passed_this_turn.clear();
+    /// 自分のツモ番の始まり。**同巡内フリテンだけを消す。**
+    /// 永続フリテン（リーチ後の見逃し）には触らない。
+    pub fn begin_turn(&mut self, seat: Seat) {
+        self.seats[seat.index()].passed_this_turn.clear();
+    }
 }
 ```
 
