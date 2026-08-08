@@ -40,7 +40,7 @@ describe("effect catalog", () => {
     expect(effectOf(riichiAccepted)).toBeNull();
   });
 
-  it("distinguishes chi, pon and kan", () => {
+  it("distinguishes chi and pon", () => {
     const call = (kind: "chi" | "pon" | "ankan"): ClientEvent => ({
       type: "call",
       seat: 1,
@@ -50,10 +50,11 @@ describe("effect catalog", () => {
     });
     expect(effectOf(call("chi"))).toBe("chi");
     expect(effectOf(call("pon"))).toBe("pon");
-    expect(effectOf(call("ankan"))).toBe("kan");
+    // 槓の演出は宣言側が持つ。成立側は帳簿上の記録なので null。
+    expect(effectOf(call("ankan"))).toBeNull();
   });
 
-  /** 加槓の宣言も槓の演出時間を持つ。槍槓の受付はこの間に入る。 */
+  /** 槓の演出は宣言が持つ。槍槓の受付はこの間に入る。 */
   it("gives the kan declaration its own effect time", () => {
     const declared: ClientEvent = {
       type: "kan_declared",
@@ -62,6 +63,25 @@ describe("effect catalog", () => {
       tile: 13,
     };
     expect(effectOf(declared)).toBe("kan");
+  });
+
+  /** 宣言と成立の両方に演出を割り当てると二重計上になる。 */
+  it("counts a kan animation once across declaration and completion", () => {
+    const declared: ClientEvent = {
+      type: "kan_declared",
+      seat: 0,
+      kind: "kakan",
+      tile: 22,
+    };
+    const completed: ClientEvent = {
+      type: "call",
+      seat: 0,
+      from: 0,
+      kind: "kakan",
+      tiles: [22],
+    };
+    const dora: ClientEvent = { type: "dora_reveal", indicator: 27 };
+    expect(leadInMs([declared, completed, dora])).toBe(1100 + 800);
   });
 
   it("bookkeeping events carry no effect time", () => {

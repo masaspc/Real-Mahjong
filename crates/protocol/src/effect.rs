@@ -46,10 +46,13 @@ pub fn effect_of(event: &Event) -> Option<EffectKind> {
             RiichiStep::Declare => Some(EffectKind::RiichiDeclare),
             RiichiStep::Accepted => None,
         },
+        // 槓は宣言（KanDeclared）が演出を持ち、成立（Call）は帳簿上の記録である。
+        // 両方に演出時間を割り当てると 2200ms と二重計上になる。
+        Event::KanDeclared { .. } => Some(EffectKind::Kan),
         Event::Call { kind, .. } => match kind {
             MeldKind::Chi => Some(EffectKind::Chi),
             MeldKind::Pon => Some(EffectKind::Pon),
-            MeldKind::Ankan | MeldKind::Minkan | MeldKind::Kakan => Some(EffectKind::Kan),
+            MeldKind::Ankan | MeldKind::Minkan | MeldKind::Kakan => None,
         },
         _ => None,
     }
@@ -119,13 +122,47 @@ mod tests {
         };
         assert_eq!(effect_of(&pon), Some(EffectKind::Pon));
 
-        let ankan = Event::Call {
+        // 槓の演出は宣言側が持つ。成立側は帳簿上の記録なので0。
+        let declared = Event::KanDeclared {
+            seat: Seat::new(1),
+            kind: MeldKind::Ankan,
+            tile: parse_tile("1m").unwrap(),
+        };
+        assert_eq!(effect_of(&declared), Some(EffectKind::Kan));
+
+        let completed = Event::Call {
             seat: Seat::new(1),
             from: Seat::new(1),
             kind: MeldKind::Ankan,
             tiles: vec![parse_tile("1m").unwrap()],
         };
-        assert_eq!(effect_of(&ankan), Some(EffectKind::Kan));
+        assert_eq!(
+            effect_of(&completed),
+            None,
+            "宣言と成立の両方に演出を割り当てると二重計上になる"
+        );
+    }
+
+    /// 槓の一連の流れで演出時間が二重計上されないこと。
+    #[test]
+    fn a_kan_sequence_counts_its_animation_once() {
+        let events = vec![
+            Event::KanDeclared {
+                seat: Seat::new(0),
+                kind: MeldKind::Kakan,
+                tile: parse_tile("5s").unwrap(),
+            },
+            Event::Call {
+                seat: Seat::new(0),
+                from: Seat::new(0),
+                kind: MeldKind::Kakan,
+                tiles: vec![parse_tile("5s").unwrap()],
+            },
+            Event::DoraReveal {
+                indicator: parse_tile("1z").unwrap(),
+            },
+        ];
+        assert_eq!(lead_in_ms(&events), 1_100 + 800);
     }
 
     #[test]

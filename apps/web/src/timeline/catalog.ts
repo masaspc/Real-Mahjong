@@ -42,15 +42,18 @@ export function effectOf(event: ClientEvent): EffectKind | null {
     case "riichi":
       // 成立側は点棒の移動のみで、局の進行を止める演出を持たない。
       return event.step === "declare" ? "riichi_declare" : null;
-    case "call":
+    // 槓は宣言が演出を持ち、成立は帳簿上の記録である。
+    // 両方に演出時間を割り当てると 2200ms と二重計上になる。
     case "kan_declared":
+      return "kan";
+    case "call":
       switch (event.kind) {
         case "chi":
           return "chi";
         case "pon":
           return "pon";
         default:
-          return "kan";
+          return null;
       }
     default:
       return null;

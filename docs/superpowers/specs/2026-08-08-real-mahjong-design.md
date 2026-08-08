@@ -252,7 +252,7 @@ fn project(ev: &Event, viewer: Seat) -> Option<ClientEvent>
 | Draw | 250ms |
 | Discard | 350ms |
 | Pon / Chi | 700ms |
-| Kan | 1100ms |
+| Kan（`KanDeclared` が持つ。成立側の `Call` は 0） | 1100ms |
 | RiichiDeclare | 1800ms（牌を倒す + リーチ棒 + カットイン） |
 | DoraReveal | 800ms |
 
@@ -281,10 +281,12 @@ deadline = now + 基準思考時間 + 溜め時間バンク + lead_in + 通信�
 連続カンの例で確認する。上家が加槓を宣言し、槓が成立し、新ドラがめくれ、嶺上牌をツモり、打牌して自分の番になった場合：
 
 ```
-KanDeclared 1100 + Call(Kakan) 1100 + DoraReveal 800 + Draw 250 + Discard 350 = 3600ms
+KanDeclared 1100 + Call(Kakan) 0 + DoraReveal 800 + Draw 250 + Discard 350 = 2500ms
 ```
 
-この 3600ms がそのまま締切に加算される。定義が「前回の自分の要求から」なので、途中に何イベント挟まっても数え漏れも二重計上も起きない。
+この 2500ms がそのまま締切に加算される。定義が「前回の自分の要求から」なので、途中に何イベント挟まっても数え漏れも二重計上も起きない。
+
+**槓の演出時間は宣言（`KanDeclared`）が持ち、成立（`Call`）は 0 である。** 両方に割り当てると同じ動きを二重に数えて 2200ms になる。槍槓の反応ウィンドウは宣言と成立の間に開くため、プレイヤーが見ているのは宣言の演出ひとつである。
 
 #### 6.2.2 溜め時間バンクの消費
 
