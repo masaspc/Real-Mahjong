@@ -336,13 +336,16 @@ mod tests {
         assert!(shanten(&hand, 0) > 0);
     }
 
-    /// 字牌は順子を作れない。
+    /// 字牌は順子を作れない。刻子と対子だけで評価される。
     #[test]
     fn honors_never_form_runs() {
-        assert_eq!(shanten(&counts("123z456z1234567z"), 0), shanten(&counts("123z456z1234567z"), 0));
-        // 1z2z3z は面子にならないので、刻子・対子だけで評価される
-        let hand = counts("111z222z333z44z5z");
-        assert_eq!(shanten(&hand, 0), 0);
+        // 東東東 南南南 西西西 ＋ 北北 ＋ 白白（13枚）
+        // 面子3＋雀頭1＋対子1 → 8-6-1-1 = 0（北と白のシャンポン待ち）
+        assert_eq!(shanten(&counts("111z222z333z44z55z"), 0), 0);
+
+        // 1z2z3z が順子になれるなら向聴はもっと小さくなるはず。
+        // 実際は対子6つ＋孤立1枚として評価され、ブロック上限5で 8-0-4-1 = 3 になる。
+        assert_eq!(shanten(&counts("123z456z1234567z"), 0), 3);
     }
 }
 ```
