@@ -43,7 +43,6 @@
 **Files:**
 - Create: `apps/web/src/scene/layout.ts`
 - Create: `apps/web/src/scene/layout.test.ts`
-- Modify: `apps/web/package.json`
 
 **Interfaces:**
 - Produces:
@@ -57,14 +56,11 @@
 
 河は**6枚×3段**、山は各家17トン×2段とする。
 
-- [ ] **Step 1: Three.js を入れる**
+`three` / `@types/three` / `vitest` は**既に導入済み**である（Wave 1d と共有する
+`package.json` の衝突を避けるため、コーディネータが先に入れた）。
+**`package.json` と `vitest.config.ts` を編集しないこと。**
 
-```bash
-pnpm --filter @real-mahjong/web add three
-pnpm --filter @real-mahjong/web add -D @types/three
-```
-
-- [ ] **Step 2: 失敗するテストを書く**
+- [ ] **Step 1: 失敗するテストを書く**
 
 ```ts
 import { describe, expect, it } from "vitest";
@@ -163,12 +159,12 @@ describe("wallPosition", () => {
 });
 ```
 
-- [ ] **Step 3: テストが失敗することを確認する**
+- [ ] **Step 2: テストが失敗することを確認する**
 
 Run: `pnpm --filter @real-mahjong/web test`
 Expected: `./layout` が見つからず失敗
 
-- [ ] **Step 4: 実装を書く**
+- [ ] **Step 3: 実装を書く**
 
 ```ts
 /**
@@ -250,12 +246,12 @@ export function wallPosition(seat: number, index: number): Vec3 {
 }
 ```
 
-- [ ] **Step 5: テストが通ることを確認する**
+- [ ] **Step 4: テストが通ることを確認する**
 
 Run: `pnpm --filter @real-mahjong/web test`
 Expected: 全テスト PASS
 
-- [ ] **Step 6: コミット**
+- [ ] **Step 5: コミット**
 
 ```bash
 git add apps/web

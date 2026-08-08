@@ -30,8 +30,6 @@
 **Files:**
 - Create: `apps/web/src/timeline/clock.ts`
 - Create: `apps/web/src/timeline/clock.test.ts`
-- Modify: `apps/web/package.json`
-- Create: `apps/web/vitest.config.ts`
 
 **Interfaces:**
 - Produces:
@@ -39,32 +37,11 @@
   - `export class ManualClock implements Clock` — `advance(ms: number): void`, `set(ms: number): void`
   - `export const systemClock: Clock`
 
-- [ ] **Step 1: テストランナーを入れる**
+`vitest` は**既に導入済み**である（Wave 1c と共有する `package.json` の衝突を
+避けるため、コーディネータが先に入れた）。
+**`package.json` と `vitest.config.ts` を編集しないこと。**
 
-```bash
-pnpm --filter @real-mahjong/web add -D vitest
-```
-
-`apps/web/package.json` の `scripts` に追記する。
-
-```json
-"test": "vitest run",
-"test:watch": "vitest"
-```
-
-`apps/web/vitest.config.ts`:
-
-```ts
-import { defineConfig } from "vitest/config";
-
-export default defineConfig({
-  test: {
-    include: ["src/**/*.test.ts"],
-  },
-});
-```
-
-- [ ] **Step 2: 失敗するテストを書く**
+- [ ] **Step 1: 失敗するテストを書く**
 
 `apps/web/src/timeline/clock.test.ts`:
 
@@ -97,12 +74,12 @@ describe("ManualClock", () => {
 });
 ```
 
-- [ ] **Step 3: テストが失敗することを確認する**
+- [ ] **Step 2: テストが失敗することを確認する**
 
 Run: `pnpm --filter @real-mahjong/web test`
 Expected: `./clock` が見つからず失敗
 
-- [ ] **Step 4: 実装を書く**
+- [ ] **Step 3: 実装を書く**
 
 `apps/web/src/timeline/clock.ts`:
 
@@ -145,12 +122,12 @@ export const systemClock: Clock = {
 };
 ```
 
-- [ ] **Step 5: テストが通ることを確認する**
+- [ ] **Step 4: テストが通ることを確認する**
 
 Run: `pnpm --filter @real-mahjong/web test`
 Expected: 3テスト PASS
 
-- [ ] **Step 6: コミット**
+- [ ] **Step 5: コミット**
 
 ```bash
 git add apps/web
