@@ -4,7 +4,9 @@
 
 **Goal:** 向聴数・待ち・鳴き可否・振聴を `mahjong-core` に実装し、`fixtures/shanten` の期待値をすべて通す。
 
-**Architecture:** すべて純粋関数。乱数も I/O も時間も持たない。Wave 0 で凍結した `HandCounts`（`hand.rs`）と `WaitShape` / `Block`（`shapes.rs`）の上に書く。
+**Architecture:** すべて純粋関数。乱数も I/O も時間も持たない。Wave 0 で凍結した `HandCounts`（`hand.rs`）の上に書く。
+
+**Wave 1b との関係:** この計画は 1b のファイルを一切参照しない。1b もこの計画のファイルを参照しない。両者は完全に独立しており、どちらが先に終わっても構わない。
 
 **Tech Stack:** Rust 1.97.1 / edition 2021 / `protocol` と `mahjong-core` のみに依存
 
@@ -634,20 +636,21 @@ git commit -m "feat(core): 3形を統合した向聴数を実装し期待値テ�
 
 ---
 
-### Task 5: 待ち牌の列挙と待ち形の判定
+### Task 5: 待ち牌の列挙
 
 **Files:**
 - Modify: `crates/mahjong-core/src/wait.rs`
 
 **Interfaces:**
-- Consumes: `HandCounts`、`shapes::{Block, WaitShape}`、`shanten::overall`
-- Produces:
-  - `pub fn waiting_tiles(counts: &HandCounts, melds: u8) -> Vec<TileKind>`
-  - `pub fn wait_shape_of(blocks: &[Block], pair: TileKind, win_tile: TileKind) -> WaitShape`
+- Consumes: `HandCounts`、`shanten::overall`
+- Produces: `pub fn waiting_tiles(counts: &HandCounts, melds: u8) -> Vec<TileKind>`
 
-`wait_shape_of` は**分解済みの結果**を受け取る。どう分解するかは Wave 1b の責務であり、
-ここでは「その分解のもとで和了牌がどの役割だったか」だけを答える。こうすることで
-1a と 1b が同じ判断を二重に実装せずに済む。
+**待ち形（両面・嵌張・辺張など）の判定はここに実装しない。** 待ち形は
+「その手をどう分解したか」に依存し、分解は Wave 1b の `decompose.rs` が持つ。
+分解と切り離して待ち形だけを決めると、1a と 1b で違う分解を前提にした判断が
+生まれる。したがって待ち形の判定は 1b 側に置き、この計画では扱わない。
+
+ここが担うのは「テンパイのとき、どの牌で和了できるか」だけである。
 
 - [ ] **Step 1: 失敗するテストを書く**
 
@@ -692,47 +695,30 @@ mod tests {
         assert!(waiting_tiles(&counts("147m258p369s1234z"), 0).is_empty());
     }
 
+    /// 副露していてもテンパイなら待ちを返す。
     #[test]
-    fn identifies_each_wait_shape() {
-        use protocol::tile::TileKind;
-        let run = |n: &str| Block::Run(kind(n));
-
-        // 78p に 6p → 両面
-        assert_eq!(
-            wait_shape_of(&[run("6p")], kind("2s"), kind("6p")),
-            WaitShape::Ryanmen
-        );
-        // 12m に 3m → 辺張（順子の最小が 1m で、和了牌が 3m）
-        assert_eq!(
-            wait_shape_of(&[run("1m")], kind("5s"), kind("3m")),
-            WaitShape::Penchan
-        );
-        // 13p に 2p → 嵌張（和了牌が順子の真ん中）
-        assert_eq!(
-            wait_shape_of(&[run("1p")], kind("5s"), kind("2p")),
-            WaitShape::Kanchan
-        );
-        // 和了牌が刻子の一部 → シャンポン
-        assert_eq!(
-            wait_shape_of(&[Block::Triplet(kind("1p"))], kind("5s"), kind("1p")),
-            WaitShape::Shanpon
-        );
-        // 和了牌が雀頭 → 単騎
-        assert_eq!(
-            wait_shape_of(&[run("1p")], kind("5s"), kind("5s")),
-            WaitShape::Tanki
-        );
-        let _ = TileKind::COUNT;
+    fn melded_hands_still_report_their_waits() {
+        let hand = counts("123m456m12p11s");
+        let waits: Vec<u8> = waiting_tiles(&hand, 1).iter().map(|k| k.index()).collect();
+        assert_eq!(waits, vec![kind("3p").index()]);
     }
 
-    /// 789m に 7m は両面（89m の下側）ではなく、順子の最小＝7m なので辺張ではない。
-    /// 9m を含む順子で和了牌が 7m なら両面と判定する。
+    /// シャンポン待ちは2種類を返す。
     #[test]
-    fn seven_completing_789_is_ryanmen_not_penchan() {
-        assert_eq!(
-            wait_shape_of(&[Block::Run(kind("7m"))], kind("5s"), kind("7m")),
-            WaitShape::Ryanmen
-        );
+    fn shanpon_waits_on_both_pairs() {
+        let hand = counts("123m456m789m11p11s");
+        let waits: Vec<u8> = waiting_tiles(&hand, 0).iter().map(|k| k.index()).collect();
+        assert_eq!(waits, vec![kind("1p").index(), kind("1s").index()]);
+    }
+
+    /// 4枚見えている牌は待ちに含めない。
+    #[test]
+    fn a_tile_already_held_four_times_is_not_a_wait() {
+        // 1p を4枚持っている状態では 1p は和了牌になりえない
+        let hand = counts("1111p234567m99s");
+        assert!(!waiting_tiles(&hand, 0)
+            .iter()
+            .any(|k| *k == kind("1p")));
     }
 }
 ```
@@ -745,16 +731,15 @@ Expected: コンパイルエラー
 - [ ] **Step 3: 実装を書く**
 
 ```rust
-//! 待ち牌の列挙と、待ち形の判定。
+//! 待ち牌の列挙。
 //!
-//! 待ち形の判定は「分解済みの結果」を受け取る。どう分解するかは Wave 1b の
-//! 責務であり、ここで再実装しない。
+//! 待ち形（両面・嵌張など）の判定はここに無い。待ち形は手をどう分解したかに
+//! 依存するため、分解を持つ `decompose.rs`（Wave 1b）が担う。
 
 use protocol::tile::TileKind;
 
 use crate::hand::HandCounts;
 use crate::shanten::overall;
-use crate::shapes::{Block, WaitShape};
 
 /// テンパイ時に和了となる牌を、種類の昇順で返す。テンパイでなければ空。
 ///
@@ -780,64 +765,12 @@ pub fn waiting_tiles(counts: &HandCounts, melds: u8) -> Vec<TileKind> {
     }
     waits
 }
-
-/// 分解結果のもとで、和了牌がどの役割だったかを答える。
-///
-/// 判定の順序に意味がある。雀頭と一致するなら単騎、刻子の一部なら双碰、
-/// 順子の一部なら位置で両面／嵌張／辺張を分ける。
-pub fn wait_shape_of(blocks: &[Block], pair: TileKind, win_tile: TileKind) -> WaitShape {
-    if win_tile == pair {
-        return WaitShape::Tanki;
-    }
-
-    for block in blocks {
-        match *block {
-            Block::Triplet(kind) | Block::Pair(kind) if kind == win_tile => {
-                return WaitShape::Shanpon;
-            }
-            Block::Run(start) => {
-                let Some(number) = start.number() else {
-                    continue;
-                };
-                let Some(win_number) = win_tile.number() else {
-                    continue;
-                };
-                if start.suit() != win_tile.suit() {
-                    continue;
-                }
-                // 順子は start, start+1, start+2。
-                match win_number.checked_sub(number) {
-                    Some(1) => return WaitShape::Kanchan,
-                    Some(0) => {
-                        // 和了牌が順子の最小。789 の 7 は両面、
-                        // 123 の 1 も両面（23 に 1）。
-                        return WaitShape::Ryanmen;
-                    }
-                    Some(2) => {
-                        // 和了牌が順子の最大。123 の 3 は辺張（12 に 3）、
-                        // それ以外は両面。
-                        return if number == 1 {
-                            WaitShape::Penchan
-                        } else {
-                            WaitShape::Ryanmen
-                        };
-                    }
-                    _ => continue,
-                }
-            }
-            _ => continue,
-        }
-    }
-
-    // ここへ来るのは分解と和了牌が食い違っている場合。呼び出し側のバグ。
-    WaitShape::Tanki
-}
 ```
 
 - [ ] **Step 4: テストが通ることを確認する**
 
 Run: `cargo test --package mahjong-core wait`
-Expected: 6テスト PASS
+Expected: 7テスト PASS
 
 - [ ] **Step 5: 速度を確認する**
 
