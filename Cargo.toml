@@ -1,6 +1,13 @@
 [workspace]
 resolver = "2"
-members = ["crates/protocol"]
+members = [
+  "crates/protocol",
+  "crates/mahjong-core",
+  "crates/mahjong-engine",
+  "crates/mahjong-ai",
+  "crates/mahjong-wasm",
+  "crates/server",
+]
 
 [workspace.package]
 edition = "2021"
