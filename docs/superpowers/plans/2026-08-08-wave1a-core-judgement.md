@@ -328,12 +328,13 @@ mod tests {
         assert_eq!(shanten(&counts("123m456m12p11s"), 1), 0);
     }
 
-    /// 順子は色をまたがない。
+    /// 順子は色をまたがない。9m と 1p は隣り合わない。
     #[test]
     fn runs_do_not_cross_suits() {
-        // 9m 1p 2p は順子にならない
-        let hand = counts("99m11p22p33s44s55z");
-        assert!(shanten(&hand, 0) > 0);
+        // 111s 222s 333s の3面子＋44s の雀頭＋孤立した 9m と 1p（13枚）。
+        // 9m1p が搭子になれるなら 8-6-1-1 = 0 だが、色をまたぐので搭子にならず
+        // 8-6-0-1 = 1 が正しい。
+        assert_eq!(shanten(&counts("9m1p11122233344s"), 0), 1);
     }
 
     /// 字牌は順子を作れない。刻子と対子だけで評価される。
@@ -710,14 +711,16 @@ mod tests {
         assert_eq!(waits, vec![kind("1p").index(), kind("1s").index()]);
     }
 
-    /// 4枚見えている牌は待ちに含めない。
+    /// 自分で4枚持っている牌は待ちに含めない。
     #[test]
     fn a_tile_already_held_four_times_is_not_a_wait() {
-        // 1p を4枚持っている状態では 1p は和了牌になりえない
-        let hand = counts("1111p234567m99s");
-        assert!(!waiting_tiles(&hand, 0)
-            .iter()
-            .any(|k| *k == kind("1p")));
+        // 234m 567m 111p 999s の4面子＋余った 1p の単騎形（13枚）。
+        // 形の上では 1p 待ちだが、4枚とも自分の手にあるので和了牌になりえない。
+        let hand = counts("234567m1111p999s");
+        assert!(
+            waiting_tiles(&hand, 0).is_empty(),
+            "残り0枚の牌を待ちとして返した"
+        );
     }
 }
 ```
@@ -939,9 +942,7 @@ mod tests {
 
     #[test]
     fn chi_lists_every_way_to_form_a_run() {
-        // 3p を鳴く。手に 12p / 24p / 45p があるので3通り。
-        let hand = parse_hand("124 5p").unwrap();
-        let _ = hand;
+        // 3p を鳴く。1245p からは 123p / 234p / 345p の3通りが作れる。
         let hand = parse_hand("1245p").unwrap();
         let candidates = chi_candidates(&hand, parse_tile("3p").unwrap());
         assert_eq!(notation_of(&candidates), vec!["12p", "24p", "45p"]);
@@ -949,9 +950,11 @@ mod tests {
 
     #[test]
     fn chi_does_not_cross_suits() {
-        let hand = parse_hand("89m12p").unwrap();
-        assert!(chi_candidates(&hand, parse_tile("1p").unwrap()).is_empty() == false);
-        // 9m と 1p は繋がらない
+        // 1p を含む順子は 123p だけ。2p3p が揃っていれば鳴ける。
+        let hand = parse_hand("89m23p").unwrap();
+        assert!(!chi_candidates(&hand, parse_tile("1p").unwrap()).is_empty());
+
+        // 89m があっても 9m と 1p は繋がらない。
         let hand = parse_hand("89m").unwrap();
         assert!(chi_candidates(&hand, parse_tile("1p").unwrap()).is_empty());
     }
