@@ -1,0 +1,1374 @@
+# Wave 2a: mahjong-engine の部品 実装計画
+
+> **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
+
+**Goal:** 局の進行に必要な部品を、進行そのものとは切り離して作る。山・反応ウィンドウ・局の状態・時間計算・不変条件の5つを、それぞれ単体で検証できる形にする。
+
+**Architecture:** すべて決定的。乱数はシードから、時間は引数から受け取る。進行のステートマシン（`round.rs` / `match_flow.rs`）は**この計画では触らない**。Wave 2b が担当する。
+
+**Tech Stack:** Rust 1.97.1 / edition 2021 / `protocol` と `mahjong-core` に依存、`sha2` を追加
+
+**設計仕様:** `docs/superpowers/specs/2026-08-08-real-mahjong-design.md`
+**作業規約:** `AGENTS.md`
+
+## Global Constraints
+
+- **編集してよいのは次のみ**
+  - `crates/mahjong-engine/src/wall.rs`
+  - `crates/mahjong-engine/src/reaction.rs`
+  - `crates/mahjong-engine/src/state.rs`
+  - `crates/mahjong-engine/src/timing.rs`（新規作成。`state.rs` から `#[path]` で読み込む）
+  - `crates/mahjong-engine/src/invariant.rs`
+  - `crates/mahjong-engine/Cargo.toml`（`sha2` の追加のみ）
+- **`lib.rs` / `round.rs` / `match_flow.rs` を編集しない。** 後者2つは Wave 2b の所有である
+- `crates/protocol` と `crates/mahjong-core` は凍結済み。**編集も追加もしない。**足りなければ実装を止めて報告する
+- **乱数を直接使わない。** `rand` を足さず、シードから決定的に生成する
+- **時刻を直接読まない。** `Instant::now()` を呼ばず、`now_ms: u64` を引数で受け取る
+- `Ruleset` に存在する値をハードコードしない。**`Ruleset` に無いルール定数**（リーチ棒の1000点など）は、このクレート内に名前付き定数として置き、根拠をコメントに書く
+- 完了条件は `cargo test --workspace` / `cargo clippy --all-targets -- -D warnings` / `cargo fmt --check` がすべて通ること
+
+## `lib.rs` を編集せずに新しいモジュールを足す
+
+`lib.rs` は Wave 0 で凍結済みで `timing` を宣言していない。`state.rs` の先頭に次を書いて読み込む。
+
+```rust
+#[path = "timing.rs"]
+mod timing;
+pub use timing::{charge_bank, deadline_for, lead_in_of, remaining_for_event};
+```
+
+これで `crate::state::deadline_for` として参照できる。`lib.rs` に手を入れる必要はない。
+
+## タスクの依存関係
+
+```
+1 wall ─────┐
+2 reaction ─┼─→ 5 invariant
+3 timing ───┤
+4 state ────┘
+```
+
+Task 1〜4 は互いに独立で、**並行して実装できる**。Task 5 は 1・2・4 の型を使う。
+
+---
+
+### Task 1: 決定的な山
+
+**Files:**
+- Modify: `crates/mahjong-engine/src/wall.rs`
+- Modify: `crates/mahjong-engine/Cargo.toml`
+
+**Interfaces:**
+- Produces:
+  - `pub struct Seed([u8; 32])` — `new(bytes)`, `from_hex(&str) -> Option<Seed>`, `to_hex() -> String`, `commitment() -> String`
+  - `pub struct Wall` — `new(&Seed, &Ruleset)`, `draw() -> Option<Tile>`, `draw_replacement() -> Option<Tile>`, `reveal_dora() -> Option<Tile>`, `live_remaining() -> u8`, `dora_indicators() -> &[Tile]`, `ura_indicators() -> &[Tile]`, `all_tiles() -> impl Iterator<Item = Tile>`
+  - 検証用: `dora_positions() -> Vec<usize>`, `ura_positions() -> Vec<usize>`, `replacement_positions() -> Vec<usize>`
+
+**王牌の配置を固定する。** 嶺上を引くと生牌の末尾が1枚減るが、**ドラ表示牌の位置は動かさない**。動かすと既に開示した裏ドラと重複する。
+
+136枚のうち生牌は `0..122`、王牌は `122..136` とし、次のように割り当てる。
+
+| 位置 | 用途 |
+|---|---|
+| `122, 124, 126, 128, 130` | ドラ表示牌（5枚） |
+| `123, 125, 127, 129, 131` | 裏ドラ表示牌（5枚） |
+| `132, 133, 134, 135` | 嶺上牌（4枚） |
+
+- [ ] **Step 1: sha2 を追加する**
+
+```bash
+cargo add --package mahjong-engine sha2
+```
+
+- [ ] **Step 2: 失敗するテストを書く**
+
+`crates/mahjong-engine/src/wall.rs` の末尾に置く。
+
+```rust
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use protocol::ruleset::{MatchLength, Ruleset};
+    use protocol::tile::TileKind;
+    use std::collections::HashSet;
+
+    fn rules() -> Ruleset {
+        Ruleset::kin_no_ma(MatchLength::Hanchan)
+    }
+
+    fn seed(byte: u8) -> Seed {
+        Seed::from_hex(&format!("{byte:02x}").repeat(32)).expect("hex")
+    }
+
+    #[test]
+    fn a_wall_holds_every_tile_exactly_four_times() {
+        let wall = Wall::new(&seed(1), &rules());
+        let mut counts = [0u8; TileKind::COUNT];
+        for tile in wall.all_tiles() {
+            counts[tile.kind().index() as usize] += 1;
+        }
+        assert!(counts.iter().all(|c| *c == 4), "34種が4枚ずつでない");
+    }
+
+    #[test]
+    fn a_wall_holds_exactly_one_hundred_and_thirty_six_tiles() {
+        assert_eq!(Wall::new(&seed(1), &rules()).all_tiles().count(), 136);
+    }
+
+    #[test]
+    fn exactly_three_tiles_are_red() {
+        let wall = Wall::new(&seed(2), &rules());
+        let mut reds: Vec<u8> = wall
+            .all_tiles()
+            .filter(|t| t.is_red())
+            .map(|t| t.kind().index())
+            .collect();
+        reds.sort();
+        assert_eq!(reds, vec![4, 13, 22], "赤は 5m/5p/5s の各1枚");
+    }
+
+    #[test]
+    fn the_same_seed_always_produces_the_same_wall() {
+        let a: Vec<u8> = Wall::new(&seed(7), &rules())
+            .all_tiles()
+            .map(|t| t.encoded())
+            .collect();
+        let b: Vec<u8> = Wall::new(&seed(7), &rules())
+            .all_tiles()
+            .map(|t| t.encoded())
+            .collect();
+        assert_eq!(a, b);
+    }
+
+    #[test]
+    fn different_seeds_produce_different_walls() {
+        let a: Vec<u8> = Wall::new(&seed(1), &rules())
+            .all_tiles()
+            .map(|t| t.encoded())
+            .collect();
+        let b: Vec<u8> = Wall::new(&seed(2), &rules())
+            .all_tiles()
+            .map(|t| t.encoded())
+            .collect();
+        assert_ne!(a, b);
+    }
+
+    /// シャッフル方式を変えると過去の牌譜が再現できなくなる。
+    /// 固定シードに対する並びのハッシュを凍結し、変更を検出する。
+    #[test]
+    fn a_fixed_seed_matches_its_golden_vector() {
+        use sha2::{Digest, Sha256};
+        let encoded: Vec<u8> = Wall::new(&seed(0xAB), &rules())
+            .all_tiles()
+            .map(|t| t.encoded())
+            .collect();
+        assert_eq!(encoded.len(), 136);
+        let digest: String = Sha256::digest(&encoded)
+            .iter()
+            .map(|b| format!("{b:02x}"))
+            .collect();
+        // 初回実装時に実際の値へ書き換える。以後この値を変更してはならない。
+        assert_eq!(digest, "GOLDEN_VECTOR_TO_BE_FILLED_ON_FIRST_RUN");
+    }
+
+    #[test]
+    fn one_hundred_and_twenty_two_tiles_can_be_drawn() {
+        let mut wall = Wall::new(&seed(3), &rules());
+        assert_eq!(wall.live_remaining(), 122);
+        let mut drawn = 0;
+        while wall.draw().is_some() {
+            drawn += 1;
+        }
+        assert_eq!(drawn, 122);
+        assert_eq!(wall.live_remaining(), 0);
+    }
+
+    #[test]
+    fn a_replacement_draw_shortens_the_live_wall() {
+        let mut wall = Wall::new(&seed(4), &rules());
+        let before = wall.live_remaining();
+        assert!(wall.draw_replacement().is_some());
+        assert_eq!(wall.live_remaining(), before - 1);
+    }
+
+    #[test]
+    fn only_four_replacements_are_available() {
+        let mut wall = Wall::new(&seed(5), &rules());
+        for _ in 0..4 {
+            assert!(wall.draw_replacement().is_some());
+        }
+        assert!(wall.draw_replacement().is_none());
+    }
+
+    #[test]
+    fn dora_starts_with_one_and_can_reveal_up_to_five() {
+        let mut wall = Wall::new(&seed(6), &rules());
+        assert_eq!(wall.dora_indicators().len(), 1);
+        assert_eq!(wall.ura_indicators().len(), 1);
+        for _ in 0..4 {
+            assert!(wall.reveal_dora().is_some());
+        }
+        assert_eq!(wall.dora_indicators().len(), 5);
+        assert_eq!(wall.ura_indicators().len(), 5);
+        assert!(wall.reveal_dora().is_none());
+    }
+
+    /// 嶺上を引いてもドラ表示牌の位置は動かない。
+    /// 動かすと既に開示した裏ドラと重複する。
+    #[test]
+    fn the_dead_wall_positions_never_overlap() {
+        let mut wall = Wall::new(&seed(6), &rules());
+        for _ in 0..4 {
+            wall.draw_replacement();
+            wall.reveal_dora();
+        }
+
+        let mut positions = Vec::new();
+        positions.extend(wall.dora_positions());
+        positions.extend(wall.ura_positions());
+        positions.extend(wall.replacement_positions());
+
+        let unique: HashSet<usize> = positions.iter().copied().collect();
+        assert_eq!(unique.len(), positions.len(), "位置が重複した: {positions:?}");
+        assert_eq!(unique.len(), 14, "王牌はちょうど14枚");
+        assert!(unique.iter().all(|p| (122..136).contains(p)), "王牌の範囲外");
+    }
+
+    /// 嶺上を引く前後でドラ表示牌そのものが変わらない。
+    #[test]
+    fn a_replacement_draw_does_not_change_the_revealed_dora() {
+        let mut wall = Wall::new(&seed(8), &rules());
+        let before: Vec<u8> = wall.dora_indicators().iter().map(|t| t.encoded()).collect();
+        wall.draw_replacement();
+        let after: Vec<u8> = wall.dora_indicators().iter().map(|t| t.encoded()).collect();
+        assert_eq!(before, after);
+    }
+
+    #[test]
+    fn a_seed_commits_to_itself() {
+        let s = seed(9);
+        assert_eq!(s.commitment().len(), 64, "SHA-256 の hex は64文字");
+        assert_eq!(
+            Seed::from_hex(&s.to_hex()).unwrap().commitment(),
+            s.commitment()
+        );
+        assert_ne!(seed(10).commitment(), s.commitment());
+    }
+
+    #[test]
+    fn malformed_hex_is_rejected() {
+        assert!(Seed::from_hex("00").is_none(), "長さが足りない");
+        assert!(Seed::from_hex(&"zz".repeat(32)).is_none(), "16進でない");
+    }
+}
+```
+
+- [ ] **Step 3: テストが失敗することを確認する**
+
+Run: `cargo test --package mahjong-engine wall`
+Expected: コンパイルエラー
+
+- [ ] **Step 4: 実装を書く**
+
+```rust
+//! 山の生成と管理。
+//!
+//! 乱数はシードから決定的に作る。`rand` を使わないのは、クレートの版が
+//! 変わっても同じシードから同じ山が出ることを保証するためである。
+//! これが崩れると牌譜の再現とシードコミットメントの検算が壊れる。
+
+use protocol::ruleset::Ruleset;
+use protocol::tile::{Tile, TileKind};
+use sha2::{Digest, Sha256};
+
+/// 山を決める32バイトの種。局開始時に永続化し、対局終了後に開示する。
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub struct Seed([u8; 32]);
+
+impl Seed {
+    pub fn new(bytes: [u8; 32]) -> Self {
+        Seed(bytes)
+    }
+
+    pub fn from_hex(hex: &str) -> Option<Self> {
+        if hex.len() != 64 {
+            return None;
+        }
+        let mut bytes = [0u8; 32];
+        for (index, chunk) in hex.as_bytes().chunks(2).enumerate() {
+            let text = std::str::from_utf8(chunk).ok()?;
+            bytes[index] = u8::from_str_radix(text, 16).ok()?;
+        }
+        Some(Seed(bytes))
+    }
+
+    pub fn to_hex(&self) -> String {
+        self.0.iter().map(|b| format!("{b:02x}")).collect()
+    }
+
+    /// 局開始時に配るハッシュ。開示後にプレイヤーがこれと照合する。
+    pub fn commitment(&self) -> String {
+        Sha256::digest(self.0)
+            .iter()
+            .map(|b| format!("{b:02x}"))
+            .collect()
+    }
+}
+
+/// splitmix64。実装が短く、版によって挙動が変わらない。
+struct Rng(u64);
+
+impl Rng {
+    fn from_seed(seed: &Seed) -> Self {
+        let mut state = 0u64;
+        for (index, byte) in seed.0.iter().enumerate() {
+            state ^= (*byte as u64) << ((index % 8) * 8);
+            state = state.rotate_left(7);
+        }
+        Rng(state | 1)
+    }
+
+    fn next(&mut self) -> u64 {
+        self.0 = self.0.wrapping_add(0x9E37_79B9_7F4A_7C15);
+        let mut z = self.0;
+        z = (z ^ (z >> 30)).wrapping_mul(0xBF58_476D_1CE4_E5B9);
+        z = (z ^ (z >> 27)).wrapping_mul(0x94D0_49BB_1331_11EB);
+        z ^ (z >> 31)
+    }
+
+    fn below(&mut self, bound: usize) -> usize {
+        (self.next() % bound as u64) as usize
+    }
+}
+
+const TOTAL: usize = 136;
+/// 生牌の終わり。ここから先が王牌14枚。
+const DEAD_WALL_START: usize = 122;
+const MAX_REPLACEMENTS: usize = 4;
+const MAX_DORA: usize = 5;
+
+pub struct Wall {
+    tiles: Vec<Tile>,
+    /// 次にツモる位置。
+    next: usize,
+    /// ツモれる牌の終わり。嶺上を引くたび1つ手前へ下がる。
+    live_end: usize,
+    replacements_taken: usize,
+    dora_revealed: usize,
+}
+
+impl Wall {
+    pub fn new(seed: &Seed, rules: &Ruleset) -> Self {
+        let mut tiles = Vec::with_capacity(TOTAL);
+        for index in 0..TileKind::COUNT as u8 {
+            for _ in 0..4 {
+                tiles.push(Tile::from_kind(TileKind::from_index(index).expect("範囲内")));
+            }
+        }
+
+        // 赤ドラ。5m/5p/5s を1枚ずつ置き換える。
+        if rules.red_dora_count > 0 {
+            for (kind_index, red_encoded) in [(4u8, 34u8), (13, 35), (22, 36)] {
+                let position = tiles
+                    .iter()
+                    .position(|t| t.kind().index() == kind_index && !t.is_red())
+                    .expect("該当牌がある");
+                tiles[position] = Tile::from_encoded(red_encoded).expect("赤ドラは範囲内");
+            }
+        }
+
+        let mut rng = Rng::from_seed(seed);
+        for i in (1..tiles.len()).rev() {
+            let j = rng.below(i + 1);
+            tiles.swap(i, j);
+        }
+
+        Wall {
+            tiles,
+            next: 0,
+            live_end: DEAD_WALL_START,
+            replacements_taken: 0,
+            dora_revealed: 1,
+        }
+    }
+
+    pub fn all_tiles(&self) -> impl Iterator<Item = Tile> + '_ {
+        self.tiles.iter().copied()
+    }
+
+    pub fn live_remaining(&self) -> u8 {
+        (self.live_end - self.next) as u8
+    }
+
+    pub fn draw(&mut self) -> Option<Tile> {
+        if self.next >= self.live_end {
+            return None;
+        }
+        let tile = self.tiles[self.next];
+        self.next += 1;
+        Some(tile)
+    }
+
+    /// 嶺上牌。引くたびに生牌の末尾が1枚減る。
+    pub fn draw_replacement(&mut self) -> Option<Tile> {
+        if self.replacements_taken >= MAX_REPLACEMENTS {
+            return None;
+        }
+        let position = self.replacement_positions()[self.replacements_taken];
+        self.replacements_taken += 1;
+        self.live_end -= 1;
+        Some(self.tiles[position])
+    }
+
+    pub fn reveal_dora(&mut self) -> Option<Tile> {
+        if self.dora_revealed >= MAX_DORA {
+            return None;
+        }
+        self.dora_revealed += 1;
+        self.dora_indicators().last().copied()
+    }
+
+    pub fn dora_indicators(&self) -> &[Tile] {
+        // 位置は固定なので、開示済みの枚数だけ切り出せばよい。
+        // 実装では Vec を持たず、都度スライスを作る。
+        &self.dora_cache()[..self.dora_revealed]
+    }
+
+    pub fn ura_indicators(&self) -> &[Tile] {
+        &self.ura_cache()[..self.dora_revealed]
+    }
+
+    /// ドラ表示牌の位置。**`live_end` に依存させない。**
+    pub fn dora_positions(&self) -> Vec<usize> {
+        (0..self.dora_revealed)
+            .map(|i| DEAD_WALL_START + i * 2)
+            .collect()
+    }
+
+    pub fn ura_positions(&self) -> Vec<usize> {
+        (0..self.dora_revealed)
+            .map(|i| DEAD_WALL_START + i * 2 + 1)
+            .collect()
+    }
+
+    pub fn replacement_positions(&self) -> Vec<usize> {
+        (0..MAX_REPLACEMENTS)
+            .map(|i| DEAD_WALL_START + MAX_DORA * 2 + i)
+            .collect()
+    }
+}
+```
+
+`dora_cache` / `ura_cache` はスライスを返す都合上そのままでは書けない。
+**`dora: Vec<Tile>` と `ura: Vec<Tile>` を構造体に持ち、`new` で5枚ずつ埋め、
+`dora_revealed` の枚数だけ返す**形にする。位置の計算は上の `*_positions` を使う。
+
+- [ ] **Step 5: テストが通ることを確認する**
+
+Run: `cargo test --package mahjong-engine wall`
+Expected: 13テスト PASS
+
+`a_fixed_seed_matches_its_golden_vector` は最初に落ちる。**実際に出力された
+ハッシュを読み取ってテストへ書き込み、以後変更しない。**
+
+- [ ] **Step 6: コミット**
+
+```bash
+git add crates/mahjong-engine
+git commit -m "feat(engine): シードから決定的に作る山を実装"
+```
+
+---
+
+### Task 2: 反応ウィンドウの解決
+
+**Files:**
+- Modify: `crates/mahjong-engine/src/reaction.rs`
+
+**Interfaces:**
+- Produces:
+  - `pub enum Priority { Pass, Chi, Pon, Ron }`（宣言順が優先度。`PartialOrd, Ord` を導出）
+  - `pub enum WindowKind { Discard, Chankan }`
+  - `pub struct ReactionWindow` — `open(id, kind, from, tile, candidates, opened_at_ms, deadline_ms)`, `respond(seat, response) -> Result<(), Rejection>`, `resolve(now_ms, min_wait_ms) -> Outcome`, `id()`, `kind()`, `non_ron_ties() -> Vec<Seat>`
+  - `pub enum Outcome { Pending, Ron(Vec<Seat>), Call { seat: Seat, response: CallResponse }, PassAll }`
+  - `pub enum Rejection { NotACandidate, AlreadyResponded, NotOffered, IsTheDiscarder }`
+
+**解決の規則（仕様 6.4）:**
+
+1. `now_ms < opened_at_ms + min_wait_ms` なら、全員が答えていても `Pending`
+2. 確定している最高優先度を `best` とする
+3. 未応答者のうち `best` **以上**を出せる者がいれば `Pending`（締切前のみ）
+4. それ以外は確定。ロンが最高優先なら**ロンした全員**を席順で返す
+5. 締切を過ぎた未応答はパスとして扱う
+
+- [ ] **Step 1: 失敗するテストを書く**
+
+```rust
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use protocol::command::{ActionOption, CallResponse};
+    use protocol::notation::parse_tile;
+    use protocol::seat::Seat;
+
+    const MIN_WAIT: u32 = 350;
+
+    fn ron_only() -> Vec<ActionOption> {
+        vec![ActionOption::Ron]
+    }
+
+    fn pon_only() -> Vec<ActionOption> {
+        vec![ActionOption::Pon { candidates: vec![] }]
+    }
+
+    fn chi_only() -> Vec<ActionOption> {
+        vec![ActionOption::Chi { candidates: vec![] }]
+    }
+
+    fn window(candidates: [Vec<ActionOption>; 4]) -> ReactionWindow {
+        ReactionWindow::open(
+            1,
+            WindowKind::Discard,
+            Seat::new(0),
+            parse_tile("3p").unwrap(),
+            candidates,
+            0,
+            5_000,
+        )
+    }
+
+    fn pon_response() -> CallResponse {
+        CallResponse::Pon {
+            tiles: [parse_tile("3p").unwrap(); 2],
+        }
+    }
+
+    fn chi_response() -> CallResponse {
+        CallResponse::Chi {
+            tiles: [parse_tile("2p").unwrap(), parse_tile("4p").unwrap()],
+        }
+    }
+
+    /// 全員が答えても最低待機の前は確定しない。
+    /// 鳴ける者がいない局面と間の長さを揃え、情報を漏らさないため。
+    #[test]
+    fn nothing_resolves_before_the_minimum_wait() {
+        let mut w = window([vec![], vec![], chi_only(), vec![]]);
+        w.respond(Seat::new(2), CallResponse::Pass).unwrap();
+        assert_eq!(w.resolve(349, MIN_WAIT), Outcome::Pending);
+        assert_eq!(w.resolve(350, MIN_WAIT), Outcome::PassAll);
+    }
+
+    #[test]
+    fn a_window_with_no_candidates_passes_after_the_wait() {
+        let w = window([vec![], vec![], vec![], vec![]]);
+        assert_eq!(w.resolve(349, MIN_WAIT), Outcome::Pending);
+        assert_eq!(w.resolve(350, MIN_WAIT), Outcome::PassAll);
+    }
+
+    /// ポンが確定すれば、チーしか出せない未応答者は待たない。
+    #[test]
+    fn a_pon_resolves_without_waiting_for_a_chi_candidate() {
+        let mut w = window([vec![], pon_only(), vec![], chi_only()]);
+        w.respond(Seat::new(1), pon_response()).unwrap();
+        match w.resolve(400, MIN_WAIT) {
+            Outcome::Call { seat, .. } => assert_eq!(seat, Seat::new(1)),
+            other => panic!("ポンで確定するはず: {other:?}"),
+        }
+    }
+
+    /// チーが答えても、ポンできる未応答者がいれば待つ。
+    #[test]
+    fn a_chi_waits_for_a_pending_pon_candidate() {
+        let mut w = window([vec![], pon_only(), vec![], chi_only()]);
+        w.respond(Seat::new(3), chi_response()).unwrap();
+        assert_eq!(w.resolve(400, MIN_WAIT), Outcome::Pending);
+    }
+
+    /// ポンがパスすれば、チーが確定する。
+    #[test]
+    fn a_chi_resolves_once_the_pon_candidate_passes() {
+        let mut w = window([vec![], pon_only(), vec![], chi_only()]);
+        w.respond(Seat::new(3), chi_response()).unwrap();
+        w.respond(Seat::new(1), CallResponse::Pass).unwrap();
+        match w.resolve(400, MIN_WAIT) {
+            Outcome::Call { seat, .. } => assert_eq!(seat, Seat::new(3)),
+            other => panic!("チーで確定するはず: {other:?}"),
+        }
+    }
+
+    /// ロンが1つ確定しても、ロン可能な未応答者がいれば待つ。
+    /// ここを「より上」にするとダブロンが原理的に成立しなくなる。
+    #[test]
+    fn a_ron_waits_for_other_ron_candidates() {
+        let mut w = window([vec![], ron_only(), ron_only(), vec![]]);
+        w.respond(Seat::new(1), CallResponse::Ron).unwrap();
+        assert_eq!(w.resolve(400, MIN_WAIT), Outcome::Pending);
+
+        w.respond(Seat::new(2), CallResponse::Ron).unwrap();
+        assert_eq!(
+            w.resolve(400, MIN_WAIT),
+            Outcome::Ron(vec![Seat::new(1), Seat::new(2)])
+        );
+    }
+
+    /// もう一方がパスすれば、単独のロンで確定する。
+    #[test]
+    fn a_single_ron_resolves_once_the_other_candidate_passes() {
+        let mut w = window([vec![], ron_only(), ron_only(), vec![]]);
+        w.respond(Seat::new(1), CallResponse::Ron).unwrap();
+        w.respond(Seat::new(2), CallResponse::Pass).unwrap();
+        assert_eq!(w.resolve(400, MIN_WAIT), Outcome::Ron(vec![Seat::new(1)]));
+    }
+
+    /// 3人がロンすれば全員を返す。三家和にするかは呼び出し側が決める。
+    #[test]
+    fn three_rons_are_all_reported() {
+        let mut w = window([vec![], ron_only(), ron_only(), ron_only()]);
+        for seat in [1u8, 2, 3] {
+            w.respond(Seat::new(seat), CallResponse::Ron).unwrap();
+        }
+        assert_eq!(
+            w.resolve(400, MIN_WAIT),
+            Outcome::Ron(vec![Seat::new(1), Seat::new(2), Seat::new(3)])
+        );
+    }
+
+    /// ロンは席順で返す。ダブロンの供託と本場の割り当てが決定的になる。
+    #[test]
+    fn rons_are_reported_in_seat_order() {
+        let mut w = window([vec![], ron_only(), ron_only(), ron_only()]);
+        for seat in [3u8, 1, 2] {
+            w.respond(Seat::new(seat), CallResponse::Ron).unwrap();
+        }
+        assert_eq!(
+            w.resolve(400, MIN_WAIT),
+            Outcome::Ron(vec![Seat::new(1), Seat::new(2), Seat::new(3)])
+        );
+    }
+
+    #[test]
+    fn the_deadline_turns_silence_into_a_pass() {
+        let w = window([vec![], pon_only(), vec![], vec![]]);
+        assert_eq!(w.resolve(400, MIN_WAIT), Outcome::Pending);
+        assert_eq!(w.resolve(5_001, MIN_WAIT), Outcome::PassAll);
+    }
+
+    /// 締切を過ぎても、既に答えた鳴きは有効である。
+    #[test]
+    fn the_deadline_keeps_an_answer_that_already_arrived() {
+        let mut w = window([vec![], pon_only(), vec![], chi_only()]);
+        w.respond(Seat::new(1), pon_response()).unwrap();
+        match w.resolve(5_001, MIN_WAIT) {
+            Outcome::Call { seat, .. } => assert_eq!(seat, Seat::new(1)),
+            other => panic!("ポンが残るはず: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn a_seat_without_candidates_cannot_respond() {
+        let mut w = window([vec![], pon_only(), vec![], vec![]]);
+        assert!(matches!(
+            w.respond(Seat::new(2), CallResponse::Ron),
+            Err(Rejection::NotACandidate)
+        ));
+    }
+
+    #[test]
+    fn the_discarder_cannot_respond_to_their_own_discard() {
+        let mut w = window([ron_only(), vec![], vec![], vec![]]);
+        assert!(matches!(
+            w.respond(Seat::new(0), CallResponse::Ron),
+            Err(Rejection::IsTheDiscarder)
+        ));
+    }
+
+    #[test]
+    fn responding_twice_is_rejected() {
+        let mut w = window([vec![], pon_only(), vec![], vec![]]);
+        w.respond(Seat::new(1), CallResponse::Pass).unwrap();
+        assert!(matches!(
+            w.respond(Seat::new(1), CallResponse::Pass),
+            Err(Rejection::AlreadyResponded)
+        ));
+    }
+
+    #[test]
+    fn a_response_outside_the_offered_options_is_rejected() {
+        let mut w = window([vec![], chi_only(), vec![], vec![]]);
+        assert!(matches!(
+            w.respond(Seat::new(1), CallResponse::Ron),
+            Err(Rejection::NotOffered)
+        ));
+    }
+
+    /// パスは候補を持つ席なら常に許す。
+    #[test]
+    fn passing_is_always_allowed_for_a_candidate() {
+        let mut w = window([vec![], chi_only(), vec![], vec![]]);
+        assert!(w.respond(Seat::new(1), CallResponse::Pass).is_ok());
+    }
+
+    /// 槍槓のウィンドウはロンだけを受け付ける。
+    #[test]
+    fn a_chankan_window_only_offers_ron() {
+        let w = ReactionWindow::open(
+            2,
+            WindowKind::Chankan,
+            Seat::new(0),
+            parse_tile("5s").unwrap(),
+            [vec![], ron_only(), vec![], vec![]],
+            0,
+            5_000,
+        );
+        assert_eq!(w.kind(), WindowKind::Chankan);
+    }
+
+    /// 非ロンの同順位は牌の枚数上ありえない。
+    /// 2人がポンするには各自2枚＋捨て牌1枚で5枚必要だが、牌は1種4枚しかない。
+    /// ポンと明槓の競合も6枚必要で成立しない。席順ロジックは書かず検査で守る。
+    #[test]
+    fn non_ron_ties_never_occur() {
+        let mut w = window([vec![], pon_only(), vec![], chi_only()]);
+        w.respond(Seat::new(1), pon_response()).unwrap();
+        w.respond(Seat::new(3), chi_response()).unwrap();
+        assert!(w.non_ron_ties().is_empty(), "同順位の非ロン競合が現れた");
+    }
+}
+```
+
+- [ ] **Step 2: テストが失敗することを確認する**
+
+Run: `cargo test --package mahjong-engine reaction`
+Expected: コンパイルエラー
+
+- [ ] **Step 3: 実装を書く**
+
+要点は3つ。
+
+1. `resolve` は `&self` で状態を変えない純粋関数にする
+2. 最低待機は「全員答えても待つ」。飛ばすと間の長さから情報が漏れる
+3. 未応答者が出しうる最高優先度は、その席へ**提示した候補**から決まる
+
+`non_ron_ties` は「ロン以外で同じ優先度の応答が2つ以上あるか」を返す。
+空でなければ呼び出し側が `debug_assert!` で落とす。
+
+- [ ] **Step 4: テストが通ることを確認する**
+
+Run: `cargo test --package mahjong-engine reaction`
+Expected: 18テスト PASS
+
+- [ ] **Step 5: コミット**
+
+```bash
+git add crates/mahjong-engine
+git commit -m "feat(engine): 反応ウィンドウの早期確定を実装"
+```
+
+---
+
+### Task 3: 時間の計算
+
+**Files:**
+- Create: `crates/mahjong-engine/src/timing.rs`
+
+このファイルは Task 4 の `state.rs` から `#[path]` で読み込む。**単体では
+モジュール木に載らないため、テストは `state.rs` 経由で走る。**
+
+**Interfaces:**
+- Produces:
+  - `pub fn lead_in_of(events: &[Event]) -> u32`
+  - `pub fn deadline_for(rules: &Ruleset, now_ms: u64, bank_remaining_ms: u32, lead_in_ms: u32) -> u64`
+  - `pub fn charge_bank(rules: &Ruleset, bank_remaining_ms: u32, elapsed_ms: u64, lead_in_ms: u32) -> u32`
+  - `pub fn remaining_for_event(absolute_deadline: u64, now_ms: u64) -> u32`
+
+**課金式（仕様 6.2.2）:**
+
+```
+思考に使った時間 = max(0, 実時間 − lead_in − 通信猶予)
+引き落とし       = max(0, 思考に使った時間 − 基準思考時間)
+```
+
+**通信猶予を引くのを忘れない。** 引かないと、基準時間内に答えても
+500ms がバンクから減る。
+
+- [ ] **Step 1: 失敗するテストを書く**
+
+`crates/mahjong-engine/src/timing.rs` の末尾に置く。
+
+```rust
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use protocol::event::{DiscardManner, DrawSource, Event};
+    use protocol::meld::MeldKind;
+    use protocol::notation::parse_tile;
+    use protocol::ruleset::{MatchLength, Ruleset};
+    use protocol::seat::Seat;
+
+    fn rules() -> Ruleset {
+        Ruleset::kin_no_ma(MatchLength::Hanchan)
+    }
+
+    /// 槓の演出は宣言が持ち、成立は0。
+    /// KanDeclared 1100 + Call 0 + DoraReveal 800 + Draw 250 + Discard 350 = 2500
+    #[test]
+    fn lead_in_counts_a_kan_animation_once() {
+        let events = vec![
+            Event::KanDeclared {
+                seat: Seat::new(1),
+                kind: MeldKind::Kakan,
+                tile: parse_tile("5s").unwrap(),
+            },
+            Event::Call {
+                seat: Seat::new(1),
+                from: Seat::new(1),
+                kind: MeldKind::Kakan,
+                tiles: vec![parse_tile("5s").unwrap()],
+            },
+            Event::DoraReveal {
+                indicator: parse_tile("1z").unwrap(),
+            },
+            Event::Draw {
+                seat: Seat::new(1),
+                tile: parse_tile("2m").unwrap(),
+                source: DrawSource::DeadWall,
+                wall_remaining: 60,
+            },
+            Event::Discard {
+                seat: Seat::new(1),
+                tile: parse_tile("1m").unwrap(),
+                manner: DiscardManner::Tsumogiri,
+            },
+        ];
+        assert_eq!(lead_in_of(&events), 2_500);
+    }
+
+    #[test]
+    fn an_empty_event_list_has_no_lead_in() {
+        assert_eq!(lead_in_of(&[]), 0);
+    }
+
+    #[test]
+    fn the_deadline_pushes_back_by_the_lead_in() {
+        let plain = deadline_for(&rules(), 10_000, 20_000, 0);
+        assert_eq!(plain, 10_000 + 5_000 + 20_000 + 500);
+        assert_eq!(deadline_for(&rules(), 10_000, 20_000, 1_800), plain + 1_800);
+    }
+
+    #[test]
+    fn an_empty_bank_leaves_only_the_base_time() {
+        assert_eq!(deadline_for(&rules(), 0, 0, 0), 5_500);
+    }
+
+    #[test]
+    fn answering_within_the_base_time_costs_nothing() {
+        assert_eq!(charge_bank(&rules(), 20_000, 4_000, 0), 20_000);
+        assert_eq!(charge_bank(&rules(), 20_000, 5_000, 0), 20_000);
+    }
+
+    /// 通信猶予はバンクから引かない。基準時間ちょうど＋猶予でも減らない。
+    #[test]
+    fn the_network_grace_is_not_charged() {
+        assert_eq!(charge_bank(&rules(), 20_000, 5_500, 0), 20_000);
+        assert_eq!(charge_bank(&rules(), 20_000, 5_501, 0), 19_999);
+    }
+
+    /// 演出を見ていた時間も課金しない。
+    /// 実時間 8000 − 演出 1800 − 猶予 500 = 思考 5700。超過は 700。
+    #[test]
+    fn the_lead_in_is_not_charged() {
+        assert_eq!(charge_bank(&rules(), 20_000, 8_000, 1_800), 19_300);
+    }
+
+    /// 実時間 8000 − 猶予 500 = 思考 7500。超過は 2500。
+    #[test]
+    fn overtime_comes_out_of_the_bank() {
+        assert_eq!(charge_bank(&rules(), 20_000, 8_000, 0), 17_500);
+    }
+
+    #[test]
+    fn the_bank_never_goes_below_zero() {
+        assert_eq!(charge_bank(&rules(), 1_000, 30_000, 0), 0);
+    }
+
+    /// イベントへ載せる残り時間は要求発行時点からの相対値。
+    #[test]
+    fn the_event_carries_a_relative_deadline() {
+        assert_eq!(remaining_for_event(35_500, 10_000), 25_500);
+        assert_eq!(remaining_for_event(10_000, 10_000), 0);
+        assert_eq!(remaining_for_event(9_000, 10_000), 0, "既に過ぎていたら0");
+    }
+}
+```
+
+- [ ] **Step 2〜4: 実装・検証・コミット**
+
+Run: `cargo test --package mahjong-engine timing`（Task 4 完了後に走る）
+
+```bash
+git commit -m "feat(engine): 締切とバンクの計算を実装"
+```
+
+---
+
+### Task 4: 局の状態
+
+**Files:**
+- Modify: `crates/mahjong-engine/src/state.rs`
+
+**先頭に `timing` の読み込みを書く。**
+
+```rust
+#[path = "timing.rs"]
+mod timing;
+pub use timing::{charge_bank, deadline_for, lead_in_of, remaining_for_event};
+```
+
+**Interfaces:**
+- Produces:
+  - `pub struct Discarded { pub tile: Tile, pub manner: DiscardManner, pub called_by: Option<Seat>, pub riichi_declaration: bool }`
+  - `pub struct RiichiState { pub step: RiichiStep, pub declared_at_turn: u32, pub ippatsu: bool, pub double: bool }`
+  - `pub struct PendingKan { pub seat: Seat, pub kind: MeldKind, pub tile: Tile }`
+  - `pub struct SeatState { ... }`
+  - `pub struct RoundState { ... }`
+  - `RoundState::new(rules, round, dealer, honba, riichi_sticks, scores, seed) -> Self`
+  - `RoundState::seat(&self, Seat) -> &SeatState` / `seat_mut`
+  - `RoundState::hand_counts(&self, Seat) -> HandCounts`
+  - `RoundState::is_menzen(&self, Seat) -> bool`
+  - `RoundState::seat_wind(&self, Seat) -> Wind`
+  - `RoundState::begin_turn(&mut self, Seat)` — 同巡内フリテンを解除する
+  - `RoundState::hand_context(&self, Seat, win_type: WinType) -> HandContext`
+
+**`HandContext` を組み立てるのに必要な状態を、ここで漏れなく持つ。**
+
+| `HandContext` の項目 | 由来 |
+|---|---|
+| `win_type` | 引数で受け取る |
+| `seat_wind` | `seat_wind(seat)` |
+| `round_wind` | `round.wind` |
+| `riichi` | `seat.riichi` が `Some` かつ `step == Accepted` |
+| `double_riichi` | 同上かつ `double == true` |
+| `ippatsu` | `seat.riichi` の `ippatsu` |
+| `rinshan` | `last_draw_source == DeadWall` かつ ツモ和了 |
+| `chankan` | `pending_kan.is_some()` かつ ロン和了 |
+| `haitei` | `wall.live_remaining() == 0` かつ ツモ和了 |
+| `houtei` | `wall.live_remaining() == 0` かつ ロン和了 |
+| `tenhou` | 親 かつ `draw_count[seat] == 1` かつ `!any_call_made` |
+| `chiihou` | 子 かつ `draw_count[seat] == 1` かつ `!any_call_made` |
+| `dora_indicators` | `wall.dora_indicators()` |
+| `ura_indicators` | リーチ成立済みなら `wall.ura_indicators()`、でなければ空 |
+
+**保持する状態:**
+
+```rust
+pub struct SeatState {
+    pub hand: Vec<Tile>,
+    pub melds: Vec<Meld>,
+    pub river: Vec<Discarded>,
+    pub riichi: Option<RiichiState>,
+    pub think_bank_ms: u32,
+    /// 同巡内フリテン。自分のツモで解除される。
+    pub passed_this_turn: Vec<TileKind>,
+    /// リーチ後にロンを見逃した待ち。**局の終わりまで解除されない。**
+    pub permanent_furiten: Vec<TileKind>,
+    /// 自分の捨て牌がすべて幺九牌で、一度も鳴かれていないか（流し満貫）。
+    pub nagashi_alive: bool,
+}
+
+pub struct RoundState {
+    pub rules: Ruleset,
+    pub round: Round,
+    pub dealer: Seat,
+    pub honba: u8,
+    pub riichi_sticks: u8,
+    pub scores: [i32; 4],
+    pub wall: Wall,
+    pub seats: [SeatState; 4],
+    /// 直前のツモがどこから来たか。嶺上開花の判定に使う。
+    pub last_draw_source: DrawSource,
+    /// 各席が何回ツモしたか。天和・地和の判定に使う。
+    pub draw_count: [u32; 4],
+    /// 局を通して誰か1人でも鳴いたか。
+    pub any_call_made: bool,
+    /// 槍槓の受付中かどうか。
+    pub pending_kan: Option<PendingKan>,
+    /// 席ごとの確定した槓の数。四開槓の判定に使う。
+    pub kan_count: [u8; 4],
+    /// 1巡目に切られた風牌。四風連打の判定に使う。
+    pub first_turn_winds: Vec<TileKind>,
+}
+```
+
+**リーチ棒は1000点。** `Ruleset` にこの値は無いため、このクレート内に
+名前付き定数として置く。
+
+```rust
+/// リーチ宣言時に供託する点数。リーチ麻雀では普遍の値であり、
+/// Ruleset に設定項目として存在しない。
+pub const RIICHI_STICK: i32 = 1_000;
+```
+
+- [ ] **Step 1: 失敗するテストを書く**
+
+```rust
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::wall::Seed;
+    use protocol::notation::parse_hand;
+    use protocol::ruleset::{MatchLength, Ruleset};
+    use protocol::seat::{Round, Seat, Wind};
+    use protocol::tile::TileKind;
+
+    fn fresh() -> RoundState {
+        RoundState::new(
+            Ruleset::kin_no_ma(MatchLength::Hanchan),
+            Round {
+                wind: Wind::East,
+                number: 1,
+            },
+            Seat::new(0),
+            0,
+            0,
+            [25_000; 4],
+            &Seed::from_hex(&"11".repeat(32)).unwrap(),
+        )
+    }
+
+    #[test]
+    fn every_seat_starts_with_thirteen_tiles() {
+        let state = fresh();
+        for seat in Seat::ALL {
+            assert_eq!(state.seat(seat).hand.len(), 13);
+        }
+    }
+
+    /// 122 − 13×4 = 70
+    #[test]
+    fn the_wall_loses_exactly_the_dealt_tiles() {
+        assert_eq!(fresh().wall.live_remaining(), 70);
+    }
+
+    #[test]
+    fn seat_winds_follow_the_dealer() {
+        let state = fresh();
+        assert_eq!(state.seat_wind(Seat::new(0)), Wind::East);
+        assert_eq!(state.seat_wind(Seat::new(1)), Wind::South);
+        assert_eq!(state.seat_wind(Seat::new(2)), Wind::West);
+        assert_eq!(state.seat_wind(Seat::new(3)), Wind::North);
+    }
+
+    /// 親が席2なら、席2が東で席3が南。
+    #[test]
+    fn seat_winds_rotate_with_a_different_dealer() {
+        let state = RoundState::new(
+            Ruleset::kin_no_ma(MatchLength::Hanchan),
+            Round {
+                wind: Wind::East,
+                number: 3,
+            },
+            Seat::new(2),
+            0,
+            0,
+            [25_000; 4],
+            &Seed::from_hex(&"22".repeat(32)).unwrap(),
+        );
+        assert_eq!(state.seat_wind(Seat::new(2)), Wind::East);
+        assert_eq!(state.seat_wind(Seat::new(3)), Wind::South);
+        assert_eq!(state.seat_wind(Seat::new(0)), Wind::West);
+    }
+
+    #[test]
+    fn a_hand_with_no_melds_is_menzen() {
+        assert!(fresh().is_menzen(Seat::new(0)));
+    }
+
+    #[test]
+    fn every_seat_starts_with_a_full_think_bank() {
+        let state = fresh();
+        for seat in Seat::ALL {
+            assert_eq!(state.seat(seat).think_bank_ms, 20_000);
+        }
+    }
+
+    #[test]
+    fn hand_counts_ignore_red_fives() {
+        let mut state = fresh();
+        state.seat_mut(Seat::new(0)).hand = parse_hand("0p5p").unwrap();
+        let counts = state.hand_counts(Seat::new(0));
+        assert_eq!(counts.get(TileKind::from_index(13).unwrap()), 2);
+    }
+
+    /// リーチ後の見逃しは局の終わりまで解除されない。
+    /// 同巡内フリテンだけが自分のツモで消える。
+    #[test]
+    fn permanent_furiten_survives_the_next_draw() {
+        let mut state = fresh();
+        let seat = Seat::new(0);
+        let kind = protocol::notation::parse_tile("3p").unwrap().kind();
+        state.seat_mut(seat).passed_this_turn.push(kind);
+        state.seat_mut(seat).permanent_furiten.push(kind);
+
+        state.begin_turn(seat);
+        assert!(
+            state.seat(seat).passed_this_turn.is_empty(),
+            "同巡内は解除される"
+        );
+        assert_eq!(
+            state.seat(seat).permanent_furiten,
+            vec![kind],
+            "リーチ後の見逃しは残る"
+        );
+    }
+
+    #[test]
+    fn a_fresh_round_has_no_calls_and_no_kans() {
+        let state = fresh();
+        assert!(!state.any_call_made);
+        assert_eq!(state.kan_count, [0; 4]);
+        assert!(state.pending_kan.is_none());
+        assert!(state.first_turn_winds.is_empty());
+    }
+
+    #[test]
+    fn every_seat_starts_eligible_for_nagashi() {
+        let state = fresh();
+        for seat in Seat::ALL {
+            assert!(state.seat(seat).nagashi_alive);
+        }
+    }
+
+    /// 状況役がすべて偽の文脈を作れる。
+    #[test]
+    fn a_plain_hand_context_has_no_situational_yaku() {
+        let state = fresh();
+        let ctx = state.hand_context(Seat::new(1), WinType::Ron);
+        assert!(!ctx.riichi);
+        assert!(!ctx.ippatsu);
+        assert!(!ctx.rinshan);
+        assert!(!ctx.chankan);
+        assert!(!ctx.haitei);
+        assert!(!ctx.houtei);
+        assert!(!ctx.tenhou);
+        assert!(!ctx.chiihou);
+        assert_eq!(ctx.seat_wind, Wind::South);
+        assert_eq!(ctx.round_wind, Wind::East);
+    }
+
+    /// 親の第一ツモは天和の条件を満たす。
+    #[test]
+    fn the_dealers_first_draw_qualifies_for_tenhou() {
+        let mut state = fresh();
+        state.draw_count[0] = 1;
+        let ctx = state.hand_context(Seat::new(0), WinType::Tsumo);
+        assert!(ctx.tenhou);
+        assert!(!ctx.chiihou);
+    }
+
+    /// 誰かが鳴いていれば天和・地和は成立しない。
+    #[test]
+    fn a_call_disqualifies_tenhou_and_chiihou() {
+        let mut state = fresh();
+        state.draw_count[0] = 1;
+        state.any_call_made = true;
+        assert!(!state.hand_context(Seat::new(0), WinType::Tsumo).tenhou);
+    }
+
+    /// 嶺上からのツモは rinshan が立つ。
+    #[test]
+    fn a_dead_wall_draw_sets_rinshan() {
+        let mut state = fresh();
+        state.last_draw_source = DrawSource::DeadWall;
+        assert!(state.hand_context(Seat::new(1), WinType::Tsumo).rinshan);
+        // ロンでは立たない
+        assert!(!state.hand_context(Seat::new(1), WinType::Ron).rinshan);
+    }
+
+    /// 槍槓の受付中のロンは chankan が立つ。
+    #[test]
+    fn a_pending_kan_sets_chankan_on_a_ron() {
+        let mut state = fresh();
+        state.pending_kan = Some(PendingKan {
+            seat: Seat::new(0),
+            kind: protocol::meld::MeldKind::Kakan,
+            tile: protocol::notation::parse_tile("5s").unwrap(),
+        });
+        assert!(state.hand_context(Seat::new(1), WinType::Ron).chankan);
+        assert!(!state.hand_context(Seat::new(1), WinType::Tsumo).chankan);
+    }
+
+    /// 裏ドラはリーチが成立している席にだけ渡す。
+    #[test]
+    fn ura_indicators_are_only_given_to_a_riichi_seat() {
+        let mut state = fresh();
+        assert!(state
+            .hand_context(Seat::new(1), WinType::Ron)
+            .ura_indicators
+            .is_empty());
+
+        state.seat_mut(Seat::new(1)).riichi = Some(RiichiState {
+            step: protocol::event::RiichiStep::Accepted,
+            declared_at_turn: 3,
+            ippatsu: false,
+            double: false,
+        });
+        assert!(!state
+            .hand_context(Seat::new(1), WinType::Ron)
+            .ura_indicators
+            .is_empty());
+    }
+
+    /// 宣言しただけで成立していないリーチは、役にもならず裏ドラも見られない。
+    #[test]
+    fn a_declared_but_unaccepted_riichi_is_not_yet_a_yaku() {
+        let mut state = fresh();
+        state.seat_mut(Seat::new(1)).riichi = Some(RiichiState {
+            step: protocol::event::RiichiStep::Declare,
+            declared_at_turn: 3,
+            ippatsu: true,
+            double: false,
+        });
+        let ctx = state.hand_context(Seat::new(1), WinType::Ron);
+        assert!(!ctx.riichi);
+        assert!(ctx.ura_indicators.is_empty());
+    }
+}
+```
+
+- [ ] **Step 2〜5: 実装・検証・コミット**
+
+Run: `cargo test --package mahjong-engine state`
+Expected: 16テスト PASS（`timing` の10テストも同時に走る）
+
+```bash
+git commit -m "feat(engine): 局の状態と HandContext の組み立てを実装"
+```
+
+---
+
+### Task 5: 不変条件
+
+**Files:**
+- Modify: `crates/mahjong-engine/src/invariant.rs`
+
+**Interfaces:**
+- Produces:
+  - `pub fn assert_tiles_conserved(state: &RoundState)`
+  - `pub fn assert_scores_conserved(before: &[i32; 4], after: &[i32; 4], sticks_delta: i32)`
+  - `pub fn assert_no_simultaneous_non_ron(window: &ReactionWindow)`
+
+- [ ] **Step 1: 失敗するテストを書く**
+
+```rust
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::state::RoundState;
+    use crate::wall::Seed;
+    use protocol::ruleset::{MatchLength, Ruleset};
+    use protocol::seat::{Round, Seat, Wind};
+
+    fn fresh() -> RoundState {
+        RoundState::new(
+            Ruleset::kin_no_ma(MatchLength::Hanchan),
+            Round {
+                wind: Wind::East,
+                number: 1,
+            },
+            Seat::new(0),
+            0,
+            0,
+            [25_000; 4],
+            &Seed::from_hex(&"33".repeat(32)).unwrap(),
+        )
+    }
+
+    #[test]
+    fn a_fresh_round_conserves_every_tile() {
+        assert_tiles_conserved(&fresh());
+    }
+
+    #[test]
+    #[should_panic(expected = "136")]
+    fn a_missing_tile_is_caught() {
+        let mut state = fresh();
+        state.seat_mut(Seat::new(0)).hand.pop();
+        assert_tiles_conserved(&state);
+    }
+
+    #[test]
+    #[should_panic(expected = "136")]
+    fn a_duplicated_tile_is_caught() {
+        let mut state = fresh();
+        let extra = state.seat(Seat::new(0)).hand[0];
+        state.seat_mut(Seat::new(0)).hand.push(extra);
+        assert_tiles_conserved(&state);
+    }
+
+    /// 点棒は卓の中を移動するだけ。供託の増減を含めて合計は変わらない。
+    #[test]
+    fn scores_and_sticks_balance() {
+        assert_scores_conserved(&[25_000; 4], &[24_000, 26_000, 25_000, 25_000], 0);
+        // リーチ棒が1本出た局面。手元から1000減り、供託が1000増える。
+        assert_scores_conserved(&[25_000; 4], &[24_000, 25_000, 25_000, 25_000], 1_000);
+        // 供託を回収した局面。
+        assert_scores_conserved(&[25_000; 4], &[26_000, 25_000, 25_000, 25_000], -1_000);
+    }
+
+    #[test]
+    #[should_panic(expected = "点棒")]
+    fn a_score_leak_is_caught() {
+        assert_scores_conserved(&[25_000; 4], &[24_000, 25_000, 25_000, 25_000], 0);
+    }
+
+    #[test]
+    #[should_panic(expected = "点棒")]
+    fn a_score_creation_is_caught() {
+        assert_scores_conserved(&[25_000; 4], &[26_000, 25_000, 25_000, 25_000], 0);
+    }
+}
+```
+
+- [ ] **Step 2〜5: 実装・検証・コミット**
+
+`assert_tiles_conserved` は手牌・副露・河・山・王牌を合計して136枚になることを見る。
+panic メッセージに「136」を含める（テストが `expected` で照合するため）。
+
+`assert_scores_conserved` は `after の合計 + sticks_delta == before の合計` を見る。
+panic メッセージに「点棒」を含める。
+
+Run: `cargo test --package mahjong-engine invariant`
+Expected: 6テスト PASS
+
+```bash
+git commit -m "feat(engine): 不変条件の検査を実装"
+```
+
+---
+
+## Wave 2a 完了の判定
+
+- [ ] `cargo test --workspace` が通る
+- [ ] `cargo clippy --all-targets -- -D warnings` が通る
+- [ ] `cargo fmt --check` が通る
+- [ ] 山の golden vector が固定されている（実際のハッシュが埋まっている）
+- [ ] 王牌14枚の位置が重複しない
+- [ ] `HandContext` の全14項目を組み立てられる
+- [ ] `round.rs` / `match_flow.rs` / `lib.rs` を編集していない
+- [ ] `protocol` と `mahjong-core` を編集していない
+- [ ] `rand` を依存に足していない（`sha2` のみ）
+- [ ] `Instant::now()` を呼んでいない
+
+## Wave 2b（局と半荘の進行）へ渡すもの
+
+この計画が作る部品を、Wave 2b が組み合わせて進行させる。
+
+| 部品 | Wave 2b での使われ方 |
+|---|---|
+| `Wall` | 局開始時に生成。ツモ・嶺上・新ドラ |
+| `ReactionWindow` | 打牌後と槓宣言後に開く |
+| `RoundState` | 進行の全状態。`hand_context` で採点へ渡す |
+| `timing::*` | 要求ごとに締切を出し、応答ごとにバンクを引く |
+| `invariant::*` | 全イベントの後で検査する |
+| `RIICHI_STICK` | リーチ成立時の供託 |
