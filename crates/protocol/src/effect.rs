@@ -11,7 +11,8 @@ use crate::meld::MeldKind;
 use crate::ruleset::Ruleset;
 
 /// 局の進行を止める演出の種類。
-#[derive(Clone, Copy, PartialEq, Eq, Debug, Serialize, Deserialize)]
+#[derive(Clone, Copy, PartialEq, Eq, Debug, Serialize, Deserialize, ts_rs::TS)]
+#[ts(export, export_to = "../../../apps/web/src/protocol/")]
 #[serde(rename_all = "snake_case")]
 pub enum EffectKind {
     Draw,

@@ -16,7 +16,8 @@ use crate::ruleset::Ruleset;
 use crate::seat::{Round, Seat};
 use crate::tile::Tile;
 
-#[derive(Clone, PartialEq, Eq, Debug, Serialize, Deserialize)]
+#[derive(Clone, PartialEq, Eq, Debug, Serialize, Deserialize, ts_rs::TS)]
+#[ts(export, export_to = "../../../apps/web/src/protocol/")]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum ClientEvent {
     MatchStart {
@@ -106,7 +107,8 @@ pub enum ClientEvent {
     },
 }
 
-#[derive(Clone, PartialEq, Eq, Debug, Serialize, Deserialize)]
+#[derive(Clone, PartialEq, Eq, Debug, Serialize, Deserialize, ts_rs::TS)]
+#[ts(export, export_to = "../../../apps/web/src/protocol/")]
 pub struct ClientEventEnvelope {
     pub seq: u32,
     pub event: ClientEvent,

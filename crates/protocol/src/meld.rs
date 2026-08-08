@@ -3,7 +3,8 @@ use serde::{Deserialize, Serialize};
 use crate::seat::Seat;
 use crate::tile::Tile;
 
-#[derive(Clone, Copy, PartialEq, Eq, Debug, Serialize, Deserialize)]
+#[derive(Clone, Copy, PartialEq, Eq, Debug, Serialize, Deserialize, ts_rs::TS)]
+#[ts(export, export_to = "../../../apps/web/src/protocol/")]
 #[serde(rename_all = "snake_case")]
 pub enum MeldKind {
     Chi,
@@ -14,7 +15,8 @@ pub enum MeldKind {
 }
 
 /// 副露あるいは暗槓による固定された面子。
-#[derive(Clone, PartialEq, Eq, Debug, Serialize, Deserialize)]
+#[derive(Clone, PartialEq, Eq, Debug, Serialize, Deserialize, ts_rs::TS)]
+#[ts(export, export_to = "../../../apps/web/src/protocol/")]
 pub struct Meld {
     pub kind: MeldKind,
     pub tiles: Vec<Tile>,

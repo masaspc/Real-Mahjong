@@ -1,0 +1,8 @@
+{
+  "name": "real-mahjong",
+  "private": true,
+  "scripts": {
+    "typecheck": "pnpm --recursive typecheck",
+    "build": "pnpm --recursive build"
+  }
+}

@@ -1,7 +1,10 @@
 use serde::{Deserialize, Serialize};
 
 /// 卓上の絶対的な席位置（0..=3）。自風は局と席から導出する。
-#[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Debug, Serialize, Deserialize)]
+#[derive(
+    Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Debug, Serialize, Deserialize, ts_rs::TS,
+)]
+#[ts(export, export_to = "../../../apps/web/src/protocol/")]
 #[serde(transparent)]
 pub struct Seat(u8);
 
@@ -23,7 +26,8 @@ impl Seat {
     }
 }
 
-#[derive(Clone, Copy, PartialEq, Eq, Debug, Serialize, Deserialize)]
+#[derive(Clone, Copy, PartialEq, Eq, Debug, Serialize, Deserialize, ts_rs::TS)]
+#[ts(export, export_to = "../../../apps/web/src/protocol/")]
 pub enum Wind {
     East,
     South,
@@ -32,7 +36,8 @@ pub enum Wind {
 }
 
 /// 東1局なら `Round { wind: Wind::East, number: 1 }`。
-#[derive(Clone, Copy, PartialEq, Eq, Debug, Serialize, Deserialize)]
+#[derive(Clone, Copy, PartialEq, Eq, Debug, Serialize, Deserialize, ts_rs::TS)]
+#[ts(export, export_to = "../../../apps/web/src/protocol/")]
 pub struct Round {
     pub wind: Wind,
     pub number: u8,

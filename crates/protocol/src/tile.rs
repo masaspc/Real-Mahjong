@@ -1,11 +1,15 @@
 use serde::{Deserialize, Serialize};
 
 /// 牌の種類（赤ドラを区別しない34種）。
-#[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Debug, Serialize, Deserialize)]
+#[derive(
+    Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Debug, Serialize, Deserialize, ts_rs::TS,
+)]
+#[ts(export, export_to = "../../../apps/web/src/protocol/")]
 #[serde(transparent)]
 pub struct TileKind(u8);
 
-#[derive(Clone, Copy, PartialEq, Eq, Debug, Serialize, Deserialize)]
+#[derive(Clone, Copy, PartialEq, Eq, Debug, Serialize, Deserialize, ts_rs::TS)]
+#[ts(export, export_to = "../../../apps/web/src/protocol/")]
 pub enum Suit {
     Man,
     Pin,
@@ -52,7 +56,10 @@ impl TileKind {
 }
 
 /// 場に存在する1枚の牌。赤ドラを区別する37値のエンコードを持つ。
-#[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Debug, Serialize, Deserialize)]
+#[derive(
+    Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Debug, Serialize, Deserialize, ts_rs::TS,
+)]
+#[ts(export, export_to = "../../../apps/web/src/protocol/")]
 #[serde(transparent)]
 pub struct Tile(u8);
 

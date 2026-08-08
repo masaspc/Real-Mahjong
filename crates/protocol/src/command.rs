@@ -3,7 +3,8 @@ use serde::{Deserialize, Serialize};
 use crate::tile::{Tile, TileKind};
 
 /// クライアントがサーバへ送れる操作の全て。これ以外は受け付けない。
-#[derive(Clone, PartialEq, Eq, Debug, Serialize, Deserialize)]
+#[derive(Clone, PartialEq, Eq, Debug, Serialize, Deserialize, ts_rs::TS)]
+#[ts(export, export_to = "../../../apps/web/src/protocol/")]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum Command {
     Discard {
@@ -27,7 +28,8 @@ pub enum Command {
 }
 
 /// 反応ウィンドウへの応答。使う手牌が曖昧になりうる鳴きは牌を明示する。
-#[derive(Clone, Copy, PartialEq, Eq, Debug, Serialize, Deserialize)]
+#[derive(Clone, Copy, PartialEq, Eq, Debug, Serialize, Deserialize, ts_rs::TS)]
+#[ts(export, export_to = "../../../apps/web/src/protocol/")]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum CallResponse {
     Pass,
@@ -37,7 +39,8 @@ pub enum CallResponse {
     Ron,
 }
 
-#[derive(Clone, Copy, PartialEq, Eq, Debug, Serialize, Deserialize)]
+#[derive(Clone, Copy, PartialEq, Eq, Debug, Serialize, Deserialize, ts_rs::TS)]
+#[ts(export, export_to = "../../../apps/web/src/protocol/")]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum KanCandidate {
     Ankan { kind: TileKind },
@@ -46,7 +49,8 @@ pub enum KanCandidate {
 }
 
 /// サーバが提示する、その席がいま取れる操作。
-#[derive(Clone, PartialEq, Eq, Debug, Serialize, Deserialize)]
+#[derive(Clone, PartialEq, Eq, Debug, Serialize, Deserialize, ts_rs::TS)]
+#[ts(export, export_to = "../../../apps/web/src/protocol/")]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum ActionOption {
     Discard {

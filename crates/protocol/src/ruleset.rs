@@ -1,13 +1,15 @@
 use serde::{Deserialize, Serialize};
 
-#[derive(Clone, Copy, PartialEq, Eq, Debug, Serialize, Deserialize)]
+#[derive(Clone, Copy, PartialEq, Eq, Debug, Serialize, Deserialize, ts_rs::TS)]
+#[ts(export, export_to = "../../../apps/web/src/protocol/")]
 pub enum MatchLength {
     Tonpuu,
     Hanchan,
 }
 
 /// 対局のルール設定。値の変更がコード変更にならないよう、すべてデータとして持つ。
-#[derive(Clone, Copy, PartialEq, Eq, Debug, Serialize, Deserialize)]
+#[derive(Clone, Copy, PartialEq, Eq, Debug, Serialize, Deserialize, ts_rs::TS)]
+#[ts(export, export_to = "../../../apps/web/src/protocol/")]
 pub struct Ruleset {
     pub length: MatchLength,
     pub start_score: i32,

@@ -9,11 +9,15 @@ use crate::seat::{Round, Seat};
 use crate::tile::Tile;
 use crate::yaku::YakuId;
 
-#[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Debug, Serialize, Deserialize)]
+#[derive(
+    Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Debug, Serialize, Deserialize, ts_rs::TS,
+)]
+#[ts(export, export_to = "../../../apps/web/src/protocol/")]
 #[serde(transparent)]
 pub struct PlayerId(pub u64);
 
-#[derive(Clone, Copy, PartialEq, Eq, Debug, Serialize, Deserialize)]
+#[derive(Clone, Copy, PartialEq, Eq, Debug, Serialize, Deserialize, ts_rs::TS)]
+#[ts(export, export_to = "../../../apps/web/src/protocol/")]
 #[serde(rename_all = "snake_case")]
 pub enum DrawSource {
     Wall,
@@ -22,7 +26,8 @@ pub enum DrawSource {
 
 /// 手出しかツモ切りか。演出と河の表示の双方が必要とするため、
 /// 差分からの逆算ではなくイベント自身が持つ。
-#[derive(Clone, Copy, PartialEq, Eq, Debug, Serialize, Deserialize)]
+#[derive(Clone, Copy, PartialEq, Eq, Debug, Serialize, Deserialize, ts_rs::TS)]
+#[ts(export, export_to = "../../../apps/web/src/protocol/")]
 #[serde(rename_all = "snake_case")]
 pub enum DiscardManner {
     Tedashi,
@@ -31,14 +36,16 @@ pub enum DiscardManner {
 
 /// 宣言（牌を横に倒す）と成立（棒が出て1000点減る）を分ける。
 /// 宣言牌そのものは直後の Discard イベントが運ぶ。
-#[derive(Clone, Copy, PartialEq, Eq, Debug, Serialize, Deserialize)]
+#[derive(Clone, Copy, PartialEq, Eq, Debug, Serialize, Deserialize, ts_rs::TS)]
+#[ts(export, export_to = "../../../apps/web/src/protocol/")]
 #[serde(rename_all = "snake_case")]
 pub enum RiichiStep {
     Declare,
     Accepted,
 }
 
-#[derive(Clone, Copy, PartialEq, Eq, Debug, Serialize, Deserialize)]
+#[derive(Clone, Copy, PartialEq, Eq, Debug, Serialize, Deserialize, ts_rs::TS)]
+#[ts(export, export_to = "../../../apps/web/src/protocol/")]
 #[serde(rename_all = "snake_case")]
 pub enum RyuukyokuKind {
     Exhaustive,
@@ -50,14 +57,16 @@ pub enum RyuukyokuKind {
 }
 
 /// 責任払い（パオ）。大三元・大四喜の確定牌を鳴かせた者が負う。
-#[derive(Clone, Copy, PartialEq, Eq, Debug, Serialize, Deserialize)]
+#[derive(Clone, Copy, PartialEq, Eq, Debug, Serialize, Deserialize, ts_rs::TS)]
+#[ts(export, export_to = "../../../apps/web/src/protocol/")]
 pub struct Liability {
     pub seat: Seat,
     pub yaku: YakuId,
     pub mode: LiabilityMode,
 }
 
-#[derive(Clone, Copy, PartialEq, Eq, Debug, Serialize, Deserialize)]
+#[derive(Clone, Copy, PartialEq, Eq, Debug, Serialize, Deserialize, ts_rs::TS)]
+#[ts(export, export_to = "../../../apps/web/src/protocol/")]
 #[serde(rename_all = "snake_case")]
 pub enum LiabilityMode {
     /// ツモ和了。責任者が全額を負担する。
@@ -68,7 +77,8 @@ pub enum LiabilityMode {
 
 /// 点棒移動の内訳。最終差分だけでは、ダブロン時に供託を誰が取ったか、
 /// 本場をどちらに付けたかを牌譜から復元できないため分けて持つ。
-#[derive(Clone, Copy, PartialEq, Eq, Debug, Serialize, Deserialize)]
+#[derive(Clone, Copy, PartialEq, Eq, Debug, Serialize, Deserialize, ts_rs::TS)]
+#[ts(export, export_to = "../../../apps/web/src/protocol/")]
 pub struct SettlementEntry {
     pub seat: Seat,
     /// 符と翻から決まる素点。
@@ -79,7 +89,8 @@ pub struct SettlementEntry {
     pub liability: i32,
 }
 
-#[derive(Clone, PartialEq, Eq, Debug, Serialize, Deserialize)]
+#[derive(Clone, PartialEq, Eq, Debug, Serialize, Deserialize, ts_rs::TS)]
+#[ts(export, export_to = "../../../apps/web/src/protocol/")]
 pub struct Settlement {
     /// 各席の最終増減。合計は常に0でなければならない。
     pub delta: [i32; 4],
@@ -93,7 +104,8 @@ impl Settlement {
     }
 }
 
-#[derive(Clone, PartialEq, Eq, Debug, Serialize, Deserialize)]
+#[derive(Clone, PartialEq, Eq, Debug, Serialize, Deserialize, ts_rs::TS)]
+#[ts(export, export_to = "../../../apps/web/src/protocol/")]
 pub struct AgariResult {
     pub seat: Seat,
     /// ロンなら放銃者、ツモなら None。
@@ -113,7 +125,8 @@ pub struct AgariResult {
 }
 
 /// 局と本場の進み方が決まった理由。エンジンの判断を牌譜から監査するために残す。
-#[derive(Clone, Copy, PartialEq, Eq, Debug, Serialize, Deserialize)]
+#[derive(Clone, Copy, PartialEq, Eq, Debug, Serialize, Deserialize, ts_rs::TS)]
+#[ts(export, export_to = "../../../apps/web/src/protocol/")]
 #[serde(rename_all = "snake_case")]
 pub enum ContinuationReason {
     DealerWin,
@@ -123,7 +136,8 @@ pub enum ContinuationReason {
     NagashiMangan,
 }
 
-#[derive(Clone, Copy, PartialEq, Eq, Debug, Serialize, Deserialize)]
+#[derive(Clone, Copy, PartialEq, Eq, Debug, Serialize, Deserialize, ts_rs::TS)]
+#[ts(export, export_to = "../../../apps/web/src/protocol/")]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum NextRound {
     Next {
@@ -135,6 +149,10 @@ pub enum NextRound {
     MatchOver,
 }
 
+/// サーバの真実。**TypeScript 型を生成しない。**
+///
+/// クライアント側の言語にこの形を表現する手段を与えないことが、
+/// 視界フィルタの最後の砦になる。CI で `Event.ts` が生成されていないことを検査する。
 #[derive(Clone, PartialEq, Eq, Debug, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum Event {
@@ -230,7 +248,7 @@ pub enum Event {
     },
 }
 
-/// 牌譜と再接続のための連番付きイベント。
+/// 牌譜と再接続のための連番付きイベント。Event と同じく TS 型は生成しない。
 #[derive(Clone, PartialEq, Eq, Debug, Serialize, Deserialize)]
 pub struct EventEnvelope {
     pub seq: u32,

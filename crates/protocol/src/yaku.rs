@@ -1,7 +1,10 @@
 use serde::{Deserialize, Serialize};
 
 /// 成立しうる役とドラの識別子。表示順・翻数は採点側が決める。
-#[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Debug, Serialize, Deserialize)]
+#[derive(
+    Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Debug, Serialize, Deserialize, ts_rs::TS,
+)]
+#[ts(export, export_to = "../../../apps/web/src/protocol/")]
 #[serde(rename_all = "snake_case")]
 pub enum YakuId {
     // 1翻
