@@ -10,7 +10,7 @@ use crate::seat::Seat;
 pub fn project(event: &Event, viewer: Seat) -> Option<ClientEvent> {
     let projected = match event {
         Event::MatchStart { players, rules } => ClientEvent::MatchStart {
-            players: *players,
+            players: players.clone(),
             rules: *rules,
             you: viewer,
         },
@@ -328,7 +328,12 @@ mod tests {
     #[test]
     fn match_start_tells_each_viewer_their_own_seat() {
         let event = Event::MatchStart {
-            players: [PlayerId(10), PlayerId(11), PlayerId(12), PlayerId(13)],
+            players: [
+                PlayerId("p10".to_owned()),
+                PlayerId("p11".to_owned()),
+                PlayerId("p12".to_owned()),
+                PlayerId("p13".to_owned()),
+            ],
             rules: Ruleset::kin_no_ma(MatchLength::Hanchan),
         };
 

@@ -9,12 +9,16 @@ use crate::seat::{Round, Seat};
 use crate::tile::Tile;
 use crate::yaku::YakuId;
 
-#[derive(
-    Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Debug, Serialize, Deserialize, ts_rs::TS,
-)]
+/// プレイヤーの識別子。
+///
+/// 数値ではなく文字列にする。u64 だと JSON 上は数値になり、JavaScript の
+/// `JSON.parse` が安全整数の範囲（2^53）を超えた値を壊す。ID に算術は不要なので、
+/// 文字列にしておけばこの種の事故が原理的に起きず、後から UUID へ移っても
+/// 契約が変わらない。
+#[derive(Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Debug, Serialize, Deserialize, ts_rs::TS)]
 #[ts(export, export_to = "../../../apps/web/src/protocol/")]
 #[serde(transparent)]
-pub struct PlayerId(pub u64);
+pub struct PlayerId(pub String);
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug, Serialize, Deserialize, ts_rs::TS)]
 #[ts(export, export_to = "../../../apps/web/src/protocol/")]
@@ -319,11 +323,26 @@ mod tests {
     #[test]
     fn match_start_carries_the_ruleset() {
         let event = Event::MatchStart {
-            players: [PlayerId(1), PlayerId(2), PlayerId(3), PlayerId(4)],
+            players: [
+                PlayerId("p1".to_owned()),
+                PlayerId("p2".to_owned()),
+                PlayerId("p3".to_owned()),
+                PlayerId("p4".to_owned()),
+            ],
             rules: Ruleset::kin_no_ma(MatchLength::Hanchan),
         };
         let back: Event = serde_json::from_str(&serde_json::to_string(&event).unwrap()).unwrap();
         assert_eq!(event, back);
+    }
+
+    /// ID は JSON 上で文字列になる。数値だと JavaScript 側で
+    /// 安全整数の範囲を超えた値が壊れる。
+    #[test]
+    fn player_id_is_a_string_on_the_wire() {
+        let json = serde_json::to_string(&PlayerId("9007199254740993".to_owned())).unwrap();
+        assert_eq!(json, "\"9007199254740993\"");
+        let back: PlayerId = serde_json::from_str(&json).unwrap();
+        assert_eq!(back.0, "9007199254740993");
     }
 
     /// 点棒は卓の中を移動するだけなので、増減の合計は必ず0になる。
