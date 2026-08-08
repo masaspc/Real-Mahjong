@@ -28,11 +28,7 @@ pub fn detect(form: &WinForm, context: &HandContext) -> Vec<(YakuId, u8)> {
             if pairs.iter().all(|k| k.is_terminal_or_honor()) {
                 found.push((YakuId::Honroutou, 2));
             }
-            flush_yaku(
-                &pairs.iter().copied().collect::<Vec<_>>(),
-                menzen,
-                &mut found,
-            );
+            flush_yaku(pairs, menzen, &mut found);
         }
         // 国士は役満側で扱う。
         WinForm::Kokushi { .. } => {}
