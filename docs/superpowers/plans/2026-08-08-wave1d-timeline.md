@@ -754,10 +754,16 @@ export class EffectPlayer {
 
   push(event: ClientEvent): void {
     const kind = effectOf(event);
+    const wasIdle = this.#queue.length === 0;
     this.#queue.push({
       event,
       durationMs: kind === null ? 0 : effectDurationMs(kind),
     });
+    // 演出の開始は「キューの先頭になった時点」である。update() が
+    // 呼ばれるまで待つと、呼び出し間隔しだいで待ち時間が始まらない。
+    if (wasIdle && this.#startedAt === null) {
+      this.#startedAt = this.#clock.now();
+    }
   }
 
   /** 待ち時間を捨てて、いま溜まっている分をすべて表示する。 */
@@ -784,8 +790,7 @@ export class EffectPlayer {
       return;
     }
 
-    // eslint-disable-next-line no-constant-condition
-    while (true) {
+    for (;;) {
       const head = this.#queue[0];
       if (head === undefined) {
         this.#startedAt = null;
@@ -798,9 +803,8 @@ export class EffectPlayer {
         continue;
       }
 
-      if (this.#startedAt === null) {
-        this.#startedAt = this.#clock.now();
-      }
+      // push で必ず設定されるが、型の上では null を排除しておく。
+      this.#startedAt ??= this.#clock.now();
 
       const elapsed = (this.#clock.now() - this.#startedAt) * this.#rate;
       if (elapsed < head.durationMs) {
