@@ -4,6 +4,7 @@
 //! 実装の各層はこのクレートにのみ依存し、互いには依存しない。
 
 pub mod command;
+pub mod event;
 pub mod meld;
 pub mod notation;
 pub mod ruleset;
