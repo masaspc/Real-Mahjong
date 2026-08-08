@@ -62,7 +62,12 @@ Task 1〜4 は互いに独立で、**並行して実装できる**。Task 5 は 
 - Produces:
   - `pub struct Seed([u8; 32])` — `new(bytes)`, `from_hex(&str) -> Option<Seed>`, `to_hex() -> String`, `commitment() -> String`
   - `pub struct Wall` — `new(&Seed, &Ruleset)`, `draw() -> Option<Tile>`, `draw_replacement() -> Option<Tile>`, `reveal_dora() -> Option<Tile>`, `live_remaining() -> u8`, `dora_indicators() -> &[Tile]`, `ura_indicators() -> &[Tile]`, `all_tiles() -> impl Iterator<Item = Tile>`
+  - `tiles_in_wall() -> impl Iterator<Item = Tile>` — **まだ引かれていない牌だけ**を返す。不変条件の検査に使う
   - 検証用: `dora_positions() -> Vec<usize>`, `ura_positions() -> Vec<usize>`, `replacement_positions() -> Vec<usize>`
+
+**`all_tiles()` と `tiles_in_wall()` を混同しない。** 前者は並びの検証用に
+136枚すべてを返す。後者は「いま山に残っている牌」で、生牌の未取得分と
+嶺上の未取得分の合計である。牌の総数を数えるときは必ず後者を使う。
 
 **王牌の配置を固定する。** 嶺上を引くと生牌の末尾が1枚減るが、**ドラ表示牌の位置は動かさない**。動かすと既に開示した裏ドラと重複する。
 
@@ -168,7 +173,13 @@ mod tests {
             .map(|b| format!("{b:02x}"))
             .collect();
         // 初回実装時に実際の値へ書き換える。以後この値を変更してはならない。
-        assert_eq!(digest, "GOLDEN_VECTOR_TO_BE_FILLED_ON_FIRST_RUN");
+        // この値は計画作成時に splitmix64 と Fisher-Yates を実際に回して求めた。
+        // **変更してはならない。**変わったらシャッフル方式が変わったということであり、
+        // 過去の牌譜が再現できなくなる。
+        assert_eq!(
+            digest,
+            "7b0d5f31b3ded153eeb6a5e7e06f041c14cbb4403d1c8f278b6bd37c912b43c4"
+        );
     }
 
     #[test]
@@ -366,9 +377,12 @@ impl Wall {
             }
         }
 
-        // 赤ドラ。5m/5p/5s を1枚ずつ置き換える。
-        if rules.red_dora_count > 0 {
-            for (kind_index, red_encoded) in [(4u8, 34u8), (13, 35), (22, 36)] {
+        // 赤ドラ。5m/5p/5s の順に、Ruleset が指定した枚数だけ置き換える。
+        {
+            let reds: &[(u8, u8)] = &[(4u8, 34u8), (13, 35), (22, 36)];
+            for (kind_index, red_encoded) in
+                reds.iter().copied().take(rules.red_dora_count as usize)
+            {
                 let position = tiles
                     .iter()
                     .position(|t| t.kind().index() == kind_index && !t.is_red())
@@ -411,7 +425,9 @@ impl Wall {
 
     /// 嶺上牌。引くたびに生牌の末尾が1枚減る。
     pub fn draw_replacement(&mut self) -> Option<Tile> {
-        if self.replacements_taken >= MAX_REPLACEMENTS {
+        // 生牌を引き切っていたら live_end を下げられない。
+        // 下げると live_remaining() が桁溢れする。
+        if self.replacements_taken >= MAX_REPLACEMENTS || self.live_end == self.next {
             return None;
         }
         let position = self.replacement_positions()[self.replacements_taken];
@@ -466,7 +482,7 @@ impl Wall {
 - [ ] **Step 5: テストが通ることを確認する**
 
 Run: `cargo test --package mahjong-engine wall`
-Expected: 13テスト PASS
+Expected: 14テスト PASS
 
 `a_fixed_seed_matches_its_golden_vector` は最初に落ちる。**実際に出力された
 ハッシュを読み取ってテストへ書き込み、以後変更しない。**
@@ -488,6 +504,11 @@ git commit -m "feat(engine): シードから決定的に作る山を実装"
 **Interfaces:**
 - Produces:
   - `pub enum Priority { Pass, Chi, Pon, Ron }`（宣言順が優先度。`PartialOrd, Ord` を導出）
+
+**明槓はポンと同順位である**（仕様 6.4 の「ロン > ポン / 明カン > チー」）。
+`CallResponse::Kan` と `ActionOption::Kan` は `Priority::Pon` へ写す。
+`Priority` に `Kan` を作らないのは、同順位のものを別の値にすると
+比較のたびに読み替えが要り、取り違えの元になるためである。
   - `pub enum WindowKind { Discard, Chankan }`
   - `pub struct ReactionWindow` — `open(id, kind, from, tile, candidates, opened_at_ms, deadline_ms)`, `respond(seat, response) -> Result<(), Rejection>`, `resolve(now_ms, min_wait_ms) -> Outcome`, `id()`, `kind()`, `non_ron_ties() -> Vec<Seat>`
   - `pub enum Outcome { Pending, Ron(Vec<Seat>), Call { seat: Seat, response: CallResponse }, PassAll }`
@@ -724,6 +745,46 @@ mod tests {
         assert_eq!(w.kind(), WindowKind::Chankan);
     }
 
+    /// 明槓はポンと同順位。チーしか出せない席を待たずに確定する。
+    #[test]
+    fn a_minkan_has_the_same_priority_as_a_pon() {
+        let kan_only = vec![ActionOption::Kan { candidates: vec![] }];
+        let mut w = window([vec![], kan_only, vec![], chi_only()]);
+        w.respond(Seat::new(1), CallResponse::Kan).unwrap();
+        match w.resolve(400, MIN_WAIT) {
+            Outcome::Call { seat, .. } => assert_eq!(seat, Seat::new(1)),
+            other => panic!("明槓で確定するはず: {other:?}"),
+        }
+    }
+
+    /// チーが答えても、明槓できる未応答者がいれば待つ。
+    #[test]
+    fn a_chi_waits_for_a_pending_minkan_candidate() {
+        let kan_only = vec![ActionOption::Kan { candidates: vec![] }];
+        let mut w = window([vec![], kan_only, vec![], chi_only()]);
+        w.respond(Seat::new(3), chi_response()).unwrap();
+        assert_eq!(w.resolve(400, MIN_WAIT), Outcome::Pending);
+    }
+
+    /// 槍槓のウィンドウはロン以外の候補を受け付けない。
+    #[test]
+    fn a_chankan_window_rejects_non_ron_candidates() {
+        let mut w = ReactionWindow::open(
+            2,
+            WindowKind::Chankan,
+            Seat::new(0),
+            parse_tile("5s").unwrap(),
+            [vec![], ron_only(), vec![], vec![]],
+            0,
+            5_000,
+        );
+        assert!(matches!(
+            w.respond(Seat::new(1), pon_response()),
+            Err(Rejection::NotOffered)
+        ));
+        assert!(w.respond(Seat::new(1), CallResponse::Ron).is_ok());
+    }
+
     /// 非ロンの同順位は牌の枚数上ありえない。
     /// 2人がポンするには各自2枚＋捨て牌1枚で5枚必要だが、牌は1種4枚しかない。
     /// ポンと明槓の競合も6枚必要で成立しない。席順ロジックは書かず検査で守る。
@@ -756,7 +817,7 @@ Expected: コンパイルエラー
 - [ ] **Step 4: テストが通ることを確認する**
 
 Run: `cargo test --package mahjong-engine reaction`
-Expected: 18テスト PASS
+Expected: 21テスト PASS
 
 - [ ] **Step 5: コミット**
 
@@ -902,9 +963,76 @@ mod tests {
 }
 ```
 
-- [ ] **Step 2〜4: 実装・検証・コミット**
+- [ ] **Step 2: 実装を書く**
+
+```rust
+//! 締切と溜め時間バンクの計算。
+//!
+//! 仕様 6.2.1 と 6.2.2 をそのまま関数にしたもの。状態を持たない。
+
+use protocol::effect::{effect_duration_ms, effect_of};
+use protocol::event::Event;
+use protocol::ruleset::Ruleset;
+
+/// 直前に配信した一連のイベントの演出時間の合計。
+///
+/// 呼び出し側は「前回その席へ RequestAction を送ってから今回まで」に
+/// 絞ったイベント列を渡す。区間の切り出しは進行側（Wave 2b）の責務である。
+pub fn lead_in_of(events: &[Event]) -> u32 {
+    events
+        .iter()
+        .filter_map(effect_of)
+        .map(effect_duration_ms)
+        .sum()
+}
+
+/// 行動要求の絶対締切。演出で思考時間が削られないよう lead_in を加算する。
+pub fn deadline_for(
+    rules: &Ruleset,
+    now_ms: u64,
+    bank_remaining_ms: u32,
+    lead_in_ms: u32,
+) -> u64 {
+    now_ms
+        + rules.base_think_ms as u64
+        + bank_remaining_ms as u64
+        + rules.network_grace_ms as u64
+        + lead_in_ms as u64
+}
+
+/// 応答を受け取ったあとのバンク残量。
+///
+/// **演出を見ていた時間と通信の遅れは課金しない。** 課金すると 6.2 で
+/// 締切を後ろへずらした意味が失われる。
+pub fn charge_bank(
+    rules: &Ruleset,
+    bank_remaining_ms: u32,
+    elapsed_ms: u64,
+    lead_in_ms: u32,
+) -> u32 {
+    let excluded = lead_in_ms as u64 + rules.network_grace_ms as u64;
+    let thinking = elapsed_ms.saturating_sub(excluded);
+    let overtime = thinking.saturating_sub(rules.base_think_ms as u64);
+    bank_remaining_ms.saturating_sub(overtime.min(u32::MAX as u64) as u32)
+}
+
+/// イベントへ載せる残り時間。要求発行時点からの相対値で、既に過ぎていたら 0。
+pub fn remaining_for_event(absolute_deadline: u64, now_ms: u64) -> u32 {
+    let remaining = absolute_deadline.saturating_sub(now_ms);
+    debug_assert!(
+        remaining <= u32::MAX as u64,
+        "締切が u32 に収まらない: {remaining}"
+    );
+    remaining.min(u32::MAX as u64) as u32
+}
+```
+
+- [ ] **Step 3: テストが通ることを確認する**
 
 Run: `cargo test --package mahjong-engine timing`（Task 4 完了後に走る）
+Expected: 10テスト PASS
+
+- [ ] **Step 4: コミット**
 
 ```bash
 git commit -m "feat(engine): 締切とバンクの計算を実装"
@@ -950,12 +1078,12 @@ pub use timing::{charge_bank, deadline_for, lead_in_of, remaining_for_event};
 | `riichi` | `seat.riichi` が `Some` かつ `step == Accepted` |
 | `double_riichi` | 同上かつ `double == true` |
 | `ippatsu` | `seat.riichi` の `ippatsu` |
-| `rinshan` | `last_draw_source == DeadWall` かつ ツモ和了 |
+| `rinshan` | ツモ和了 かつ `last_draw == Some((その席, DeadWall))` |
 | `chankan` | `pending_kan.is_some()` かつ ロン和了 |
 | `haitei` | `wall.live_remaining() == 0` かつ ツモ和了 |
 | `houtei` | `wall.live_remaining() == 0` かつ ロン和了 |
-| `tenhou` | 親 かつ `draw_count[seat] == 1` かつ `!any_call_made` |
-| `chiihou` | 子 かつ `draw_count[seat] == 1` かつ `!any_call_made` |
+| `tenhou` | **ツモ和了** かつ 親 かつ `draw_count[seat] == 1` かつ `!any_call_made` |
+| `chiihou` | **ツモ和了** かつ 子 かつ `draw_count[seat] == 1` かつ `!any_call_made` |
 | `dora_indicators` | `wall.dora_indicators()` |
 | `ura_indicators` | リーチ成立済みなら `wall.ura_indicators()`、でなければ空 |
 
@@ -985,8 +1113,9 @@ pub struct RoundState {
     pub scores: [i32; 4],
     pub wall: Wall,
     pub seats: [SeatState; 4],
-    /// 直前のツモがどこから来たか。嶺上開花の判定に使う。
-    pub last_draw_source: DrawSource,
+    /// 直前のツモを引いた席と、その出どころ。嶺上開花の判定に使う。
+    /// 席を持たせるのは、誰のツモだったかを取り違えないためである。
+    pub last_draw: Option<(Seat, DrawSource)>,
     /// 各席が何回ツモしたか。天和・地和の判定に使う。
     pub draw_count: [u32; 4],
     /// 局を通して誰か1人でも鳴いたか。
@@ -1166,6 +1295,26 @@ mod tests {
         assert!(!ctx.chiihou);
     }
 
+    /// 天和・地和はツモ和了に限る。第一巡のロンでは立たない。
+    #[test]
+    fn tenhou_and_chiihou_require_a_tsumo() {
+        let mut state = fresh();
+        state.draw_count[0] = 1;
+        state.draw_count[1] = 1;
+        assert!(!state.hand_context(Seat::new(0), WinType::Ron).tenhou);
+        assert!(!state.hand_context(Seat::new(1), WinType::Ron).chiihou);
+    }
+
+    /// 子の第一ツモは地和。
+    #[test]
+    fn a_non_dealers_first_draw_qualifies_for_chiihou() {
+        let mut state = fresh();
+        state.draw_count[1] = 1;
+        let ctx = state.hand_context(Seat::new(1), WinType::Tsumo);
+        assert!(ctx.chiihou);
+        assert!(!ctx.tenhou);
+    }
+
     /// 誰かが鳴いていれば天和・地和は成立しない。
     #[test]
     fn a_call_disqualifies_tenhou_and_chiihou() {
@@ -1179,10 +1328,12 @@ mod tests {
     #[test]
     fn a_dead_wall_draw_sets_rinshan() {
         let mut state = fresh();
-        state.last_draw_source = DrawSource::DeadWall;
+        state.last_draw = Some((Seat::new(1), DrawSource::DeadWall));
         assert!(state.hand_context(Seat::new(1), WinType::Tsumo).rinshan);
         // ロンでは立たない
         assert!(!state.hand_context(Seat::new(1), WinType::Ron).rinshan);
+        // 別の席のツモでは立たない
+        assert!(!state.hand_context(Seat::new(2), WinType::Tsumo).rinshan);
     }
 
     /// 槍槓の受付中のロンは chankan が立つ。
@@ -1239,7 +1390,7 @@ mod tests {
 - [ ] **Step 2〜5: 実装・検証・コミット**
 
 Run: `cargo test --package mahjong-engine state`
-Expected: 16テスト PASS（`timing` の10テストも同時に走る）
+Expected: 19テスト PASS（`timing` の10テストも同時に走る）
 
 ```bash
 git commit -m "feat(engine): 局の状態と HandContext の組み立てを実装"
@@ -1332,7 +1483,24 @@ mod tests {
 
 - [ ] **Step 2〜5: 実装・検証・コミット**
 
-`assert_tiles_conserved` は手牌・副露・河・山・王牌を合計して136枚になることを見る。
+**集計規則を先に決める。牌はちょうど1箇所に属する。**
+
+| 場所 | 数える |
+|---|---|
+| 手牌 `SeatState::hand` | すべて |
+| 副露 `SeatState::melds` の `tiles` | すべて |
+| 河 `SeatState::river` | **`called_by.is_none()` のものだけ** |
+| 山 `Wall::tiles_in_wall()` | まだ引かれていない生牌＋未取得の嶺上牌 |
+
+**鳴かれた捨て牌を河から除く**のが要点である。鳴かれた牌は鳴いた者の
+`Meld::tiles` にも入っているため、両方数えると二重計上になる。
+
+同様に **`Wall::all_tiles()` を使わない。** あれは136枚すべてを返すので、
+既に配った牌まで数えてしまう。必ず `tiles_in_wall()` を使う。
+
+配牌直後で検算すると、手牌 13×4 = 52、河 0、副露 0、山 70 + 王牌 14 = 84。
+合計 136 で一致する。
+
 panic メッセージに「136」を含める（テストが `expected` で照合するため）。
 
 `assert_scores_conserved` は `after の合計 + sticks_delta == before の合計` を見る。
