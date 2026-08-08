@@ -414,14 +414,27 @@ mod tests {
         assert_eq!(parse_tile(""), Err(NotationError::ExpectedSingleTile));
     }
 
+    /// 手牌は多重集合であり、to_notation は正規順へ並べ替える。
+    /// したがって往復で保存されるのは牌の集まりであって、並び順ではない。
     #[test]
     fn round_trips_through_notation() {
         for input in ["123456789m", "0m5m", "1112223334445z", "19m19p19s1234567z"] {
-            let tiles = parse_hand(input).unwrap();
+            let mut tiles = parse_hand(input).unwrap();
             let rendered = to_notation(&tiles);
-            let reparsed = parse_hand(&rendered).unwrap();
+            let mut reparsed = parse_hand(&rendered).unwrap();
+            tiles.sort();
+            reparsed.sort();
             assert_eq!(tiles, reparsed, "input={input} rendered={rendered}");
         }
+    }
+
+    /// to_notation は入力の並び順によらず同じ文字列を返す。
+    #[test]
+    fn notation_is_canonical_regardless_of_input_order() {
+        let a = parse_hand("0m5m").unwrap();
+        let b = parse_hand("5m0m").unwrap();
+        assert_eq!(to_notation(&a), to_notation(&b));
+        assert_eq!(to_notation(&a), "50m");
     }
 
     #[test]
