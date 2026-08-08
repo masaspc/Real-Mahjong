@@ -52,10 +52,7 @@ pub fn decompose(hand: &[Tile], melds: &[Meld], win_tile: Tile) -> Vec<WinForm> 
 }
 
 /// 4面子1雀頭に分ける全通り。副露分は面子数に数える。
-fn standard_decompositions(
-    counts: &HandCounts,
-    called: usize,
-) -> Vec<(Vec<Block>, TileKind)> {
+fn standard_decompositions(counts: &HandCounts, called: usize) -> Vec<(Vec<Block>, TileKind)> {
     let needed_sets = 4 - called;
     let mut out = Vec::new();
 
@@ -74,7 +71,8 @@ fn standard_decompositions(
         });
     }
 
-    out.sort_by(|a, b| sort_key(&a.0).cmp(&sort_key(&b.0)));
+    // 同じ分解が雀頭の選び方違いで重複しうるので、正規化して1つにまとめる。
+    out.sort_by_key(|entry| sort_key(&entry.0));
     out.dedup_by(|a, b| sort_key(&a.0) == sort_key(&b.0));
     out
 }
@@ -169,8 +167,10 @@ fn kokushi_shape(counts: &HandCounts, win_kind: TileKind) -> Option<(TileKind, b
         return None;
     }
     let pair = pair?;
-    // 和了牌が対子を作った側なら単騎、そうでなければ十三面待ちだった。
-    Some((pair, pair != win_kind))
+    // 和了牌が対子を作ったなら、和了前は13種すべてを1枚ずつ持っていた
+    // ことになる（＝十三面待ち）。対子が既にあったなら、欠けていた1種を
+    // 待っていた単騎である。
+    Some((pair, pair == win_kind))
 }
 
 fn run_from(kind: TileKind) -> Option<[TileKind; 3]> {
@@ -310,9 +310,9 @@ mod tests {
     #[test]
     fn kokushi_thirteen_wait_is_flagged() {
         let found = forms("19m19p19s1234567z", "1m");
-        let thirteen = found.iter().any(
-            |f| matches!(f, WinForm::Kokushi { thirteen_wait, .. } if *thirteen_wait),
-        );
+        let thirteen = found
+            .iter()
+            .any(|f| matches!(f, WinForm::Kokushi { thirteen_wait, .. } if *thirteen_wait));
         assert!(thirteen, "十三面待ちとして検出されるべき");
     }
 
@@ -320,7 +320,7 @@ mod tests {
     /// 111222333m は「123 123 123」とも「111 222 333」とも読める。
     #[test]
     fn ambiguous_hands_yield_every_decomposition() {
-        let found = forms("111222333m44556s", "4s");
+        let found = forms("111222333m456p4s", "4s");
         let standards: Vec<_> = found
             .iter()
             .filter_map(|f| match f {
