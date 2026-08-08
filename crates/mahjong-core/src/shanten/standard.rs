@@ -19,7 +19,9 @@ fn search(
     has_pair: bool,
     best: &mut i8,
 ) {
-    if sets + partials + i8::from(has_pair) > 5 {
+    // 搭子は完成面子に置き換わる候補なので、両者の合計は4まで。
+    // 雀頭は別枠であり、4面子＋1雀頭を構成する。
+    if sets + partials > 4 {
         return;
     }
     if index >= TileKind::COUNT as u8 {
