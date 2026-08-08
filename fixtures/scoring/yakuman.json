@@ -1,0 +1,29 @@
+[
+  {
+    "id": "kokushi-tanki-ron",
+    "note": "1mを重ねた単騎形。十三面ではないため単倍の役満32000",
+    "concealed": "119m19p19s123456z",
+    "melds": [],
+    "win_tile": "7z",
+    "win_type": "ron",
+    "context": {
+      "seat_wind": "south",
+      "round_wind": "east",
+      "riichi": false,
+      "double_riichi": false,
+      "ippatsu": false,
+      "rinshan": false,
+      "chankan": false,
+      "haitei": false,
+      "houtei": false,
+      "dora_indicators": ["1p"],
+      "ura_indicators": []
+    },
+    "expect": {
+      "yaku": [{ "id": "kokushi_musou", "han": 13 }],
+      "fu": 0,
+      "han": 13,
+      "payment": { "type": "ron", "total": 32000 }
+    }
+  }
+]

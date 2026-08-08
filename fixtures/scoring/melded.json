@@ -1,0 +1,32 @@
+[
+  {
+    "id": "kuitan-pon-chi-ron",
+    "note": "喰いタン。20＋明刻(中張)2＝22→切り上げ30符1翻＝1000。副露ありのロンに門前加符は付かない",
+    "concealed": "88p34678s",
+    "melds": [
+      { "kind": "pon", "tiles": "222m", "from": 2, "called_tile": "2m" },
+      { "kind": "chi", "tiles": "345p", "from": 3, "called_tile": "3p" }
+    ],
+    "win_tile": "5s",
+    "win_type": "ron",
+    "context": {
+      "seat_wind": "south",
+      "round_wind": "east",
+      "riichi": false,
+      "double_riichi": false,
+      "ippatsu": false,
+      "rinshan": false,
+      "chankan": false,
+      "haitei": false,
+      "houtei": false,
+      "dora_indicators": ["1z"],
+      "ura_indicators": []
+    },
+    "expect": {
+      "yaku": [{ "id": "tanyao", "han": 1 }],
+      "fu": 30,
+      "han": 1,
+      "payment": { "type": "ron", "total": 1000 }
+    }
+  }
+]
