@@ -172,7 +172,6 @@ mod tests {
             .iter()
             .map(|b| format!("{b:02x}"))
             .collect();
-        // 初回実装時に実際の値へ書き換える。以後この値を変更してはならない。
         // この値は計画作成時に splitmix64 と Fisher-Yates を実際に回して求めた。
         // **変更してはならない。**変わったらシャッフル方式が変わったということであり、
         // 過去の牌譜が再現できなくなる。
@@ -365,7 +364,25 @@ pub struct Wall {
     /// ツモれる牌の終わり。嶺上を引くたび1つ手前へ下がる。
     live_end: usize,
     replacements_taken: usize,
+    /// 開示済みのドラ表示牌の枚数。1〜5。
     dora_revealed: usize,
+    /// ドラ表示牌5枚。位置は固定なので生成時に確定する。
+    dora: Vec<Tile>,
+    /// 裏ドラ表示牌5枚。
+    ura: Vec<Tile>,
+}
+
+/// ドラ表示牌の位置。`live_end` に依存させない。
+fn dora_position(index: usize) -> usize {
+    DEAD_WALL_START + index * 2
+}
+
+fn ura_position(index: usize) -> usize {
+    DEAD_WALL_START + index * 2 + 1
+}
+
+fn replacement_position(index: usize) -> usize {
+    DEAD_WALL_START + MAX_DORA * 2 + index
 }
 
 impl Wall {
@@ -378,17 +395,14 @@ impl Wall {
         }
 
         // 赤ドラ。5m/5p/5s の順に、Ruleset が指定した枚数だけ置き換える。
-        {
-            let reds: &[(u8, u8)] = &[(4u8, 34u8), (13, 35), (22, 36)];
-            for (kind_index, red_encoded) in
-                reds.iter().copied().take(rules.red_dora_count as usize)
-            {
-                let position = tiles
-                    .iter()
-                    .position(|t| t.kind().index() == kind_index && !t.is_red())
-                    .expect("該当牌がある");
-                tiles[position] = Tile::from_encoded(red_encoded).expect("赤ドラは範囲内");
-            }
+        // 候補は3つしかないため、それより大きい値を指定しても3枚で頭打ちになる。
+        let reds: [(u8, u8); 3] = [(4, 34), (13, 35), (22, 36)];
+        for (kind_index, red_encoded) in reds.iter().copied().take(rules.red_dora_count as usize) {
+            let position = tiles
+                .iter()
+                .position(|t| t.kind().index() == kind_index && !t.is_red())
+                .expect("該当牌がある");
+            tiles[position] = Tile::from_encoded(red_encoded).expect("赤ドラは範囲内");
         }
 
         let mut rng = Rng::from_seed(seed);
@@ -397,17 +411,36 @@ impl Wall {
             tiles.swap(i, j);
         }
 
+        let dora = (0..MAX_DORA).map(|i| tiles[dora_position(i)]).collect();
+        let ura = (0..MAX_DORA).map(|i| tiles[ura_position(i)]).collect();
+
         Wall {
             tiles,
             next: 0,
             live_end: DEAD_WALL_START,
             replacements_taken: 0,
             dora_revealed: 1,
+            dora,
+            ura,
         }
     }
 
+    /// 並びの検証用。**136枚すべて**を返す。牌の総数を数えるのに使わない。
     pub fn all_tiles(&self) -> impl Iterator<Item = Tile> + '_ {
         self.tiles.iter().copied()
+    }
+
+    /// いま山に残っている牌。未取得の生牌と、未取得の嶺上牌。
+    /// ドラ表示牌は開示されていても山に属したままである。
+    pub fn tiles_in_wall(&self) -> impl Iterator<Item = Tile> + '_ {
+        let live = self.tiles[self.next..self.live_end].iter().copied();
+        let dead = (0..MAX_DORA * 2)
+            .map(|i| self.tiles[DEAD_WALL_START + i])
+            .chain(
+                (self.replacements_taken..MAX_REPLACEMENTS)
+                    .map(|i| self.tiles[replacement_position(i)]),
+            );
+        live.chain(dead)
     }
 
     pub fn live_remaining(&self) -> u8 {
@@ -430,10 +463,10 @@ impl Wall {
         if self.replacements_taken >= MAX_REPLACEMENTS || self.live_end == self.next {
             return None;
         }
-        let position = self.replacement_positions()[self.replacements_taken];
+        let tile = self.tiles[replacement_position(self.replacements_taken)];
         self.replacements_taken += 1;
         self.live_end -= 1;
-        Some(self.tiles[position])
+        Some(tile)
     }
 
     pub fn reveal_dora(&mut self) -> Option<Tile> {
@@ -441,43 +474,30 @@ impl Wall {
             return None;
         }
         self.dora_revealed += 1;
-        self.dora_indicators().last().copied()
+        self.dora.get(self.dora_revealed - 1).copied()
     }
 
     pub fn dora_indicators(&self) -> &[Tile] {
-        // 位置は固定なので、開示済みの枚数だけ切り出せばよい。
-        // 実装では Vec を持たず、都度スライスを作る。
-        &self.dora_cache()[..self.dora_revealed]
+        &self.dora[..self.dora_revealed]
     }
 
     pub fn ura_indicators(&self) -> &[Tile] {
-        &self.ura_cache()[..self.dora_revealed]
+        &self.ura[..self.dora_revealed]
     }
 
-    /// ドラ表示牌の位置。**`live_end` に依存させない。**
     pub fn dora_positions(&self) -> Vec<usize> {
-        (0..self.dora_revealed)
-            .map(|i| DEAD_WALL_START + i * 2)
-            .collect()
+        (0..self.dora_revealed).map(dora_position).collect()
     }
 
     pub fn ura_positions(&self) -> Vec<usize> {
-        (0..self.dora_revealed)
-            .map(|i| DEAD_WALL_START + i * 2 + 1)
-            .collect()
+        (0..self.dora_revealed).map(ura_position).collect()
     }
 
     pub fn replacement_positions(&self) -> Vec<usize> {
-        (0..MAX_REPLACEMENTS)
-            .map(|i| DEAD_WALL_START + MAX_DORA * 2 + i)
-            .collect()
+        (0..MAX_REPLACEMENTS).map(replacement_position).collect()
     }
 }
 ```
-
-`dora_cache` / `ura_cache` はスライスを返す都合上そのままでは書けない。
-**`dora: Vec<Tile>` と `ura: Vec<Tile>` を構造体に持ち、`new` で5枚ずつ埋め、
-`dora_revealed` の枚数だけ返す**形にする。位置の計算は上の `*_positions` を使う。
 
 - [ ] **Step 5: テストが通ることを確認する**
 
@@ -805,14 +825,221 @@ Expected: コンパイルエラー
 
 - [ ] **Step 3: 実装を書く**
 
-要点は3つ。
+**`respond` は応答の「種類」が提示済みかだけを見る。** 具体的にどの牌を使うかの
+妥当性は進行側（Wave 2b）が確かめる。ここまで見ると責務が二重になり、
+テストも候補の中身に引きずられる。そのためテストでは `candidates: vec![]` で
+種類だけを表現している。
 
-1. `resolve` は `&self` で状態を変えない純粋関数にする
-2. 最低待機は「全員答えても待つ」。飛ばすと間の長さから情報が漏れる
-3. 未応答者が出しうる最高優先度は、その席へ**提示した候補**から決まる
+```rust
+//! 打牌と槓宣言に対する反応の受付。
+//!
+//! 早期確定の条件は「現在の最高優先度**以上**を出せる未応答者がいなければ確定」。
+//! 「より上」にするとダブロンが原理的に成立しなくなる（仕様 6.4）。
 
-`non_ron_ties` は「ロン以外で同じ優先度の応答が2つ以上あるか」を返す。
-空でなければ呼び出し側が `debug_assert!` で落とす。
+use protocol::command::{ActionOption, CallResponse};
+use protocol::seat::Seat;
+use protocol::tile::Tile;
+
+/// 応答の優先度。宣言順がそのまま順序になる。
+/// **明槓はポンと同順位**なので、専用の値を作らず Pon へ写す。
+#[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Debug)]
+pub enum Priority {
+    Pass,
+    Chi,
+    Pon,
+    Ron,
+}
+
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum WindowKind {
+    /// 打牌への反応。チー・ポン・明槓・ロンを受け付ける。
+    Discard,
+    /// 槓宣言への反応。ロンだけを受け付ける。
+    Chankan,
+}
+
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum Rejection {
+    /// その席に候補を提示していない。
+    NotACandidate,
+    AlreadyResponded,
+    /// 提示していない種類の応答。
+    NotOffered,
+    /// 打牌者自身は応答できない。
+    IsTheDiscarder,
+}
+
+#[derive(Clone, PartialEq, Eq, Debug)]
+pub enum Outcome {
+    Pending,
+    /// ロンした席を席順で返す。3人なら三家和として呼び出し側が流局にする。
+    Ron(Vec<Seat>),
+    Call { seat: Seat, response: CallResponse },
+    PassAll,
+}
+
+fn priority_of_response(response: &CallResponse) -> Priority {
+    match response {
+        CallResponse::Pass => Priority::Pass,
+        CallResponse::Chi { .. } => Priority::Chi,
+        // 明槓はポンと同順位。
+        CallResponse::Pon { .. } | CallResponse::Kan => Priority::Pon,
+        CallResponse::Ron => Priority::Ron,
+    }
+}
+
+fn priority_of_option(option: &ActionOption) -> Priority {
+    match option {
+        ActionOption::Chi { .. } => Priority::Chi,
+        ActionOption::Pon { .. } | ActionOption::Kan { .. } => Priority::Pon,
+        ActionOption::Ron => Priority::Ron,
+        _ => Priority::Pass,
+    }
+}
+
+pub struct ReactionWindow {
+    id: u32,
+    kind: WindowKind,
+    from: Seat,
+    tile: Tile,
+    candidates: [Vec<ActionOption>; 4],
+    responses: [Option<CallResponse>; 4],
+    opened_at_ms: u64,
+    deadline_ms: u64,
+}
+
+impl ReactionWindow {
+    pub fn open(
+        id: u32,
+        kind: WindowKind,
+        from: Seat,
+        tile: Tile,
+        candidates: [Vec<ActionOption>; 4],
+        opened_at_ms: u64,
+        deadline_ms: u64,
+    ) -> Self {
+        ReactionWindow {
+            id,
+            kind,
+            from,
+            tile,
+            candidates,
+            responses: [None, None, None, None],
+            opened_at_ms,
+            deadline_ms,
+        }
+    }
+
+    pub fn id(&self) -> u32 {
+        self.id
+    }
+
+    pub fn kind(&self) -> WindowKind {
+        self.kind
+    }
+
+    pub fn tile(&self) -> Tile {
+        self.tile
+    }
+
+    pub fn from(&self) -> Seat {
+        self.from
+    }
+
+    pub fn respond(&mut self, seat: Seat, response: CallResponse) -> Result<(), Rejection> {
+        if seat == self.from {
+            return Err(Rejection::IsTheDiscarder);
+        }
+        let offered = &self.candidates[seat.index()];
+        if offered.is_empty() {
+            return Err(Rejection::NotACandidate);
+        }
+        if self.responses[seat.index()].is_some() {
+            return Err(Rejection::AlreadyResponded);
+        }
+        // パスは候補を持つ席なら常に許す。
+        if response != CallResponse::Pass {
+            let wanted = priority_of_response(&response);
+            let offered_here = offered.iter().any(|o| priority_of_option(o) == wanted);
+            if !offered_here {
+                return Err(Rejection::NotOffered);
+            }
+        }
+        self.responses[seat.index()] = Some(response);
+        Ok(())
+    }
+
+    /// 状態を変えずに現在の結論を返す。同じ入力からは同じ答えが出る。
+    pub fn resolve(&self, now_ms: u64, min_wait_ms: u32) -> Outcome {
+        // 全員が答えていても最低待機の前は確定しない。
+        // 鳴ける者がいない局面と間の長さを揃え、情報を漏らさないため。
+        if now_ms < self.opened_at_ms + min_wait_ms as u64 {
+            return Outcome::Pending;
+        }
+        let expired = now_ms > self.deadline_ms;
+
+        let best = Seat::ALL
+            .iter()
+            .filter_map(|s| self.responses[s.index()].as_ref())
+            .map(priority_of_response)
+            .max()
+            .unwrap_or(Priority::Pass);
+
+        if !expired {
+            // 未応答者が best 以上を出せるなら待つ。「より上」ではない。
+            let someone_could_match = Seat::ALL.iter().any(|s| {
+                self.responses[s.index()].is_none()
+                    && self.candidates[s.index()]
+                        .iter()
+                        .any(|o| priority_of_option(o) >= best)
+            });
+            if someone_could_match {
+                return Outcome::Pending;
+            }
+        }
+
+        if best == Priority::Ron {
+            let rons: Vec<Seat> = Seat::ALL
+                .iter()
+                .copied()
+                .filter(|s| self.responses[s.index()] == Some(CallResponse::Ron))
+                .collect();
+            return Outcome::Ron(rons);
+        }
+
+        for seat in Seat::ALL {
+            if let Some(response) = self.responses[seat.index()] {
+                if priority_of_response(&response) == best && best != Priority::Pass {
+                    return Outcome::Call { seat, response };
+                }
+            }
+        }
+        Outcome::PassAll
+    }
+
+    /// ロン以外で同じ優先度の応答が2つ以上あるか。
+    /// 牌は1種4枚しかないため起こりえない。起きたら呼び出し側が落とす。
+    pub fn non_ron_ties(&self) -> Vec<Seat> {
+        let mut seen: Option<Priority> = None;
+        let mut ties = Vec::new();
+        for seat in Seat::ALL {
+            let Some(response) = self.responses[seat.index()] else {
+                continue;
+            };
+            let p = priority_of_response(&response);
+            if p == Priority::Pass || p == Priority::Ron {
+                continue;
+            }
+            match seen {
+                Some(previous) if previous == p => ties.push(seat),
+                Some(_) => {}
+                None => seen = Some(p),
+            }
+        }
+        ties
+    }
+}
+```
 
 - [ ] **Step 4: テストが通ることを確認する**
 
@@ -1399,6 +1626,77 @@ Expected: コンパイルエラー
 **1. 配牌は13枚ずつ。** 親の第一ツモは進行側（Wave 2b）が引く。`new` の時点では
 全員13枚で、山は 122 − 52 = 70枚である。
 
+```rust
+/// リーチ宣言時に供託する点数。リーチ麻雀では普遍の値であり、
+/// Ruleset に設定項目として存在しない。
+pub const RIICHI_STICK: i32 = 1_000;
+
+impl RoundState {
+    pub fn new(
+        rules: Ruleset,
+        round: Round,
+        dealer: Seat,
+        honba: u8,
+        riichi_sticks: u8,
+        scores: [i32; 4],
+        seed: &Seed,
+    ) -> Self {
+        let mut wall = Wall::new(seed, &rules);
+        let bank = rules.think_bank_ms;
+
+        let seats = std::array::from_fn(|_| {
+            let hand = (0..13)
+                .map(|_| wall.draw().expect("配牌の分は必ずある"))
+                .collect();
+            SeatState {
+                hand,
+                melds: Vec::new(),
+                river: Vec::new(),
+                riichi: None,
+                think_bank_ms: bank,
+                passed_this_turn: Vec::new(),
+                permanent_furiten: Vec::new(),
+                nagashi_alive: true,
+            }
+        });
+
+        RoundState {
+            rules,
+            round,
+            dealer,
+            honba,
+            riichi_sticks,
+            scores,
+            wall,
+            seats,
+            last_draw: None,
+            draw_count: [0; 4],
+            any_call_made: false,
+            pending_kan: None,
+            kan_count: [0; 4],
+            first_turn_winds: Vec::new(),
+        }
+    }
+
+    pub fn seat(&self, seat: Seat) -> &SeatState {
+        &self.seats[seat.index()]
+    }
+
+    pub fn seat_mut(&mut self, seat: Seat) -> &mut SeatState {
+        &mut self.seats[seat.index()]
+    }
+
+    pub fn hand_counts(&self, seat: Seat) -> HandCounts {
+        HandCounts::from_tiles(&self.seat(seat).hand)
+    }
+
+    /// 暗槓は門前を崩さない。
+    pub fn is_menzen(&self, seat: Seat) -> bool {
+        self.seat(seat).melds.iter().all(|m| m.is_concealed())
+    }
+}
+```
+
 **2. `seat_wind` は親からの距離で決まる。**
 
 ```rust
@@ -1462,7 +1760,7 @@ pub fn begin_turn(&mut self, seat: Seat) {
 - [ ] **Step 4: テストが通ることを確認する**
 
 Run: `cargo test --package mahjong-engine state`
-Expected: 19テスト PASS（`timing` の10テストも同時に走る）
+Expected: `state` 自身の19テストに加え、`state::timing` の10テストも走り計29テスト PASS
 
 - [ ] **Step 5: コミット**
 
