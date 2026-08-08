@@ -103,7 +103,6 @@ Rust は同一クレート内でモジュールを相互に参照できる。迷
 
 **Files:**
 - Modify: `crates/mahjong-core/src/decompose.rs`
-- Modify: `crates/mahjong-core/Cargo.toml`（dev-dependency の追加）
 
 **Interfaces:**
 - Consumes: `protocol::tile::{Tile, TileKind}`、`protocol::meld::Meld`、`crate::hand::HandCounts`、`crate::shapes::{Block, Decomposition, WaitShape}`
@@ -116,15 +115,10 @@ Rust は同一クレート内でモジュールを相互に参照できる。迷
 和了形でなければ空を返す。同じ手が複数通りに分解できる場合はすべて返し、
 どれを採るかは `score.rs` が決める（点数が最大になるものを選ぶ）。
 
-- [ ] **Step 1: dev-dependency を追加する**
+`test-fixtures` は dev-dependency として**既に追加済み**である（Wave 1a と共有する
+`Cargo.toml` の衝突を避けるため、コーディネータが先に入れた）。**`Cargo.toml` を編集しないこと。**
 
-```bash
-cargo add --package mahjong-core --dev test-fixtures --path crates/test-fixtures
-```
-
-（Wave 1a が先に追加済みなら何もしない。）
-
-- [ ] **Step 2: 失敗するテストを書く**
+- [ ] **Step 1: 失敗するテストを書く**
 
 ```rust
 #[cfg(test)]
@@ -282,12 +276,12 @@ mod tests {
 }
 ```
 
-- [ ] **Step 3: テストが失敗することを確認する**
+- [ ] **Step 2: テストが失敗することを確認する**
 
 Run: `cargo test --package mahjong-core decompose`
 Expected: コンパイルエラー
 
-- [ ] **Step 4: 実装を書く**
+- [ ] **Step 3: 実装を書く**
 
 ```rust
 //! 和了形の分解。役判定と符計算はすべてこの出力を入力にする。
@@ -524,12 +518,12 @@ pub fn wait_shape_of(blocks: &[Block], pair: TileKind, win_tile: TileKind) -> Wa
 `Vec<u8>`（`Block` を種類と番号で符号化したもの）に直してから重複を除く。
 `shapes.rs` は編集しないこと。
 
-- [ ] **Step 5: テストが通ることを確認する**
+- [ ] **Step 4: テストが通ることを確認する**
 
 Run: `cargo test --package mahjong-core decompose`
 Expected: 7テスト PASS
 
-- [ ] **Step 6: コミット**
+- [ ] **Step 5: コミット**
 
 ```bash
 git add crates/mahjong-core

@@ -37,19 +37,15 @@
 
 **Files:**
 - Modify: `crates/mahjong-core/src/shanten/chiitoitsu.rs`
-- Modify: `crates/mahjong-core/Cargo.toml`（dev-dependency の追加）
 
 **Interfaces:**
 - Consumes: `mahjong_core::hand::HandCounts`
 - Produces: `pub fn shanten(counts: &HandCounts, melds: u8) -> i8`
 
-- [ ] **Step 1: dev-dependency を追加する**
+`test-fixtures` は dev-dependency として**既に追加済み**である（Wave 1b と共有する
+`Cargo.toml` の衝突を避けるため、コーディネータが先に入れた）。**`Cargo.toml` を編集しないこと。**
 
-```bash
-cargo add --package mahjong-core --dev test-fixtures --path crates/test-fixtures
-```
-
-- [ ] **Step 2: 失敗するテストを書く**
+- [ ] **Step 1: 失敗するテストを書く**
 
 `crates/mahjong-core/src/shanten/chiitoitsu.rs` の末尾に置く:
 
@@ -96,12 +92,12 @@ mod tests {
 }
 ```
 
-- [ ] **Step 3: テストが失敗することを確認する**
+- [ ] **Step 2: テストが失敗することを確認する**
 
 Run: `cargo test --package mahjong-core chiitoitsu`
 Expected: コンパイルエラー（`shanten` が未定義）
 
-- [ ] **Step 4: 実装を書く**
+- [ ] **Step 3: 実装を書く**
 
 `crates/mahjong-core/src/shanten/chiitoitsu.rs` の先頭に置く:
 
@@ -135,12 +131,12 @@ pub fn shanten(counts: &HandCounts, melds: u8) -> i8 {
 }
 ```
 
-- [ ] **Step 5: テストが通ることを確認する**
+- [ ] **Step 4: テストが通ることを確認する**
 
 Run: `cargo test --package mahjong-core chiitoitsu`
 Expected: 5テスト PASS
 
-- [ ] **Step 6: コミット**
+- [ ] **Step 5: コミット**
 
 ```bash
 git add crates/mahjong-core
