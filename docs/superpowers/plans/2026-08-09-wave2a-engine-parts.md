@@ -1387,10 +1387,84 @@ mod tests {
 }
 ```
 
-- [ ] **Step 2〜5: 実装・検証・コミット**
+- [ ] **Step 2: テストが失敗することを確認する**
+
+Run: `cargo test --package mahjong-engine state`
+Expected: コンパイルエラー
+
+- [ ] **Step 3: 実装を書く**
+
+要点は3つ。
+
+**1. 配牌は13枚ずつ。** 親の第一ツモは進行側（Wave 2b）が引く。`new` の時点では
+全員13枚で、山は 122 − 52 = 70枚である。
+
+**2. `seat_wind` は親からの距離で決まる。**
+
+```rust
+pub fn seat_wind(&self, seat: Seat) -> Wind {
+    let offset = (seat.index() + 4 - self.dealer.index()) % 4;
+    match offset {
+        0 => Wind::East,
+        1 => Wind::South,
+        2 => Wind::West,
+        _ => Wind::North,
+    }
+}
+```
+
+**3. `hand_context` は表のとおりに組み立てる。** 状況役の判定を進行側へ
+散らさず、ここに集約する。
+
+```rust
+pub fn hand_context(&self, seat: Seat, win_type: WinType) -> HandContext {
+    let is_tsumo = win_type == WinType::Tsumo;
+    let riichi = self
+        .seat(seat)
+        .riichi
+        .as_ref()
+        .filter(|r| r.step == RiichiStep::Accepted);
+    let exhausted = self.wall.live_remaining() == 0;
+    let first_draw_untouched = self.draw_count[seat.index()] == 1 && !self.any_call_made;
+
+    HandContext {
+        win_type,
+        seat_wind: self.seat_wind(seat),
+        round_wind: self.round.wind,
+        riichi: riichi.is_some(),
+        double_riichi: riichi.map(|r| r.double).unwrap_or(false),
+        ippatsu: riichi.map(|r| r.ippatsu).unwrap_or(false),
+        rinshan: is_tsumo && self.last_draw == Some((seat, DrawSource::DeadWall)),
+        chankan: !is_tsumo && self.pending_kan.is_some(),
+        haitei: is_tsumo && exhausted,
+        houtei: !is_tsumo && exhausted,
+        tenhou: is_tsumo && seat == self.dealer && first_draw_untouched,
+        chiihou: is_tsumo && seat != self.dealer && first_draw_untouched,
+        dora_indicators: self.wall.dora_indicators().to_vec(),
+        // 裏ドラはリーチが成立している席にだけ渡す。
+        ura_indicators: if riichi.is_some() {
+            self.wall.ura_indicators().to_vec()
+        } else {
+            Vec::new()
+        },
+    }
+}
+```
+
+`begin_turn` は同巡内フリテンだけを消す。永続フリテンには触らない。
+
+```rust
+pub fn begin_turn(&mut self, seat: Seat) {
+    self.seats[seat.index()].passed_this_turn.clear();
+}
+```
+
+- [ ] **Step 4: テストが通ることを確認する**
 
 Run: `cargo test --package mahjong-engine state`
 Expected: 19テスト PASS（`timing` の10テストも同時に走る）
+
+- [ ] **Step 5: コミット**
 
 ```bash
 git commit -m "feat(engine): 局の状態と HandContext の組み立てを実装"
@@ -1481,7 +1555,70 @@ mod tests {
 }
 ```
 
-- [ ] **Step 2〜5: 実装・検証・コミット**
+- [ ] **Step 2: テストが失敗することを確認する**
+
+Run: `cargo test --package mahjong-engine invariant`
+Expected: コンパイルエラー
+
+- [ ] **Step 3: 実装を書く**
+
+```rust
+//! エンジンの不変条件。破れていれば即座に落とす。
+//!
+//! 麻雀は牌と点棒が増えも減りもしない閉じた系である。
+//! 進行のどこかで壊れたら、その場で気づけるようにする。
+
+use crate::reaction::ReactionWindow;
+use crate::state::RoundState;
+use protocol::seat::Seat;
+
+/// 牌はちょうど136枚。**牌は1箇所にだけ属する。**
+pub fn assert_tiles_conserved(state: &RoundState) {
+    let mut total = 0usize;
+    for seat in Seat::ALL {
+        let s = state.seat(seat);
+        total += s.hand.len();
+        total += s.melds.iter().map(|m| m.tiles.len()).sum::<usize>();
+        // 鳴かれた牌は鳴いた者の melds に入っている。両方数えると二重計上。
+        total += s.river.iter().filter(|d| d.called_by.is_none()).count();
+    }
+    // all_tiles() は136枚すべてを返すので使わない。
+    total += state.wall.tiles_in_wall().count();
+
+    assert_eq!(total, 136, "牌の総数が136でない: {total}");
+}
+
+/// 点棒は卓の中を移動するだけ。供託の増減を含めて合計は変わらない。
+///
+/// `sticks_delta` は供託の増加量。リーチ棒が1本出れば +1000、
+/// 回収されれば -1000 である。
+pub fn assert_scores_conserved(before: &[i32; 4], after: &[i32; 4], sticks_delta: i32) {
+    let before_total: i32 = before.iter().sum();
+    let after_total: i32 = after.iter().sum();
+    assert_eq!(
+        after_total + sticks_delta,
+        before_total,
+        "点棒の合計が変わった: {before_total} → {after_total}（供託 {sticks_delta:+}）"
+    );
+}
+
+/// 非ロンの同順位が同時に成立していないこと。
+///
+/// 牌は1種4枚しかないため、2人が同じ牌をポンすることも、ポンと明槓が
+/// 競合することも起こりえない（仕様 6.4）。席順で解決するロジックを
+/// 書かない代わりに、発生しないことをここで主張する。
+pub fn assert_no_simultaneous_non_ron(window: &ReactionWindow) {
+    let ties = window.non_ron_ties();
+    assert!(ties.is_empty(), "非ロンの同順位が同時に成立した: {ties:?}");
+}
+```
+
+- [ ] **Step 4: テストが通ることを確認する**
+
+Run: `cargo test --package mahjong-engine invariant`
+Expected: 6テスト PASS
+
+- [ ] **Step 5: コミット**
 
 **集計規則を先に決める。牌はちょうど1箇所に属する。**
 
