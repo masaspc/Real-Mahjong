@@ -3,6 +3,7 @@
 //! イベント・コマンド・視界フィルタ・演出カタログをここで凍結する。
 //! 実装の各層はこのクレートにのみ依存し、互いには依存しない。
 
+pub mod command;
 pub mod meld;
 pub mod notation;
 pub mod ruleset;
