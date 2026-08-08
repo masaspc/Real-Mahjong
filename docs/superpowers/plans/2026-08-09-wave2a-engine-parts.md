@@ -244,8 +244,8 @@ mod tests {
         assert!(unique.iter().all(|p| (122..136).contains(p)), "王牌の範囲外");
     }
 
-    /// 嶺上を引いても、まだ誰の手にも渡っていない牌の数は減らない。
-    /// ツモれなくなるだけで山からは消えないためである。
+    /// 嶺上を引いて山から出るのは、引いたその1枚だけである。
+    /// 生牌の末尾はツモれなくなるが山には残るので、2枚減ってはいけない。
     #[test]
     fn a_replacement_draw_only_moves_one_tile_out_of_the_wall() {
         let mut wall = Wall::new(&seed(11), &rules());
@@ -548,15 +548,15 @@ git commit -m "feat(engine): シードから決定的に作る山を実装"
 **Interfaces:**
 - Produces:
   - `pub enum Priority { Pass, Chi, Pon, Ron }`（宣言順が優先度。`PartialOrd, Ord` を導出）
+  - `pub enum WindowKind { Discard, Chankan }`
+  - `pub struct ReactionWindow` — `open(id, kind, from, tile, candidates, opened_at_ms, deadline_ms)`, `respond(seat, response) -> Result<(), Rejection>`, `resolve(now_ms, min_wait_ms) -> Outcome`, `id()`, `kind()`, `non_ron_ties() -> Vec<Seat>`
+  - `pub enum Outcome { Pending, Ron(Vec<Seat>), Call { seat: Seat, response: CallResponse }, PassAll }`
+  - `pub enum Rejection { NotACandidate, AlreadyResponded, NotOffered, IsTheDiscarder }`
 
 **明槓はポンと同順位である**（仕様 6.4 の「ロン > ポン / 明カン > チー」）。
 `CallResponse::Kan` と `ActionOption::Kan` は `Priority::Pon` へ写す。
 `Priority` に `Kan` を作らないのは、同順位のものを別の値にすると
 比較のたびに読み替えが要り、取り違えの元になるためである。
-  - `pub enum WindowKind { Discard, Chankan }`
-  - `pub struct ReactionWindow` — `open(id, kind, from, tile, candidates, opened_at_ms, deadline_ms)`, `respond(seat, response) -> Result<(), Rejection>`, `resolve(now_ms, min_wait_ms) -> Outcome`, `id()`, `kind()`, `non_ron_ties() -> Vec<Seat>`
-  - `pub enum Outcome { Pending, Ron(Vec<Seat>), Call { seat: Seat, response: CallResponse }, PassAll }`
-  - `pub enum Rejection { NotACandidate, AlreadyResponded, NotOffered, IsTheDiscarder }`
 
 **解決の規則（仕様 6.4）:**
 
@@ -1667,9 +1667,96 @@ Expected: コンパイルエラー
 全員13枚で、山は 122 − 52 = 70枚である。
 
 ```rust
+//! 局の状態。進行のステートマシンは持たず、状態と導出だけを担う。
+//!
+//! 状況役の判定を進行側へ散らさないよう、HandContext の組み立てはここに集約する。
+
+#[path = "timing.rs"]
+mod timing;
+pub use timing::{charge_bank, deadline_for, lead_in_of, remaining_for_event};
+
+use mahjong_core::hand::HandCounts;
+use mahjong_core::score::{HandContext, WinType};
+use protocol::event::{DiscardManner, DrawSource, RiichiStep};
+use protocol::meld::{Meld, MeldKind};
+use protocol::ruleset::Ruleset;
+use protocol::seat::{Round, Seat, Wind};
+use protocol::tile::{Tile, TileKind};
+
+use crate::wall::{Seed, Wall};
+
 /// リーチ宣言時に供託する点数。リーチ麻雀では普遍の値であり、
 /// Ruleset に設定項目として存在しない。
 pub const RIICHI_STICK: i32 = 1_000;
+
+/// 河に捨てられた1枚。
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub struct Discarded {
+    pub tile: Tile,
+    pub manner: DiscardManner,
+    /// 鳴かれた場合、鳴いた席。**牌の総数を数えるときはこれが Some のものを除く**
+    /// （鳴いた者の melds に入っているため）。
+    pub called_by: Option<Seat>,
+    /// リーチ宣言牌かどうか。横向きに置く演出と、四家立直の判定に使う。
+    pub riichi_declaration: bool,
+}
+
+/// リーチの状態。宣言と成立を分ける。
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub struct RiichiState {
+    /// `Declare` は宣言しただけ。`Accepted` で初めて役になり供託が出る。
+    pub step: RiichiStep,
+    pub declared_at_turn: u32,
+    pub ippatsu: bool,
+    pub double: bool,
+}
+
+/// 槍槓の受付中である槓。成立するまでここに置く。
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub struct PendingKan {
+    pub seat: Seat,
+    pub kind: MeldKind,
+    pub tile: Tile,
+}
+
+#[derive(Clone, PartialEq, Eq, Debug)]
+pub struct SeatState {
+    pub hand: Vec<Tile>,
+    pub melds: Vec<Meld>,
+    pub river: Vec<Discarded>,
+    pub riichi: Option<RiichiState>,
+    pub think_bank_ms: u32,
+    /// 同巡内フリテン。自分のツモで解除される。
+    pub passed_this_turn: Vec<TileKind>,
+    /// リーチ後にロンを見逃した待ち。**局の終わりまで解除されない。**
+    pub permanent_furiten: Vec<TileKind>,
+    /// 自分の捨て牌がすべて幺九牌で、一度も鳴かれていないか（流し満貫）。
+    pub nagashi_alive: bool,
+}
+
+pub struct RoundState {
+    pub rules: Ruleset,
+    pub round: Round,
+    pub dealer: Seat,
+    pub honba: u8,
+    pub riichi_sticks: u8,
+    pub scores: [i32; 4],
+    pub wall: Wall,
+    pub seats: [SeatState; 4],
+    /// 直前のツモを引いた席と、その出どころ。嶺上開花の判定に使う。
+    /// 席を持たせるのは、誰のツモだったかを取り違えないためである。
+    pub last_draw: Option<(Seat, DrawSource)>,
+    /// 各席が何回ツモしたか。天和・地和の判定に使う。
+    pub draw_count: [u32; 4],
+    /// 局を通して誰か1人でも鳴いたか。
+    pub any_call_made: bool,
+    /// 槍槓の受付中かどうか。
+    pub pending_kan: Option<PendingKan>,
+    /// 席ごとの確定した槓の数。四開槓の判定に使う。
+    pub kan_count: [u8; 4],
+    /// 1巡目に切られた風牌。四風連打の判定に使う。
+    pub first_turn_winds: Vec<TileKind>,
+}
 
 impl RoundState {
     pub fn new(
