@@ -1,0 +1,43 @@
+name: CI
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  rust:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+      - uses: Swatinem/rust-cache@v2
+      - run: cargo fmt --check
+      - run: cargo clippy --all-targets -- -D warnings
+      - run: cargo test --workspace
+
+      - name: 生成された TS 型が最新か確認
+        run: git diff --exit-code -- apps/web/src/protocol
+
+      # サーバの真実である Event をクライアント側の言語で表現できないことが
+      # 視界フィルタの最後の砦になる。生成されていたら失敗させる。
+      - name: Event の TS 型が生成されていないことを確認
+        run: |
+          if ls apps/web/src/protocol/Event.ts apps/web/src/protocol/EventEnvelope.ts 2>/dev/null; then
+            echo "サーバ側イベントの TS 型が生成されている" >&2
+            exit 1
+          fi
+
+  web:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+      - uses: pnpm/action-setup@v4
+        with:
+          version: 11
+      - run: pnpm install --frozen-lockfile
+      - run: pnpm --filter @real-mahjong/web typecheck

@@ -1,0 +1,72 @@
+[
+  {
+    "id": "complete-hand",
+    "note": "和了形は -1",
+    "concealed": "123456789m123p11s",
+    "melds": 0,
+    "expect": { "overall": -1, "chiitoitsu": null, "kokushi": null }
+  },
+  {
+    "id": "tenpai-penchan",
+    "note": "3面子＋辺張＋雀頭でテンパイ（12p の 3p 待ち）",
+    "concealed": "123m456m789m12p11s",
+    "melds": 0,
+    "expect": { "overall": 0, "chiitoitsu": null, "kokushi": null }
+  },
+  {
+    "id": "tenpai-kanchan",
+    "note": "嵌張待ちでもテンパイ（2p待ち）",
+    "concealed": "123m456m789m13p11s",
+    "melds": 0,
+    "expect": { "overall": 0, "chiitoitsu": null, "kokushi": null }
+  },
+  {
+    "id": "tenpai-shanpon",
+    "note": "3面子＋対子2つのシャンポン待ち",
+    "concealed": "123m456m789m11p11s",
+    "melds": 0,
+    "expect": { "overall": 0, "chiitoitsu": null, "kokushi": null }
+  },
+  {
+    "id": "one-shanten-isolated",
+    "note": "14pは搭子にならないため1シャンテン",
+    "concealed": "123m456m789m14p11s",
+    "melds": 0,
+    "expect": { "overall": 1, "chiitoitsu": null, "kokushi": null }
+  },
+  {
+    "id": "chiitoitsu-tenpai",
+    "note": "6対子＋7種でテンパイ。七対子形の向聴が最小になる",
+    "concealed": "1122m3344p5566s7z",
+    "melds": 0,
+    "expect": { "overall": 0, "chiitoitsu": 0, "kokushi": null }
+  },
+  {
+    "id": "kokushi-13-wait",
+    "note": "13種すべてを1枚ずつ持つ十三面待ち",
+    "concealed": "19m19p19s1234567z",
+    "melds": 0,
+    "expect": { "overall": 0, "chiitoitsu": null, "kokushi": 0 }
+  },
+  {
+    "id": "kokushi-tanki-tenpai",
+    "note": "12種＋1mの対子。7z単騎でテンパイ",
+    "concealed": "119m19p19s123456z",
+    "melds": 0,
+    "expect": { "overall": 0, "chiitoitsu": null, "kokushi": 0 }
+  },
+  {
+    "id": "worst-case-scattered",
+    "note": "面子も搭子も対子も無い手。七対子形が最小で6シャンテン",
+    "concealed": "147m258p369s1234z",
+    "melds": 0,
+    "expect": { "overall": 6, "chiitoitsu": 6, "kokushi": 7 }
+  },
+  {
+    "id": "melded-tenpai",
+    "note": "1副露して残り10枚。2面子＋辺張＋雀頭でテンパイ（12p の 3p 待ち）",
+    "concealed": "123m456m12p11s",
+    "melds": 1,
+    "expect": { "overall": 0, "chiitoitsu": null, "kokushi": null }
+  }
+]

@@ -1,0 +1,35 @@
+[
+  {
+    "id": "dealer-mangan-tsumo",
+    "note": "立直＋ツモ＋平和＋断幺九＋ドラ1で5翻。親の満貫ツモは4000オール",
+    "concealed": "234567m23467p55s",
+    "melds": [],
+    "win_tile": "8p",
+    "win_type": "tsumo",
+    "context": {
+      "seat_wind": "east",
+      "round_wind": "east",
+      "riichi": true,
+      "double_riichi": false,
+      "ippatsu": false,
+      "rinshan": false,
+      "chankan": false,
+      "haitei": false,
+      "houtei": false,
+      "dora_indicators": ["4m"],
+      "ura_indicators": []
+    },
+    "expect": {
+      "yaku": [
+        { "id": "riichi", "han": 1 },
+        { "id": "menzen_tsumo", "han": 1 },
+        { "id": "pinfu", "han": 1 },
+        { "id": "tanyao", "han": 1 },
+        { "id": "dora", "han": 1 }
+      ],
+      "fu": 20,
+      "han": 5,
+      "payment": { "type": "tsumo_dealer", "from_each": 4000 }
+    }
+  }
+]

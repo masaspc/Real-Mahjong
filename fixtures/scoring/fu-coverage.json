@@ -1,0 +1,91 @@
+[
+  {
+    "id": "ankou-kanchan-yakuhai-pair-tsumo",
+    "note": "副底20＋幺九暗刻8＋嵌張2＋役牌雀頭2＋ツモ2＝34→40符。門前ツモのみ1翻で 400/700",
+    "concealed": "111m456m789p13s55z",
+    "melds": [],
+    "win_tile": "2s",
+    "win_type": "tsumo",
+    "context": {
+      "seat_wind": "south",
+      "round_wind": "east",
+      "riichi": false,
+      "double_riichi": false,
+      "ippatsu": false,
+      "rinshan": false,
+      "chankan": false,
+      "haitei": false,
+      "houtei": false,
+      "dora_indicators": ["9z"],
+      "ura_indicators": []
+    },
+    "expect": {
+      "yaku": [{ "id": "menzen_tsumo", "han": 1 }],
+      "fu": 40,
+      "han": 1,
+      "payment": { "type": "tsumo_non_dealer", "from_dealer": 700, "from_each_non_dealer": 400 }
+    }
+  },
+  {
+    "id": "toitoi-minkou-ankou-tanki-ron",
+    "note": "副底20＋明刻2＋明刻2＋中張暗刻4＋幺九暗刻8＋役牌雀頭2＋単騎2＝40符。対々和2翻で子ロン2600",
+    "concealed": "888999s7z",
+    "melds": [
+      { "kind": "pon", "tiles": "222m", "from": 1, "called_tile": "2m" },
+      { "kind": "pon", "tiles": "555p", "from": 2, "called_tile": "5p" }
+    ],
+    "win_tile": "7z",
+    "win_type": "ron",
+    "context": {
+      "seat_wind": "south",
+      "round_wind": "east",
+      "riichi": false,
+      "double_riichi": false,
+      "ippatsu": false,
+      "rinshan": false,
+      "chankan": false,
+      "haitei": false,
+      "houtei": false,
+      "dora_indicators": ["9z"],
+      "ura_indicators": []
+    },
+    "expect": {
+      "yaku": [{ "id": "toitoi", "han": 2 }],
+      "fu": 40,
+      "han": 2,
+      "payment": { "type": "ron", "total": 2600 }
+    }
+  },
+  {
+    "id": "no-round-up-mangan-30fu-4han",
+    "note": "切り上げ満貫なしの境界。30符4翻は8000ではなく7700。pinfu-riichi-ron-nondealer とドラ表示牌だけが違う",
+    "concealed": "234567m23467p55s",
+    "melds": [],
+    "win_tile": "8p",
+    "win_type": "ron",
+    "context": {
+      "seat_wind": "south",
+      "round_wind": "east",
+      "riichi": true,
+      "double_riichi": false,
+      "ippatsu": false,
+      "rinshan": false,
+      "chankan": false,
+      "haitei": false,
+      "houtei": false,
+      "dora_indicators": ["4m"],
+      "ura_indicators": []
+    },
+    "expect": {
+      "yaku": [
+        { "id": "riichi", "han": 1 },
+        { "id": "pinfu", "han": 1 },
+        { "id": "tanyao", "han": 1 },
+        { "id": "dora", "han": 1 }
+      ],
+      "fu": 30,
+      "han": 4,
+      "payment": { "type": "ron", "total": 7700 }
+    }
+  }
+]

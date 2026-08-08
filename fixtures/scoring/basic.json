@@ -1,0 +1,122 @@
+[
+  {
+    "id": "pinfu-tsumo-nondealer",
+    "note": "平和ツモ。全牌が中張牌なので断幺九も複合して20符3翻。子のツモは 700/1300",
+    "concealed": "234567m23478p22s",
+    "melds": [],
+    "win_tile": "6p",
+    "win_type": "tsumo",
+    "context": {
+      "seat_wind": "south",
+      "round_wind": "east",
+      "riichi": false,
+      "double_riichi": false,
+      "ippatsu": false,
+      "rinshan": false,
+      "chankan": false,
+      "haitei": false,
+      "houtei": false,
+      "dora_indicators": ["1z"],
+      "ura_indicators": []
+    },
+    "expect": {
+      "yaku": [
+        { "id": "pinfu", "han": 1 },
+        { "id": "menzen_tsumo", "han": 1 },
+        { "id": "tanyao", "han": 1 }
+      ],
+      "fu": 20,
+      "han": 3,
+      "payment": { "type": "tsumo_non_dealer", "from_dealer": 1300, "from_each_non_dealer": 700 }
+    }
+  },
+  {
+    "id": "pinfu-riichi-ron-nondealer",
+    "note": "立直＋平和＋断幺九。副底20＋門前ロン10で30符3翻＝3900。dealer-mangan-tsumo と同一の手牌であり、役の判定は一致していなければならない",
+    "concealed": "234567m23467p55s",
+    "melds": [],
+    "win_tile": "8p",
+    "win_type": "ron",
+    "context": {
+      "seat_wind": "south",
+      "round_wind": "east",
+      "riichi": true,
+      "double_riichi": false,
+      "ippatsu": false,
+      "rinshan": false,
+      "chankan": false,
+      "haitei": false,
+      "houtei": false,
+      "dora_indicators": ["1z"],
+      "ura_indicators": []
+    },
+    "expect": {
+      "yaku": [
+        { "id": "riichi", "han": 1 },
+        { "id": "pinfu", "han": 1 },
+        { "id": "tanyao", "han": 1 }
+      ],
+      "fu": 30,
+      "han": 3,
+      "payment": { "type": "ron", "total": 3900 }
+    }
+  },
+  {
+    "id": "riichi-only-penchan-ron",
+    "note": "辺張待ちで符が付く例。20＋門前ロン10＋辺張2＝32→切り上げ40符1翻＝1300",
+    "concealed": "12456m234678p55s",
+    "melds": [],
+    "win_tile": "3m",
+    "win_type": "ron",
+    "context": {
+      "seat_wind": "south",
+      "round_wind": "east",
+      "riichi": true,
+      "double_riichi": false,
+      "ippatsu": false,
+      "rinshan": false,
+      "chankan": false,
+      "haitei": false,
+      "houtei": false,
+      "dora_indicators": ["1z"],
+      "ura_indicators": []
+    },
+    "expect": {
+      "yaku": [{ "id": "riichi", "han": 1 }],
+      "fu": 40,
+      "han": 1,
+      "payment": { "type": "ron", "total": 1300 }
+    }
+  },
+  {
+    "id": "chiitoitsu-riichi-tsumo",
+    "note": "七対子は25符固定。25符4翻＝1600/3200",
+    "concealed": "1122m3344p5566s7z",
+    "melds": [],
+    "win_tile": "7z",
+    "win_type": "tsumo",
+    "context": {
+      "seat_wind": "south",
+      "round_wind": "east",
+      "riichi": true,
+      "double_riichi": false,
+      "ippatsu": false,
+      "rinshan": false,
+      "chankan": false,
+      "haitei": false,
+      "houtei": false,
+      "dora_indicators": ["1z"],
+      "ura_indicators": []
+    },
+    "expect": {
+      "yaku": [
+        { "id": "riichi", "han": 1 },
+        { "id": "chiitoitsu", "han": 2 },
+        { "id": "menzen_tsumo", "han": 1 }
+      ],
+      "fu": 25,
+      "han": 4,
+      "payment": { "type": "tsumo_non_dealer", "from_dealer": 3200, "from_each_non_dealer": 1600 }
+    }
+  }
+]

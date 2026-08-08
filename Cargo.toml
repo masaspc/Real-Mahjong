@@ -1,0 +1,21 @@
+[workspace]
+resolver = "2"
+members = [
+  "crates/protocol",
+  "crates/test-fixtures",
+  "crates/mahjong-core",
+  "crates/mahjong-engine",
+  "crates/mahjong-ai",
+  "crates/mahjong-wasm",
+  "crates/server",
+]
+
+[workspace.package]
+edition = "2021"
+license = "MIT"
+
+[workspace.lints.rust]
+unsafe_code = "forbid"
+
+[workspace.lints.clippy]
+all = { level = "deny", priority = -1 }
