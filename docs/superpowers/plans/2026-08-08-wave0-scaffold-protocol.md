@@ -19,9 +19,9 @@
 - `lib.rs` / `mod.rs` は Task 11 で確定させ、**Wave 1 のエージェントは編集しない**
 - 牌の記法は `123m456p789s1234567z` 形式。赤ドラは `0m` / `0p` / `0s`。字牌は 1z=東, 2z=南, 3z=西, 4z=北, 5z=白, 6z=發, 7z=中
 - 牌のエンコードは u8 で 0..=36。0..=33 が通常牌（0-8=1m-9m, 9-17=1p-9p, 18-26=1s-9s, 27-33=東南西北白發中）、34=赤5m, 35=赤5p, 36=赤5s
-- ルール既定値（雀魂 金の間）: 25000点持ち / 30000点返し / ウマ +15,+5,-5,-15 / 赤ドラ計3枚 / 喰いタンあり / ダブロンあり / 形式テンパイあり / ノーテン罰符3000 / 切り上げ満貫なし / 飛びあり
+- ルール既定値（雀魂 金の間）: 25000点持ち / 30000点返し / ウマ +15,+5,-5,-15 / 赤ドラ計3枚 / 喰いタンあり / ダブロンあり / 形式テンパイあり / ノーテン罰符3000 / 流し満貫あり / 責任払いあり / 切り上げ満貫なし / 飛びあり
 - 演出時間（ms）: Draw=250, Discard=350, Pon=700, Chi=700, Kan=1100, RiichiDeclare=1800, DoraReveal=800
-- 時間定数（ms）: 基準思考時間=5000, 溜め時間バンク=20000, 通信猶予=500, 反応ウィンドウ最低待機=300
+- 時間定数（ms）: 基準思考時間=5000, 溜め時間バンク=20000, 通信猶予=500, 反応ウィンドウ最低待機=350（打牌演出と同じ値に揃える）
 
 ## 仕様からの精緻化（実装時に確定させた点）
 
@@ -614,6 +614,8 @@ mod tests {
         assert!(rules.double_ron);
         assert!(rules.formal_tenpai);
         assert_eq!(rules.noten_penalty, 3_000);
+        assert!(rules.nagashi_mangan);
+        assert!(rules.liability);
         assert!(!rules.round_up_mangan);
         assert!(rules.busted_ends_match);
     }
@@ -624,7 +626,7 @@ mod tests {
         assert_eq!(rules.base_think_ms, 5_000);
         assert_eq!(rules.think_bank_ms, 20_000);
         assert_eq!(rules.network_grace_ms, 500);
-        assert_eq!(rules.min_reaction_window_ms, 300);
+        assert_eq!(rules.min_reaction_window_ms, 350);
     }
 
     #[test]
@@ -736,11 +738,15 @@ pub struct Ruleset {
     pub double_ron: bool,
     pub formal_tenpai: bool,
     pub noten_penalty: i32,
+    pub nagashi_mangan: bool,
+    pub liability: bool,
     pub round_up_mangan: bool,
     pub busted_ends_match: bool,
     pub base_think_ms: u32,
     pub think_bank_ms: u32,
     pub network_grace_ms: u32,
+    /// 打牌から次のツモまでの最短時間。鳴ける者の有無で間の長さが変わると
+    /// それ自体が情報になるため、常にこの時間だけ待つ。打牌演出と同じ値に揃える。
     pub min_reaction_window_ms: u32,
 }
 
@@ -757,12 +763,14 @@ impl Ruleset {
             double_ron: true,
             formal_tenpai: true,
             noten_penalty: 3_000,
+            nagashi_mangan: true,
+            liability: true,
             round_up_mangan: false,
             busted_ends_match: true,
             base_think_ms: 5_000,
             think_bank_ms: 20_000,
             network_grace_ms: 500,
-            min_reaction_window_ms: 300,
+            min_reaction_window_ms: 350,
         }
     }
 }
@@ -1091,8 +1099,16 @@ use crate::tile::{Tile, TileKind};
 #[derive(Clone, PartialEq, Eq, Debug, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum Command {
-    Discard { tile: Tile, riichi: bool },
-    CallResponse { response: CallResponse },
+    Discard {
+        tile: Tile,
+        riichi: bool,
+    },
+    /// window_id は RequestAction が示したものをそのまま返す。
+    /// これがないと、遅延した応答や再送を別のウィンドウへ適用してしまう。
+    CallResponse {
+        window_id: u32,
+        response: CallResponse,
+    },
     Ankan { kind: TileKind },
     Kakan { tile: Tile },
     Tsumo,
@@ -1312,6 +1328,43 @@ pub enum RyuukyokuKind {
     ThreeRons,
 }
 
+/// 責任払い（パオ）。大三元・大四喜の確定牌を鳴かせた者が負う。
+#[derive(Clone, Copy, PartialEq, Eq, Debug, Serialize, Deserialize)]
+pub struct Liability {
+    pub seat: Seat,
+    pub yaku: YakuId,
+    pub mode: LiabilityMode,
+}
+
+#[derive(Clone, Copy, PartialEq, Eq, Debug, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum LiabilityMode {
+    /// ツモ和了。責任者が全額を負担する。
+    Full,
+    /// ロン和了。責任者と放銃者で折半する。
+    Split,
+}
+
+/// 点棒移動の内訳。最終差分だけでは、ダブロン時に供託を誰が取ったか、
+/// 本場をどちらに付けたかを牌譜から復元できないため分けて持つ。
+#[derive(Clone, PartialEq, Eq, Debug, Serialize, Deserialize)]
+pub struct SettlementEntry {
+    pub seat: Seat,
+    /// 符と翻から決まる素点。
+    pub base: i32,
+    pub honba: i32,
+    pub riichi_sticks: i32,
+    /// 責任払いによる肩代わり分。
+    pub liability: i32,
+}
+
+#[derive(Clone, PartialEq, Eq, Debug, Serialize, Deserialize)]
+pub struct Settlement {
+    /// 各席の最終増減。entries の合計と一致しなければならない。
+    pub delta: [i32; 4],
+    pub entries: Vec<SettlementEntry>,
+}
+
 #[derive(Clone, PartialEq, Eq, Debug, Serialize, Deserialize)]
 pub struct AgariResult {
     pub seat: Seat,
@@ -1325,7 +1378,21 @@ pub struct AgariResult {
     pub han: u8,
     /// 供託と積み棒を含まない素点。
     pub score: i32,
-    pub ura_indicators: Vec<Tile>,
+    /// 責任払いが成立した場合のみ Some。
+    pub liability: Option<Liability>,
+    /// リーチ和了があった場合のみ Some。空配列との使い分けに頼らない。
+    pub ura_indicators: Option<Vec<Tile>>,
+}
+
+/// 局と本場の進み方が決まった理由。エンジンの判断を牌譜から監査するために残す。
+#[derive(Clone, Copy, PartialEq, Eq, Debug, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ContinuationReason {
+    DealerWin,
+    DealerTenpai,
+    DealerLoss,
+    AbortiveDraw,
+    NagashiMangan,
 }
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug, Serialize, Deserialize)]
@@ -1382,22 +1449,41 @@ pub enum Event {
         kind: MeldKind,
         tiles: Vec<Tile>,
     },
+    /// 加槓・暗槓の宣言。成立（Call）とは別イベントにすることで、
+    /// この間に槍槓の反応ウィンドウを開ける。
+    KanDeclared {
+        seat: Seat,
+        kind: MeldKind,
+        tile: Tile,
+    },
     DoraReveal {
         indicator: Tile,
     },
+    /// 反応ウィンドウでの見逃し。同巡内フリテンとリーチ後の制約に必要なため、
+    /// コマンドではなくサーバ側イベントとして牌譜に残す。
+    ActionPassed {
+        seat: Seat,
+        window_id: u32,
+        declined: Vec<ActionOption>,
+    },
     Agari {
         results: Vec<AgariResult>,
-        score_delta: [i32; 4],
+        settlement: Settlement,
     },
     Ryuukyoku {
         kind: RyuukyokuKind,
+        /// 九種九牌などの宣言者。荒牌平局では None。
+        initiator: Option<Seat>,
         tenpai: [bool; 4],
+        /// 公開資格のある席の手牌のみ。射影側でも再検査する。
         revealed_hands: Vec<(Seat, Vec<Tile>)>,
-        score_delta: [i32; 4],
+        nagashi_winners: Vec<Seat>,
+        settlement: Settlement,
     },
     RoundEnd {
         scores: [i32; 4],
         next: NextRound,
+        reason: ContinuationReason,
     },
     MatchEnd {
         final_scores: [i32; 4],
@@ -1405,11 +1491,15 @@ pub enum Event {
     },
     RequestAction {
         seat: Seat,
+        /// どの打牌・宣言に対する要求か。遅延した応答や再送の取り違えを防ぐ。
+        window_id: u32,
         options: Vec<ActionOption>,
         deadline_ms: u32,
     },
+    /// 半荘終了後にまとめて開示する。局ごとに出すと、その局の他家手牌を
+    /// 遡って復元できてしまい、同じ半荘の中で不公平が生じる。
     SeedReveal {
-        seed: String,
+        seeds: Vec<String>,
     },
 }
 
@@ -1576,6 +1666,7 @@ mod tests {
     fn request_action_reaches_only_its_own_seat() {
         let event = Event::RequestAction {
             seat: Seat::new(3),
+            window_id: 1,
             options: vec![],
             deadline_ms: 5_500,
         };
@@ -1604,6 +1695,136 @@ mod tests {
             assert_eq!(you, Seat::new(viewer));
         }
     }
+
+    fn empty_settlement() -> crate::event::Settlement {
+        crate::event::Settlement {
+            delta: [0; 4],
+            entries: vec![],
+        }
+    }
+
+    /// 生成側が誤ってノーテン者の手牌を入れても、射影で落ちなければならない。
+    /// ここは型では守れないため、負例で守る。
+    #[test]
+    fn exhaustive_draw_reveals_only_tenpai_hands() {
+        let hands = disjoint_hands();
+        let event = Event::Ryuukyoku {
+            kind: crate::event::RyuukyokuKind::Exhaustive,
+            initiator: None,
+            tenpai: [true, false, false, true],
+            // 生成側のバグを模して全席分を入れる。
+            revealed_hands: (0u8..4)
+                .map(|i| (Seat::new(i), hands[i as usize].clone()))
+                .collect(),
+            nagashi_winners: vec![],
+            settlement: empty_settlement(),
+        };
+
+        let projected = project(&event, Seat::new(0)).unwrap();
+        let ClientEvent::Ryuukyoku { revealed_hands, .. } = projected else {
+            panic!("Ryuukyoku ではない");
+        };
+
+        let revealed: Vec<usize> = revealed_hands.iter().map(|(s, _)| s.index()).collect();
+        assert_eq!(revealed, vec![0, 3], "ノーテン者の手牌が公開された");
+    }
+
+    #[test]
+    fn nagashi_winner_reveals_even_when_noten() {
+        let hands = disjoint_hands();
+        let event = Event::Ryuukyoku {
+            kind: crate::event::RyuukyokuKind::Exhaustive,
+            initiator: None,
+            tenpai: [false, false, false, false],
+            revealed_hands: vec![(Seat::new(2), hands[2].clone())],
+            nagashi_winners: vec![Seat::new(2)],
+            settlement: empty_settlement(),
+        };
+
+        let projected = project(&event, Seat::new(0)).unwrap();
+        let ClientEvent::Ryuukyoku { revealed_hands, .. } = projected else {
+            panic!("Ryuukyoku ではない");
+        };
+        assert_eq!(revealed_hands.len(), 1);
+        assert_eq!(revealed_hands[0].0, Seat::new(2));
+    }
+
+    #[test]
+    fn abortive_draws_reveal_nothing_but_nine_terminals_shows_the_declarer() {
+        let hands = disjoint_hands();
+        let all: Vec<(Seat, Vec<crate::tile::Tile>)> = (0u8..4)
+            .map(|i| (Seat::new(i), hands[i as usize].clone()))
+            .collect();
+
+        for kind in [
+            crate::event::RyuukyokuKind::FourRiichi,
+            crate::event::RyuukyokuKind::FourWinds,
+            crate::event::RyuukyokuKind::FourKans,
+            crate::event::RyuukyokuKind::ThreeRons,
+        ] {
+            let event = Event::Ryuukyoku {
+                kind,
+                initiator: Some(Seat::new(1)),
+                tenpai: [true; 4],
+                revealed_hands: all.clone(),
+                nagashi_winners: vec![],
+                settlement: empty_settlement(),
+            };
+            let projected = project(&event, Seat::new(0)).unwrap();
+            let ClientEvent::Ryuukyoku { revealed_hands, .. } = projected else {
+                panic!("Ryuukyoku ではない");
+            };
+            assert!(revealed_hands.is_empty(), "{kind:?} で手牌が公開された");
+        }
+
+        let event = Event::Ryuukyoku {
+            kind: crate::event::RyuukyokuKind::NineTerminals,
+            initiator: Some(Seat::new(1)),
+            tenpai: [true; 4],
+            revealed_hands: all,
+            nagashi_winners: vec![],
+            settlement: empty_settlement(),
+        };
+        let projected = project(&event, Seat::new(0)).unwrap();
+        let ClientEvent::Ryuukyoku { revealed_hands, .. } = projected else {
+            panic!("Ryuukyoku ではない");
+        };
+        assert_eq!(revealed_hands.len(), 1, "九種九牌は宣言者のみ公開する");
+        assert_eq!(revealed_hands[0].0, Seat::new(1));
+    }
+
+    #[test]
+    fn request_action_carries_the_window_id() {
+        let event = Event::RequestAction {
+            seat: Seat::new(2),
+            window_id: 77,
+            options: vec![],
+            deadline_ms: 5_850,
+        };
+        let projected = project(&event, Seat::new(2)).unwrap();
+        let ClientEvent::RequestAction { window_id, .. } = projected else {
+            panic!("RequestAction ではない");
+        };
+        assert_eq!(window_id, 77);
+    }
+
+    /// 見逃した具体的な選択肢は、他家に配ると待ちの手掛かりになる。
+    #[test]
+    fn action_passed_does_not_carry_the_declined_options() {
+        let event = Event::ActionPassed {
+            seat: Seat::new(1),
+            window_id: 3,
+            declined: vec![crate::command::ActionOption::Ron],
+        };
+        let projected = project(&event, Seat::new(0)).unwrap();
+        assert!(matches!(
+            projected,
+            ClientEvent::ActionPassed {
+                window_id: 3,
+                ..
+            }
+        ));
+    }
 }
 ```
 
@@ -1623,7 +1844,8 @@ use serde::{Deserialize, Serialize};
 
 use crate::command::ActionOption;
 use crate::event::{
-    AgariResult, DiscardManner, DrawSource, NextRound, PlayerId, RiichiStep, RyuukyokuKind,
+    AgariResult, ContinuationReason, DiscardManner, DrawSource, NextRound, PlayerId, RiichiStep,
+    RyuukyokuKind, Settlement,
 };
 use crate::meld::MeldKind;
 use crate::ruleset::Ruleset;
@@ -1674,22 +1896,35 @@ pub enum ClientEvent {
         kind: MeldKind,
         tiles: Vec<Tile>,
     },
+    KanDeclared {
+        seat: Seat,
+        kind: MeldKind,
+        tile: Tile,
+    },
     DoraReveal {
         indicator: Tile,
     },
+    ActionPassed {
+        seat: Seat,
+        window_id: u32,
+    },
     Agari {
         results: Vec<AgariResult>,
-        score_delta: [i32; 4],
+        settlement: Settlement,
     },
     Ryuukyoku {
         kind: RyuukyokuKind,
+        initiator: Option<Seat>,
         tenpai: [bool; 4],
+        /// 射影側で公開資格を再判定した結果のみが入る。
         revealed_hands: Vec<(Seat, Vec<Tile>)>,
-        score_delta: [i32; 4],
+        nagashi_winners: Vec<Seat>,
+        settlement: Settlement,
     },
     RoundEnd {
         scores: [i32; 4],
         next: NextRound,
+        reason: ContinuationReason,
     },
     MatchEnd {
         final_scores: [i32; 4],
@@ -1697,11 +1932,12 @@ pub enum ClientEvent {
     },
     /// 自席宛のみ配信されるため seat を持たない。
     RequestAction {
+        window_id: u32,
         options: Vec<ActionOption>,
         deadline_ms: u32,
     },
     SeedReveal {
-        seed: String,
+        seeds: Vec<String>,
     },
 }
 
@@ -1716,7 +1952,7 @@ pub struct ClientEventEnvelope {
 
 ```rust
 use crate::client_event::{ClientEvent, ClientEventEnvelope};
-use crate::event::{Event, EventEnvelope};
+use crate::event::{Event, EventEnvelope, RyuukyokuKind};
 use crate::seat::Seat;
 
 /// サーバの真実を、その席が見てよい形へ落とす。
@@ -1792,30 +2028,57 @@ pub fn project(event: &Event, viewer: Seat) -> Option<ClientEvent> {
             kind: *kind,
             tiles: tiles.clone(),
         },
+        Event::KanDeclared { seat, kind, tile } => ClientEvent::KanDeclared {
+            seat: *seat,
+            kind: *kind,
+            tile: *tile,
+        },
         Event::DoraReveal { indicator } => ClientEvent::DoraReveal {
             indicator: *indicator,
         },
+        Event::ActionPassed {
+            seat, window_id, ..
+        } => ClientEvent::ActionPassed {
+            seat: *seat,
+            window_id: *window_id,
+        },
         Event::Agari {
             results,
-            score_delta,
+            settlement,
         } => ClientEvent::Agari {
             results: results.clone(),
-            score_delta: *score_delta,
+            settlement: settlement.clone(),
         },
         Event::Ryuukyoku {
             kind,
+            initiator,
             tenpai,
             revealed_hands,
-            score_delta,
+            nagashi_winners,
+            settlement,
         } => ClientEvent::Ryuukyoku {
             kind: *kind,
+            initiator: *initiator,
             tenpai: *tenpai,
-            revealed_hands: revealed_hands.clone(),
-            score_delta: *score_delta,
+            // 生成側を信用せず、公開資格をここで再判定する。
+            revealed_hands: revealed_hands
+                .iter()
+                .filter(|(seat, _)| {
+                    may_reveal_hand(*kind, *initiator, tenpai, nagashi_winners, *seat)
+                })
+                .cloned()
+                .collect(),
+            nagashi_winners: nagashi_winners.clone(),
+            settlement: settlement.clone(),
         },
-        Event::RoundEnd { scores, next } => ClientEvent::RoundEnd {
+        Event::RoundEnd {
+            scores,
+            next,
+            reason,
+        } => ClientEvent::RoundEnd {
             scores: *scores,
             next: *next,
+            reason: *reason,
         },
         Event::MatchEnd {
             final_scores,
@@ -1826,6 +2089,7 @@ pub fn project(event: &Event, viewer: Seat) -> Option<ClientEvent> {
         },
         Event::RequestAction {
             seat,
+            window_id,
             options,
             deadline_ms,
         } => {
@@ -1833,14 +2097,38 @@ pub fn project(event: &Event, viewer: Seat) -> Option<ClientEvent> {
                 return None;
             }
             ClientEvent::RequestAction {
+                window_id: *window_id,
                 options: options.clone(),
                 deadline_ms: *deadline_ms,
             }
         }
-        Event::SeedReveal { seed } => ClientEvent::SeedReveal { seed: seed.clone() },
+        Event::SeedReveal { seeds } => ClientEvent::SeedReveal {
+            seeds: seeds.clone(),
+        },
     };
 
     Some(projected)
+}
+
+/// 流局時にその席の手牌を公開してよいか。
+///
+/// 荒牌平局ではテンパイ者と流し満貫成立者のみ。九種九牌は宣言者のみ。
+/// それ以外の途中流局では誰の手牌も公開しない。
+fn may_reveal_hand(
+    kind: RyuukyokuKind,
+    initiator: Option<Seat>,
+    tenpai: &[bool; 4],
+    nagashi_winners: &[Seat],
+    seat: Seat,
+) -> bool {
+    match kind {
+        RyuukyokuKind::Exhaustive => tenpai[seat.index()] || nagashi_winners.contains(&seat),
+        RyuukyokuKind::NineTerminals => initiator == Some(seat),
+        RyuukyokuKind::FourRiichi
+        | RyuukyokuKind::FourWinds
+        | RyuukyokuKind::FourKans
+        | RyuukyokuKind::ThreeRons => false,
+    }
 }
 
 pub fn project_envelope(
@@ -1985,6 +2273,19 @@ mod tests {
     fn deadline_shrinks_as_the_bank_is_spent() {
         let rules = Ruleset::kin_no_ma(MatchLength::Hanchan);
         assert_eq!(action_deadline_ms(&rules, 0, 0), 5_000 + 500);
+    }
+
+    /// 最低待機が打牌演出より短いと「次の行動が直前の演出完了より論理的に先行する」
+    /// 状態が生まれる。両者の対応を検査で固定しておく。
+    #[test]
+    fn minimum_reaction_wait_covers_the_discard_effect() {
+        let rules = Ruleset::kin_no_ma(MatchLength::Hanchan);
+        assert!(
+            rules.min_reaction_window_ms >= effect_duration_ms(EffectKind::Discard),
+            "最低待機{}ms が打牌演出{}ms より短い",
+            rules.min_reaction_window_ms,
+            effect_duration_ms(EffectKind::Discard)
+        );
     }
 }
 ```
@@ -2304,10 +2605,12 @@ members = [
 
 ```bash
 mkdir -p crates/mahjong-core/src/shanten crates/mahjong-core/src/yaku_check
-touch crates/mahjong-core/src/{hand,wait,furiten,callable,decompose,fu,score}.rs
+touch crates/mahjong-core/src/{hand,shapes,wait,furiten,callable,decompose,fu,score}.rs
 touch crates/mahjong-core/src/shanten/{standard,chiitoitsu,kokushi}.rs
 touch crates/mahjong-core/src/yaku_check/{standard,yakuman}.rs
 ```
+
+`hand.rs` と `shapes.rs` は Task 12 で中身を書く。判定系（Wave 1a）と点数系（Wave 1b）が共有する語彙であり、**Wave 1 では編集禁止**とする。
 
 `crates/mahjong-core/Cargo.toml`:
 
@@ -2339,9 +2642,28 @@ pub mod furiten;
 pub mod hand;
 pub mod score;
 pub mod shanten;
+pub mod shapes;
 pub mod wait;
 pub mod yaku_check;
 ```
+
+### ファイル所有権
+
+Wave 1 の各エージェントが編集してよいファイルを、着手前に確定させる。所有者のいないファイルを残さない。
+
+| ファイル | 所有 | 備考 |
+|---|---|---|
+| `hand.rs` / `shapes.rs` | Wave 0 | 共有語彙。Wave 1 では編集しない |
+| `shanten/*.rs` | Wave 1a | |
+| `wait.rs` | Wave 1a | 型は `shapes.rs`、算出はここ |
+| `furiten.rs` | Wave 1a | |
+| `callable.rs` | Wave 1a | チー・ポン・槓の候補のみ |
+| `decompose.rs` | Wave 1b | 1a は自前の探索を `shanten/standard.rs` に持ち、ここを編集しない |
+| `yaku_check/*.rs` | Wave 1b | |
+| `fu.rs` | Wave 1b | 待ち形は `wait.rs` の結果を消費し、判定を再実装しない |
+| `score.rs` | Wave 1b | |
+
+**ロンの可否はどちらにも置かない。**役の有無に依存するため、1a の鳴き候補と 1b の役判定が揃った Wave 2 で engine 側が結線する。単一ファイルを両者に編集させないための措置である。
 
 `crates/mahjong-core/src/shanten/mod.rs`（**編集禁止**）:
 
@@ -2457,13 +2779,259 @@ git commit -m "chore: 全クレートのモジュール木を宣言"
 
 ---
 
-### Task 12: 期待値テーブル（採点）と読み込みクレート
+### Task 12: 共有語彙（手牌表現と待ち形・分解結果）
+
+判定系（Wave 1a）と点数系（Wave 1b）を素朴に分けると、同じファイルを取り合う。符計算は待ち形を必要とし、向聴計算と役判定はどちらも面子分解を必要とする。
+
+解決は Wave 0 の原則の延長である。**両者が共有する語彙（型）をここで凍結し、それを使うアルゴリズムを Wave 1 で分担する。**型が先にあるため、1b は 1a の実装完了を待たずに `WaitShape` を直接組み立ててテストを書ける。
+
+**Files:**
+- Modify: `crates/mahjong-core/src/hand.rs`
+- Modify: `crates/mahjong-core/src/shapes.rs`
+
+**Interfaces:**
+- Consumes: Task 2 `Tile` / `TileKind`、Task 3 `parse_hand`、Task 5 `Meld`
+- Produces:
+  - `pub struct HandCounts([u8; 34])` — `HandCounts::new() -> Self`, `from_tiles(&[Tile]) -> Self`, `get(TileKind) -> u8`, `add(TileKind)`, `remove(TileKind) -> bool`, `total() -> u8`, `kinds() -> impl Iterator<Item = (TileKind, u8)>`
+  - `pub enum WaitShape { Ryanmen, Penchan, Kanchan, Shanpon, Tanki }`
+  - `pub enum Block { Run(TileKind), Triplet(TileKind), Pair(TileKind) }` — `Run` は最小の牌で表す（`123m` なら `1m`）
+  - `pub struct Decomposition { pub blocks: Vec<Block>, pub pair: TileKind, pub melds: Vec<Meld>, pub wait: WaitShape }`
+
+- [ ] **Step 1: 失敗するテストを書く**
+
+`crates/mahjong-core/src/hand.rs` の末尾に置く:
+
+```rust
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use protocol::notation::parse_hand;
+    use protocol::tile::TileKind;
+
+    #[test]
+    fn counts_tiles_by_kind_ignoring_red() {
+        // 0p は赤5pであり、5p と同じ種類として数える。
+        let counts = HandCounts::from_tiles(&parse_hand("55p0p").unwrap());
+        assert_eq!(counts.get(TileKind::from_index(13).unwrap()), 3);
+        assert_eq!(counts.total(), 3);
+    }
+
+    #[test]
+    fn add_and_remove_round_trip() {
+        let mut counts = HandCounts::new();
+        let east = TileKind::from_index(27).unwrap();
+        counts.add(east);
+        counts.add(east);
+        assert_eq!(counts.get(east), 2);
+        assert!(counts.remove(east));
+        assert_eq!(counts.get(east), 1);
+        assert!(counts.remove(east));
+        assert!(!counts.remove(east), "0枚からは取り除けない");
+    }
+
+    #[test]
+    fn kinds_lists_only_present_tiles() {
+        let counts = HandCounts::from_tiles(&parse_hand("111m9s").unwrap());
+        let present: Vec<(u8, u8)> = counts.kinds().map(|(k, n)| (k.index(), n)).collect();
+        assert_eq!(present, vec![(0, 3), (26, 1)]);
+    }
+
+    #[test]
+    fn a_full_hand_totals_thirteen() {
+        let counts = HandCounts::from_tiles(&parse_hand("123456789m123p11s").unwrap());
+        assert_eq!(counts.total(), 14);
+    }
+}
+```
+
+`crates/mahjong-core/src/shapes.rs` の末尾に置く:
+
+```rust
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use protocol::tile::TileKind;
+
+    #[test]
+    fn a_decomposition_names_its_blocks_and_wait() {
+        let decomposition = Decomposition {
+            blocks: vec![
+                Block::Run(TileKind::from_index(0).unwrap()),
+                Block::Run(TileKind::from_index(3).unwrap()),
+                Block::Triplet(TileKind::from_index(27).unwrap()),
+                Block::Run(TileKind::from_index(9).unwrap()),
+            ],
+            pair: TileKind::from_index(18).unwrap(),
+            melds: vec![],
+            wait: WaitShape::Ryanmen,
+        };
+        assert_eq!(decomposition.blocks.len(), 4);
+        assert_eq!(decomposition.wait, WaitShape::Ryanmen);
+    }
+
+    #[test]
+    fn wait_shapes_are_distinguishable() {
+        let all = [
+            WaitShape::Ryanmen,
+            WaitShape::Penchan,
+            WaitShape::Kanchan,
+            WaitShape::Shanpon,
+            WaitShape::Tanki,
+        ];
+        for (i, a) in all.iter().enumerate() {
+            for (j, b) in all.iter().enumerate() {
+                assert_eq!(i == j, a == b);
+            }
+        }
+    }
+
+    /// 符計算はこの対応表に従う。値そのものは fu.rs（Wave 1b）が持つが、
+    /// 「どの待ちが2符か」は語彙として固定しておく。
+    #[test]
+    fn only_penchan_kanchan_and_tanki_earn_fu() {
+        assert!(!WaitShape::Ryanmen.earns_fu());
+        assert!(!WaitShape::Shanpon.earns_fu());
+        assert!(WaitShape::Penchan.earns_fu());
+        assert!(WaitShape::Kanchan.earns_fu());
+        assert!(WaitShape::Tanki.earns_fu());
+    }
+}
+```
+
+- [ ] **Step 2: テストが失敗することを確認する**
+
+Run: `cargo test --package mahjong-core`
+Expected: コンパイルエラー（`HandCounts` / `Decomposition` などが未定義）
+
+- [ ] **Step 3: hand.rs の実装を書く**
+
+```rust
+//! 手牌の集計表現。判定系と点数系が共有するため Wave 0 で凍結する。
+
+use protocol::tile::{Tile, TileKind};
+
+/// 34種それぞれの枚数。赤ドラは対応する通常牌として数える。
+#[derive(Clone, Copy, PartialEq, Eq, Debug, Default)]
+pub struct HandCounts([u8; TileKind::COUNT]);
+
+impl HandCounts {
+    pub fn new() -> Self {
+        HandCounts([0; TileKind::COUNT])
+    }
+
+    pub fn from_tiles(tiles: &[Tile]) -> Self {
+        let mut counts = HandCounts::new();
+        for tile in tiles {
+            counts.add(tile.kind());
+        }
+        counts
+    }
+
+    pub fn get(&self, kind: TileKind) -> u8 {
+        self.0[kind.index() as usize]
+    }
+
+    pub fn add(&mut self, kind: TileKind) {
+        self.0[kind.index() as usize] += 1;
+    }
+
+    /// 1枚取り除く。0枚なら false を返して何もしない。
+    pub fn remove(&mut self, kind: TileKind) -> bool {
+        let slot = &mut self.0[kind.index() as usize];
+        if *slot == 0 {
+            false
+        } else {
+            *slot -= 1;
+            true
+        }
+    }
+
+    pub fn total(&self) -> u8 {
+        self.0.iter().sum()
+    }
+
+    /// 1枚以上ある種類だけを、種類の昇順で返す。
+    pub fn kinds(&self) -> impl Iterator<Item = (TileKind, u8)> + '_ {
+        self.0.iter().enumerate().filter_map(|(index, &count)| {
+            (count > 0).then(|| (TileKind::from_index(index as u8).expect("範囲内"), count))
+        })
+    }
+
+    pub fn as_array(&self) -> &[u8; TileKind::COUNT] {
+        &self.0
+    }
+}
+```
+
+- [ ] **Step 4: shapes.rs の実装を書く**
+
+```rust
+//! 和了形の語彙。待ち形は Wave 1a が算出し、Wave 1b が符計算で消費する。
+//! 分解結果は Wave 1b が生成する。型を先に凍結することで両者が同時に着手できる。
+
+use protocol::meld::Meld;
+use protocol::tile::TileKind;
+
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum WaitShape {
+    Ryanmen,
+    Penchan,
+    Kanchan,
+    Shanpon,
+    Tanki,
+}
+
+impl WaitShape {
+    /// 符が付く待ちかどうか。両面と双碰は0符、それ以外は2符。
+    pub fn earns_fu(self) -> bool {
+        matches!(
+            self,
+            WaitShape::Penchan | WaitShape::Kanchan | WaitShape::Tanki
+        )
+    }
+}
+
+/// 面子ひとつ。順子は最小の牌で表す（123m なら 1m）。
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum Block {
+    Run(TileKind),
+    Triplet(TileKind),
+    Pair(TileKind),
+}
+
+/// 和了形をひととおりに分解した結果。同じ手が複数通りに分解できる場合、
+/// どれを採るかは点数が最大になる方を選ぶ（score.rs の責務）。
+#[derive(Clone, PartialEq, Eq, Debug)]
+pub struct Decomposition {
+    /// 副露を含まない、手の内で構成した面子。
+    pub blocks: Vec<Block>,
+    pub pair: TileKind,
+    pub melds: Vec<Meld>,
+    pub wait: WaitShape,
+}
+```
+
+- [ ] **Step 5: テストが通ることを確認する**
+
+Run: `cargo test --package mahjong-core`
+Expected: 7テスト PASS
+
+- [ ] **Step 6: コミット**
+
+```bash
+git add crates/mahjong-core/src
+git commit -m "feat(core): 判定系と点数系が共有する手牌表現と和了形の語彙を追加"
+```
+
+---
+
+### Task 13: 期待値テーブル（採点）と読み込みクレート
 
 これが「テストを仕様書にする」の実体である。Wave 1b の採点実装は、このテーブルを通すことが完了条件になる。**期待値はエージェントが勝手に変更してはならない**（変更が必要に見えたらコーディネータへ報告する）。
 
 **Files:**
 - Create: `crates/test-fixtures/{Cargo.toml,src/lib.rs}`
-- Create: `fixtures/scoring/{basic,dealer,melded,yakuman}.json`
+- Create: `fixtures/scoring/{basic,dealer,melded,yakuman,fu-coverage}.json`
 - Modify: `Cargo.toml`
 
 **Interfaces:**
@@ -2488,7 +3056,7 @@ git commit -m "chore: 全クレートのモジュール木を宣言"
 [
   {
     "id": "pinfu-tsumo-nondealer",
-    "note": "平和ツモ 20符2翻。子のツモは 400/700",
+    "note": "平和ツモ。全牌が中張牌なので断幺九も複合して20符3翻。子のツモは 700/1300",
     "concealed": "234567m23478p22s",
     "melds": [],
     "win_tile": "6p",
@@ -2509,16 +3077,17 @@ git commit -m "chore: 全クレートのモジュール木を宣言"
     "expect": {
       "yaku": [
         { "id": "pinfu", "han": 1 },
-        { "id": "menzen_tsumo", "han": 1 }
+        { "id": "menzen_tsumo", "han": 1 },
+        { "id": "tanyao", "han": 1 }
       ],
       "fu": 20,
-      "han": 2,
-      "payment": { "type": "tsumo_non_dealer", "from_dealer": 700, "from_each_non_dealer": 400 }
+      "han": 3,
+      "payment": { "type": "tsumo_non_dealer", "from_dealer": 1300, "from_each_non_dealer": 700 }
     }
   },
   {
     "id": "pinfu-riichi-ron-nondealer",
-    "note": "平和リーチのみロン。副底20＋門前ロン10で30符2翻＝2000",
+    "note": "立直＋平和＋断幺九。副底20＋門前ロン10で30符3翻＝3900。dealer-mangan-tsumo と同一の手牌であり、役の判定は一致していなければならない",
     "concealed": "234567m23467p55s",
     "melds": [],
     "win_tile": "8p",
@@ -2539,11 +3108,12 @@ git commit -m "chore: 全クレートのモジュール木を宣言"
     "expect": {
       "yaku": [
         { "id": "riichi", "han": 1 },
-        { "id": "pinfu", "han": 1 }
+        { "id": "pinfu", "han": 1 },
+        { "id": "tanyao", "han": 1 }
       ],
       "fu": 30,
-      "han": 2,
-      "payment": { "type": "ron", "total": 2000 }
+      "han": 3,
+      "payment": { "type": "ron", "total": 3900 }
     }
   },
   {
@@ -2718,6 +3288,106 @@ git commit -m "chore: 全クレートのモジュール木を宣言"
 ]
 ```
 
+- [ ] **Step 1b: 符の論点を直接固定するケースを書く**
+
+上の4ファイルは役と支払いが主眼で、符の構成要素を個別に踏んでいない。暗刻・明刻・嵌張・単騎・役牌雀頭・非平和ツモ2符と、「切り上げ満貫なし」の境界を直接固定する。
+
+`fixtures/scoring/fu-coverage.json`:
+
+```json
+[
+  {
+    "id": "ankou-kanchan-yakuhai-pair-tsumo",
+    "note": "副底20＋幺九暗刻8＋嵌張2＋役牌雀頭2＋ツモ2＝34→40符。門前ツモのみ1翻で 400/700",
+    "concealed": "111m456m789p13s55z",
+    "melds": [],
+    "win_tile": "2s",
+    "win_type": "tsumo",
+    "context": {
+      "seat_wind": "south",
+      "round_wind": "east",
+      "riichi": false,
+      "double_riichi": false,
+      "ippatsu": false,
+      "rinshan": false,
+      "chankan": false,
+      "haitei": false,
+      "houtei": false,
+      "dora_indicators": ["9z"],
+      "ura_indicators": []
+    },
+    "expect": {
+      "yaku": [{ "id": "menzen_tsumo", "han": 1 }],
+      "fu": 40,
+      "han": 1,
+      "payment": { "type": "tsumo_non_dealer", "from_dealer": 700, "from_each_non_dealer": 400 }
+    }
+  },
+  {
+    "id": "toitoi-minkou-ankou-tanki-ron",
+    "note": "副底20＋明刻2＋明刻2＋中張暗刻4＋幺九暗刻8＋役牌雀頭2＋単騎2＝40符。対々和2翻で子ロン2600",
+    "concealed": "888999s7z",
+    "melds": [
+      { "kind": "pon", "tiles": "222m", "from": 1, "called_tile": "2m" },
+      { "kind": "pon", "tiles": "555p", "from": 2, "called_tile": "5p" }
+    ],
+    "win_tile": "7z",
+    "win_type": "ron",
+    "context": {
+      "seat_wind": "south",
+      "round_wind": "east",
+      "riichi": false,
+      "double_riichi": false,
+      "ippatsu": false,
+      "rinshan": false,
+      "chankan": false,
+      "haitei": false,
+      "houtei": false,
+      "dora_indicators": ["9z"],
+      "ura_indicators": []
+    },
+    "expect": {
+      "yaku": [{ "id": "toitoi", "han": 2 }],
+      "fu": 40,
+      "han": 2,
+      "payment": { "type": "ron", "total": 2600 }
+    }
+  },
+  {
+    "id": "no-round-up-mangan-30fu-4han",
+    "note": "切り上げ満貫なしの境界。30符4翻は8000ではなく7700。pinfu-riichi-ron-nondealer とドラ表示牌だけが違う",
+    "concealed": "234567m23467p55s",
+    "melds": [],
+    "win_tile": "8p",
+    "win_type": "ron",
+    "context": {
+      "seat_wind": "south",
+      "round_wind": "east",
+      "riichi": true,
+      "double_riichi": false,
+      "ippatsu": false,
+      "rinshan": false,
+      "chankan": false,
+      "haitei": false,
+      "houtei": false,
+      "dora_indicators": ["4m"],
+      "ura_indicators": []
+    },
+    "expect": {
+      "yaku": [
+        { "id": "riichi", "han": 1 },
+        { "id": "pinfu", "han": 1 },
+        { "id": "tanyao", "han": 1 },
+        { "id": "dora", "han": 1 }
+      ],
+      "fu": 30,
+      "han": 4,
+      "payment": { "type": "ron", "total": 7700 }
+    }
+  }
+]
+```
+
 - [ ] **Step 2: 失敗するテストを書く**
 
 `crates/test-fixtures/src/lib.rs` の末尾に置く:
@@ -2731,7 +3401,62 @@ mod tests {
     #[test]
     fn every_scoring_case_loads() {
         let cases = load_scoring_cases();
-        assert!(cases.len() >= 7, "実際に読めたのは {} 件", cases.len());
+        assert!(cases.len() >= 10, "実際に読めたのは {} 件", cases.len());
+    }
+
+    /// 同じ手牌・同じ和了牌なら、役の集合も一致していなければならない。
+    /// 断幺九の取りこぼしはこの検査で機械的に見つかる。
+    #[test]
+    fn identical_hands_declare_identical_yaku_sets() {
+        use std::collections::BTreeSet;
+        let mut by_hand: std::collections::HashMap<(String, String), Vec<&ScoringCase>> =
+            std::collections::HashMap::new();
+        let cases = load_scoring_cases();
+        for case in &cases {
+            if !case.melds.is_empty() {
+                continue;
+            }
+            by_hand
+                .entry((case.concealed.clone(), case.win_tile.clone()))
+                .or_default()
+                .push(case);
+        }
+
+        for ((hand, win), group) in by_hand {
+            // 状況役（立直・ツモ・ドラ）は文脈で変わるため、手牌のみで決まる役に絞って比較する。
+            let structural = |case: &ScoringCase| -> BTreeSet<YakuId> {
+                case.expect
+                    .yaku
+                    .iter()
+                    .map(|y| y.id)
+                    .filter(|id| {
+                        !id.is_dora()
+                            && !matches!(
+                                id,
+                                YakuId::Riichi
+                                    | YakuId::DoubleRiichi
+                                    | YakuId::Ippatsu
+                                    | YakuId::MenzenTsumo
+                                    | YakuId::HaiteiRaoyue
+                                    | YakuId::HouteiRaoyui
+                                    | YakuId::RinshanKaihou
+                                    | YakuId::Chankan
+                            )
+                    })
+                    .collect()
+            };
+            let Some(first) = group.first() else { continue };
+            let expected = structural(first);
+            for case in &group {
+                assert_eq!(
+                    structural(case),
+                    expected,
+                    "{hand}+{win}: {} と {} で手牌由来の役が食い違う",
+                    first.id,
+                    case.id
+                );
+            }
+        }
     }
 
     #[test]
@@ -2941,14 +3666,14 @@ git commit -m "feat(fixtures): 採点の期待値テーブルと読み込みを�
 
 ---
 
-### Task 13: 期待値テーブル（向聴数）
+### Task 14: 期待値テーブル（向聴数）
 
 **Files:**
 - Create: `fixtures/shanten/basic.json`
 - Modify: `crates/test-fixtures/src/lib.rs`
 
 **Interfaces:**
-- Consumes: Task 12 の `load_dir`
+- Consumes: Task 13 の `load_dir`
 - Produces:
   - `pub fn load_shanten_cases() -> Vec<ShantenCase>`
   - `pub struct ShantenCase { pub id: String, pub note: String, pub concealed: String, pub melds: u8, pub expect: ShantenExpect }`
@@ -2970,8 +3695,8 @@ git commit -m "feat(fixtures): 採点の期待値テーブルと読み込みを�
     "expect": { "overall": -1, "chiitoitsu": null, "kokushi": null }
   },
   {
-    "id": "tenpai-ryanmen",
-    "note": "3面子＋両面＋雀頭でテンパイ（3p待ち）",
+    "id": "tenpai-penchan",
+    "note": "3面子＋辺張＋雀頭でテンパイ（12p の 3p 待ち）",
     "concealed": "123m456m789m12p11s",
     "melds": 0,
     "expect": { "overall": 0, "chiitoitsu": null, "kokushi": null }
@@ -3027,7 +3752,7 @@ git commit -m "feat(fixtures): 採点の期待値テーブルと読み込みを�
   },
   {
     "id": "melded-tenpai",
-    "note": "1副露して残り10枚。2面子＋両面＋雀頭でテンパイ",
+    "note": "1副露して残り10枚。2面子＋辺張＋雀頭でテンパイ（12p の 3p 待ち）",
     "concealed": "123m456m12p11s",
     "melds": 1,
     "expect": { "overall": 0, "chiitoitsu": null, "kokushi": null }
@@ -3142,7 +3867,7 @@ git commit -m "feat(fixtures): 向聴数の期待値テーブルを追加"
 
 ---
 
-### Task 14: エージェント作業規約
+### Task 15: エージェント作業規約
 
 Wave 1 以降、複数のエージェントが別々の worktree で同時に作業する。衝突と手戻りを防ぐ規約をリポジトリに置く。ファイル名を `AGENTS.md` にするのは、Codex と opencode がこの名前を自動で読むためである。
 
@@ -3150,7 +3875,7 @@ Wave 1 以降、複数のエージェントが別々の worktree で同時に作
 - Create: `AGENTS.md`
 
 **Interfaces:**
-- Consumes: Task 11 のモジュール木、Task 12/13 の期待値テーブル
+- Consumes: Task 11 のモジュール木、Task 12 の共有語彙、Task 13/14 の期待値テーブル
 - Produces: なし（ドキュメント）
 
 - [ ] **Step 1: AGENTS.md を書く**
@@ -3174,6 +3899,22 @@ Wave 1 以降、複数のエージェントが別々の worktree で同時に作
   新しいファイルが必要になったらコーディネータへ報告する
 - 他のクレートを編集しない。他クレートの API が足りない場合も、自分で足さずに報告する
 - `crates/protocol` は凍結済みである。変更が必要に見えたら必ず報告する
+- **`mahjong-core/src/hand.rs` と `shapes.rs` は共有語彙であり編集禁止。**
+  判定系と点数系が同じ表現の上で書くための土台である
+
+### mahjong-core のファイル所有権
+
+| ファイル | 所有 |
+|---|---|
+| `hand.rs` / `shapes.rs` | Wave 0（編集禁止） |
+| `shanten/*.rs` / `wait.rs` / `furiten.rs` / `callable.rs` | Wave 1a |
+| `decompose.rs` / `yaku_check/*.rs` / `fu.rs` / `score.rs` | Wave 1b |
+
+Wave 1a は面子分解が必要になっても `decompose.rs` を編集せず、自前の探索を
+`shanten/standard.rs` の中に持つ。Wave 1b は待ち形の判定を再実装せず、
+`wait.rs` の公開結果を消費する。
+
+**ロンの可否はどちらにも実装しない。**役の有無に依存するため、Wave 2 で engine が結線する。
 
 ## 期待値テーブル
 
@@ -3244,20 +3985,25 @@ git commit -m "docs: エージェント作業規約を追加"
 - [ ] `pnpm --filter @real-mahjong/web typecheck` が通る
 - [ ] `apps/web/src/protocol/` に `ClientEvent.ts` があり、`Event.ts` が**無い**
 - [ ] `cargo tree --package mahjong-wasm --depth 1` に `mahjong-engine` が現れない
-- [ ] `fixtures/scoring` が7件以上、`fixtures/shanten` が10件以上読める
-- [ ] `AGENTS.md` が存在する
+- [ ] `fixtures/scoring` が10件以上、`fixtures/shanten` が10件以上読める
+- [ ] 同一手牌のケース同士で、手牌由来の役の集合が一致している
+- [ ] `Ryuukyoku` の射影がノーテン者の手牌を落とす（負例テストが通る）
+- [ ] `AGENTS.md` が存在し、ファイル所有権の表を含む
 
 ## 次の計画
 
 Wave 0 が完了したら、以下の4つを別々の計画書として書き、並行して実行する。
 
-| 計画 | 範囲 | 想定エージェント |
-|---|---|---|
-| Wave 1a | `mahjong-core` 判定系（手牌表現・向聴数・待ち・鳴き可否・振聴） | Codex |
-| Wave 1b | `mahjong-core` 点数系（和了形分解・役判定・符・点数） | Codex |
-| Wave 1c | 3D卓と牌の描画（`apps/web`） | Claude |
-| Wave 1d | 演出タイムライン骨格（`apps/web`） | Claude |
+| 計画 | 範囲 | 所有ファイル | 想定エージェント |
+|---|---|---|---|
+| Wave 1a | 判定系（向聴数・待ち・鳴き可否・振聴） | `shanten/*` `wait.rs` `furiten.rs` `callable.rs` | Codex |
+| Wave 1b | 点数系（和了形分解・役判定・符・点数） | `decompose.rs` `yaku_check/*` `fu.rs` `score.rs` | Codex |
+| Wave 1c | 3D卓と牌の描画 | `apps/web/src/scene/` | Claude |
+| Wave 1d | 演出タイムライン骨格 | `apps/web/src/timeline/` | Claude |
 
-Wave 1c と 1d はどちらも `apps/web` を触るため、ディレクトリを分ける。
-1c は `apps/web/src/scene/`、1d は `apps/web/src/timeline/` のみを編集し、
+1a と 1b は Task 12 の共有語彙（`hand.rs` / `shapes.rs`）の上で書くため、
+互いの実装完了を待たずに着手できる。1b は `WaitShape` を直接組み立てて
+符計算のテストを書けばよく、1a の `wait.rs` が未完成でも進められる。
+
+1c と 1d はどちらも `apps/web` を触るため、ディレクトリで分ける。
 `apps/web/src/main.ts` の結線は Wave 1 完了後にコーディネータが行う。
