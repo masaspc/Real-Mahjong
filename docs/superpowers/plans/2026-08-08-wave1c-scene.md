@@ -270,9 +270,10 @@ git commit -m "feat(web): 卓上の座標計算を純粋関数として追加"
 
 **Interfaces:**
 - Produces:
-  - `export const ATLAS = { columns: 8, rows: 5, cells: 38 }`
-  - `export function atlasIndexOf(encoded: number): number` — 牌のエンコード（0..=36）→ アトラスのセル番号。37 は裏面
-  - `export const BACK_INDEX: number`
+  - `export const ATLAS = { columns: 8, rows: 5, cells: 39 }`
+  - `export function atlasIndexOf(encoded: number): number` — 牌のエンコード（0..=36）→ アトラスのセル番号
+  - `export const BACK_INDEX: number` — 裏面（37）
+  - `export const BODY_INDEX: number` — 牌体（38）
   - `export function uvOffsetOf(cellIndex: number): { u: number; v: number; du: number; dv: number }`
   - `export function drawPlaceholderAtlas(size?: number): HTMLCanvasElement`
 
@@ -280,7 +281,7 @@ git commit -m "feat(web): 卓上の座標計算を純粋関数として追加"
 
 ```ts
 import { describe, expect, it } from "vitest";
-import { ATLAS, BACK_INDEX, atlasIndexOf, uvOffsetOf } from "./atlas";
+import { ATLAS, BACK_INDEX, BODY_INDEX, atlasIndexOf, uvOffsetOf } from "./atlas";
 
 describe("atlasIndexOf", () => {
   it("maps every encoded tile to its own cell", () => {
@@ -295,12 +296,15 @@ describe("atlasIndexOf", () => {
     expect(seen.size).toBe(37);
   });
 
-  it("gives the back face its own cell", () => {
-    expect(BACK_INDEX).toBeGreaterThanOrEqual(0);
-    expect(BACK_INDEX).toBeLessThan(ATLAS.cells);
-    for (let encoded = 0; encoded <= 36; encoded += 1) {
-      expect(atlasIndexOf(encoded)).not.toBe(BACK_INDEX);
+  it("gives the back face and the tile body their own cells", () => {
+    for (const reserved of [BACK_INDEX, BODY_INDEX]) {
+      expect(reserved).toBeGreaterThanOrEqual(0);
+      expect(reserved).toBeLessThan(ATLAS.cells);
+      for (let encoded = 0; encoded <= 36; encoded += 1) {
+        expect(atlasIndexOf(encoded)).not.toBe(reserved);
+      }
     }
+    expect(BACK_INDEX).not.toBe(BODY_INDEX);
   });
 
   it("rejects tiles outside the encoding", () => {
@@ -362,12 +366,20 @@ Expected: `./atlas` が見つからず失敗
 export const ATLAS = {
   columns: 8,
   rows: 5,
-  /** 34種 + 赤ドラ3 + 裏面1 */
-  cells: 38,
+  /** 34種 + 赤ドラ3 + 裏面1 + 牌体1 */
+  cells: 39,
 } as const;
 
 /** 裏面のセル。牌のエンコード（0..=36）とは重ならない位置に置く。 */
 export const BACK_INDEX = 37;
+
+/**
+ * 牌体（側面と上下）のセル。
+ *
+ * 牌面（白）と牌体（黄）を1マテリアルで持つため、アトラスに牌体の
+ * 色も含める。これが無いと側面にアトラス全体が引き伸ばされて映る。
+ */
+export const BODY_INDEX = 38;
 
 /** 牌のエンコード（0..=36）→ アトラスのセル番号。 */
 export function atlasIndexOf(encoded: number): number {
@@ -403,7 +415,7 @@ const HONOR_MARK = ["東", "南", "西", "北", "白", "發", "中"] as const;
 
 /** そのセルに描く文字。プレースホルダ用。 */
 function labelOf(cellIndex: number): { text: string; red: boolean } {
-  if (cellIndex === BACK_INDEX) {
+  if (cellIndex === BACK_INDEX || cellIndex === BODY_INDEX) {
     return { text: "", red: false };
   }
   if (cellIndex >= 34) {
@@ -445,7 +457,8 @@ export function drawPlaceholderAtlas(size = 1024): HTMLCanvasElement {
     const y = row * cellH;
     const label = labelOf(cell);
 
-    ctx.fillStyle = cell === BACK_INDEX ? "#c9a227" : "#f6f1e3";
+    ctx.fillStyle =
+      cell === BACK_INDEX ? "#c9a227" : cell === BODY_INDEX ? "#e8d9a0" : "#f6f1e3";
     ctx.fillRect(x + 2, y + 2, cellW - 4, cellH - 4);
 
     if (label.text !== "") {
@@ -675,7 +688,9 @@ git commit -m "feat(web): 動く牌の個別メッシュを使い回すプール
   - `export function applyFaceUv(geometry: THREE.BufferGeometry, encoded: number, faceUp: boolean): void`
   - `export function createTileMaterial(atlas: THREE.Texture): THREE.Material`
 
-牌面（白）と牌体（黄）を1マテリアルで持つため、アトラスに牌体用のセルも含める。
+牌面（白）と牌体（黄）を1マテリアルで持つ。`createTileGeometry` が全面を
+牌体セル（`BODY_INDEX`）で塗り、`applyFaceUv` が牌面（+z）だけを上書きする。
+この二段構えにしないと、側面にアトラス全体が引き伸ばされて映る。
 
 - [ ] **Step 1: 失敗するテストを書く**
 
@@ -765,43 +780,53 @@ import {
 } from "three";
 
 import { TILE } from "./layout";
-import { BACK_INDEX, atlasIndexOf, uvOffsetOf } from "./atlas";
+import { BACK_INDEX, BODY_INDEX, atlasIndexOf, uvOffsetOf } from "./atlas";
 
-/** 牌面が +z を向いた箱。頂点ごとに uv を持つ。 */
+/** 牌面（+z）以外を牌体セルで塗った箱。 */
 export function createTileGeometry(): BufferGeometry {
   const geometry = new BoxGeometry(TILE.width, TILE.height, TILE.depth);
   // BoxGeometry は面ごとに 4 頂点、6 面で 24 頂点を持つ。
-  // 牌面（+z）は 5 番目の面、つまり頂点 16..19。
+  // 既定の uv は 0..1 の全面なので、そのままだとアトラス全体が
+  // 引き伸ばされて側面に映る。全頂点をいったん牌体セルへ寄せる。
+  fillFaceUv(geometry, 0, 24, BODY_INDEX);
   return geometry;
 }
 
-/** 牌面（+z）の4頂点だけをアトラスの該当セルへ移す。 */
-export function applyFaceUv(
+/** 指定範囲の頂点を、アトラスの1セルへ割り当てる。 */
+function fillFaceUv(
   geometry: BufferGeometry,
-  encoded: number,
-  faceUp: boolean,
+  start: number,
+  count: number,
+  cell: number,
 ): void {
   const uv = geometry.getAttribute("uv");
   if (uv === undefined) {
     throw new Error("uv 属性を持たないジオメトリには適用できない");
   }
-
-  const cell = faceUp ? atlasIndexOf(encoded) : BACK_INDEX;
   const { u, v, du, dv } = uvOffsetOf(cell);
-
-  // +z 面の 4 頂点。左上・右上・左下・右下の順。
-  const FACE_START = 16;
+  // 各面は 左上・右上・左下・右下 の順に4頂点。
   const corners: [number, number][] = [
     [u, v + dv],
     [u + du, v + dv],
     [u, v],
     [u + du, v],
   ];
-  for (let i = 0; i < corners.length; i += 1) {
-    const corner = corners[i]!;
-    uv.setXY(FACE_START + i, corner[0], corner[1]);
+  for (let i = 0; i < count; i += 1) {
+    const corner = corners[i % 4] as [number, number];
+    uv.setXY(start + i, corner[0], corner[1]);
   }
   uv.needsUpdate = true;
+}
+
+/** 牌面（+z）の4頂点だけをアトラスの該当セルへ移す。牌体は触らない。 */
+export function applyFaceUv(
+  geometry: BufferGeometry,
+  encoded: number,
+  faceUp: boolean,
+): void {
+  const cell = faceUp ? atlasIndexOf(encoded) : BACK_INDEX;
+  // +z 面は 5 番目の面、つまり頂点 16..19。
+  fillFaceUv(geometry, 16, 4, cell);
 }
 
 /**
@@ -854,6 +879,7 @@ git commit -m "feat(web): 牌のジオメトリと面 UV の差し替えを追�
 ```ts
 import {
   AmbientLight,
+  BufferGeometry,
   DirectionalLight,
   Mesh,
   MeshStandardMaterial,
@@ -863,6 +889,7 @@ import {
   Texture,
   WebGLRenderer,
 } from "three";
+import { mergeGeometries } from "three/examples/jsm/utils/BufferGeometryUtils.js";
 
 import { drawPlaceholderAtlas } from "./atlas";
 import { TILE, discardPosition, handPosition, wallPosition } from "./layout";
@@ -882,6 +909,8 @@ export class TableScene {
   readonly #pool = new TilePool();
   readonly #atlas: Texture;
   readonly #meshes = new Map<number, Mesh>();
+  /** 山はまとめて1メッシュ。個別には動かさない。 */
+  #wall: Mesh | null = null;
 
   constructor(canvas: HTMLCanvasElement) {
     this.#renderer = new WebGLRenderer({ canvas, antialias: true });
@@ -909,7 +938,13 @@ export class TableScene {
     this.#scene.add(felt);
   }
 
-  /** 4人分の手牌・河・山を仮に並べて、配置と見た目を確かめる。 */
+  /**
+   * 4人分の手牌・河・山を仮に並べて、配置と見た目を確かめる。
+   *
+   * **山は1つのメッシュにまとめる。** 山は側面しか見えず個別に動かないため、
+   * 136枚をそれぞれメッシュにするのは仕様 7.1 に反する。個別メッシュは
+   * 手牌・鳴き・河の直近だけに使い、常時50前後に収める。
+   */
   showDemoHand(): void {
     for (let seat = 0; seat < 4; seat += 1) {
       for (let i = 0; i < 13; i += 1) {
@@ -919,29 +954,34 @@ export class TableScene {
       for (let i = 0; i < 8; i += 1) {
         this.#place((i * 3) % 34, discardPosition(seat, i), true);
       }
-      for (let i = 0; i < 34; i += 1) {
-        this.#place(0, wallPosition(seat, i), false);
-      }
     }
+    this.#buildWall();
   }
 
-  #place(encoded: number, position: { x: number; y: number; z: number }, faceUp: boolean): void {
-    const tile = this.#pool.acquire(encoded);
-    tile.position = position;
-    tile.faceUp = faceUp;
-
-    const geometry = createTileGeometry();
-    applyFaceUv(geometry, encoded, faceUp);
-    const mesh = new Mesh(geometry, createTileMaterial(this.#atlas));
-    mesh.position.set(position.x, position.y, position.z);
-    // 手牌は立てて、河と山は寝かせる。
-    if (position.y > TILE.depth) {
-      mesh.rotation.x = -Math.PI / 12;
-    } else {
-      mesh.rotation.x = -Math.PI / 2;
+  /** 山をまとめて1メッシュにする。個別に動かす必要が出た牌だけ後で切り出す。 */
+  #buildWall(): void {
+    const parts: BufferGeometry[] = [];
+    for (let seat = 0; seat < 4; seat += 1) {
+      for (let i = 0; i < 34; i += 1) {
+        const position = wallPosition(seat, i);
+        const geometry = createTileGeometry();
+        // 山は伏せてあるので全て裏面。
+        applyFaceUv(geometry, 0, false);
+        geometry.rotateX(-Math.PI / 2);
+        geometry.translate(position.x, position.y, position.z);
+        parts.push(geometry);
+      }
     }
-    this.#scene.add(mesh);
-    this.#meshes.set(tile.id, mesh);
+
+    const merged = mergeGeometries(parts, false);
+    for (const part of parts) {
+      part.dispose();
+    }
+    if (merged === null) {
+      throw new Error("山のジオメトリをまとめられなかった");
+    }
+    this.#wall = new Mesh(merged, createTileMaterial(this.#atlas));
+    this.#scene.add(this.#wall);
   }
 
   resize(width: number, height: number): void {
@@ -959,6 +999,8 @@ export class TableScene {
       mesh.geometry.dispose();
     }
     this.#meshes.clear();
+    this.#wall?.geometry.dispose();
+    this.#wall = null;
     this.#atlas.dispose();
     this.#renderer.dispose();
   }
