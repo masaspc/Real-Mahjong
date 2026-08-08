@@ -16,7 +16,7 @@
       "chankan": false,
       "haitei": false,
       "houtei": false,
-      "dora_indicators": ["9z"],
+      "dora_indicators": ["3z"],
       "ura_indicators": []
     },
     "expect": {
@@ -46,7 +46,7 @@
       "chankan": false,
       "haitei": false,
       "houtei": false,
-      "dora_indicators": ["9z"],
+      "dora_indicators": ["3z"],
       "ura_indicators": []
     },
     "expect": {

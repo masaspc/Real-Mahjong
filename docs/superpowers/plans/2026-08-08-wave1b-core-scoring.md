@@ -941,7 +941,12 @@ git commit -m "feat(core): 通常役の判定を実装"
 
 **Interfaces:**
 - Consumes: `WinForm`、`HandContext`、`crate::shapes::WaitShape`
-- Produces: `pub fn fu_of(form: &WinForm, context: &HandContext, has_pinfu: bool) -> u8`
+- Produces: `pub fn fu_of(form: &WinForm, context: &HandContext, has_pinfu: bool, win_tile: TileKind) -> u8`
+
+**`win_tile` を受け取る理由。** 双碰待ちのロンでは刻子のひとつが明刻になるが、
+`Decomposition` だけでは**どの刻子か**が分からない。中張牌の刻子（明2符/暗4符）と
+幺九牌の刻子（明4符/暗8符）が同居していると符が食い違うため、和了牌そのものが要る。
+（四暗刻・三暗刻は「暗刻がいくつか」だけが問題なのでこの情報を必要としない。）
 
 `has_pinfu` を引数で受け取るのは、平和ツモ20符固定の判定に役の成立可否が要るためである。
 役判定を fu の中で再実装しない。
@@ -962,6 +967,7 @@ mod tests {
     use protocol::seat::Wind;
 
     fn fu_for(concealed: &str, win: &str, context: &HandContext, pinfu: bool) -> u8 {
+        let win_tile = parse_tile(win).unwrap();
         let forms = decompose(
             &parse_hand(concealed).unwrap(),
             &[],
@@ -969,7 +975,7 @@ mod tests {
         );
         forms
             .iter()
-            .map(|f| fu_of(f, context, pinfu))
+            .map(|f| fu_of(f, context, pinfu, win_tile.kind()))
             .max()
             .expect("和了形が無い")
     }
@@ -1033,7 +1039,12 @@ mod tests {
             &melds,
             parse_tile("6p").unwrap(),
         );
-        let fu = forms.iter().map(|f| fu_of(f, &context, false)).max().unwrap();
+        let win_tile = parse_tile("6p").unwrap();
+        let fu = forms
+            .iter()
+            .map(|f| fu_of(f, &context, false, win_tile.kind()))
+            .max()
+            .unwrap();
         assert_eq!(fu, 30);
     }
 }
