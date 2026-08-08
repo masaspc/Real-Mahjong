@@ -4,4 +4,6 @@
 //! 実装の各層はこのクレートにのみ依存し、互いには依存しない。
 
 pub mod notation;
+pub mod ruleset;
+pub mod seat;
 pub mod tile;
