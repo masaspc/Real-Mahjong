@@ -244,6 +244,26 @@ mod tests {
         assert!(unique.iter().all(|p| (122..136).contains(p)), "王牌の範囲外");
     }
 
+    /// 嶺上を引いても、まだ誰の手にも渡っていない牌の数は減らない。
+    /// ツモれなくなるだけで山からは消えないためである。
+    #[test]
+    fn a_replacement_draw_only_moves_one_tile_out_of_the_wall() {
+        let mut wall = Wall::new(&seed(11), &rules());
+        let before = wall.tiles_in_wall().count();
+        assert!(wall.draw_replacement().is_some());
+        assert_eq!(
+            wall.tiles_in_wall().count(),
+            before - 1,
+            "嶺上で引いた1枚だけが山から出る"
+        );
+    }
+
+    /// 配牌前の山は136枚。
+    #[test]
+    fn a_fresh_wall_holds_every_tile() {
+        assert_eq!(Wall::new(&seed(12), &rules()).tiles_in_wall().count(), 136);
+    }
+
     /// 嶺上を引く前後でドラ表示牌そのものが変わらない。
     #[test]
     fn a_replacement_draw_does_not_change_the_revealed_dora() {
@@ -430,10 +450,14 @@ impl Wall {
         self.tiles.iter().copied()
     }
 
-    /// いま山に残っている牌。未取得の生牌と、未取得の嶺上牌。
-    /// ドラ表示牌は開示されていても山に属したままである。
+    /// いま山に残っている牌。まだ誰の手にも渡っていない牌すべて。
+    ///
+    /// **`live_end` ではなく `DEAD_WALL_START` まで数える。** 嶺上を引くと
+    /// `live_end` が下がるが、そのとき生牌の末尾はツモれなくなるだけで
+    /// 山からは消えない（王牌へ組み込まれる）。`live_end` で切ると
+    /// その1枚を数え落とし、牌の総数が135枚になる。
     pub fn tiles_in_wall(&self) -> impl Iterator<Item = Tile> + '_ {
-        let live = self.tiles[self.next..self.live_end].iter().copied();
+        let live = self.tiles[self.next..DEAD_WALL_START].iter().copied();
         let dead = (0..MAX_DORA * 2)
             .map(|i| self.tiles[DEAD_WALL_START + i])
             .chain(
@@ -502,10 +526,10 @@ impl Wall {
 - [ ] **Step 5: テストが通ることを確認する**
 
 Run: `cargo test --package mahjong-engine wall`
-Expected: 14テスト PASS
+Expected: 16テスト PASS
 
-`a_fixed_seed_matches_its_golden_vector` は最初に落ちる。**実際に出力された
-ハッシュを読み取ってテストへ書き込み、以後変更しない。**
+`a_fixed_seed_matches_its_golden_vector` の期待値は計画作成時に算出済みである。
+**落ちたらテストを直すのではなく、実装が計画どおりでないことを疑う。**
 
 - [ ] **Step 6: コミット**
 
@@ -805,6 +829,19 @@ mod tests {
         assert!(w.respond(Seat::new(1), CallResponse::Ron).is_ok());
     }
 
+    /// 同順位が3件並んでも検出できる。最初に見たものとだけ比べると
+    /// チー→ポン→ポン の順で2つ目のポンを見落とす。
+    #[test]
+    fn non_ron_ties_are_detected_regardless_of_order() {
+        let mut w = window([vec![], pon_only(), pon_only(), chi_only()]);
+        w.respond(Seat::new(3), chi_response()).unwrap();
+        w.respond(Seat::new(1), pon_response()).unwrap();
+        w.respond(Seat::new(2), pon_response()).unwrap();
+        let ties = w.non_ron_ties();
+        assert_eq!(ties.len(), 2, "ポンの競合2件を検出するはず: {ties:?}");
+        assert!(ties.contains(&Seat::new(1)) && ties.contains(&Seat::new(2)));
+    }
+
     /// 非ロンの同順位は牌の枚数上ありえない。
     /// 2人がポンするには各自2枚＋捨て牌1枚で5枚必要だが、牌は1種4枚しかない。
     /// ポンと明槓の競合も6枚必要で成立しない。席順ロジックは書かず検査で守る。
@@ -1017,23 +1054,26 @@ impl ReactionWindow {
         Outcome::PassAll
     }
 
-    /// ロン以外で同じ優先度の応答が2つ以上あるか。
+    /// ロン以外で同じ優先度の応答が2つ以上ある席。
+    ///
     /// 牌は1種4枚しかないため起こりえない。起きたら呼び出し側が落とす。
+    /// **優先度ごとに数える。**最初に見たものとだけ比べると、
+    /// チー→ポン→ポン の順で来たときに2つ目のポンを見落とす。
     pub fn non_ron_ties(&self) -> Vec<Seat> {
-        let mut seen: Option<Priority> = None;
         let mut ties = Vec::new();
-        for seat in Seat::ALL {
-            let Some(response) = self.responses[seat.index()] else {
-                continue;
-            };
-            let p = priority_of_response(&response);
-            if p == Priority::Pass || p == Priority::Ron {
-                continue;
-            }
-            match seen {
-                Some(previous) if previous == p => ties.push(seat),
-                Some(_) => {}
-                None => seen = Some(p),
+        for target in [Priority::Chi, Priority::Pon] {
+            let matching: Vec<Seat> = Seat::ALL
+                .iter()
+                .copied()
+                .filter(|s| {
+                    self.responses[s.index()]
+                        .as_ref()
+                        .map(priority_of_response)
+                        == Some(target)
+                })
+                .collect();
+            if matching.len() >= 2 {
+                ties.extend(matching);
             }
         }
         ties
@@ -1044,7 +1084,7 @@ impl ReactionWindow {
 - [ ] **Step 4: テストが通ることを確認する**
 
 Run: `cargo test --package mahjong-engine reaction`
-Expected: 21テスト PASS
+Expected: 22テスト PASS
 
 - [ ] **Step 5: コミット**
 
@@ -1812,6 +1852,16 @@ mod tests {
         assert_tiles_conserved(&fresh());
     }
 
+    /// 嶺上を引いた後も136枚のまま。
+    /// tiles_in_wall が live_end で切っていると135枚になって落ちる。
+    #[test]
+    fn a_replacement_draw_keeps_the_count() {
+        let mut state = fresh();
+        let tile = state.wall.draw_replacement().expect("嶺上がある");
+        state.seat_mut(Seat::new(0)).hand.push(tile);
+        assert_tiles_conserved(&state);
+    }
+
     #[test]
     #[should_panic(expected = "136")]
     fn a_missing_tile_is_caught() {
@@ -1914,7 +1964,7 @@ pub fn assert_no_simultaneous_non_ron(window: &ReactionWindow) {
 - [ ] **Step 4: テストが通ることを確認する**
 
 Run: `cargo test --package mahjong-engine invariant`
-Expected: 6テスト PASS
+Expected: 7テスト PASS
 
 - [ ] **Step 5: コミット**
 
@@ -1942,7 +1992,7 @@ panic メッセージに「136」を含める（テストが `expected` で照�
 panic メッセージに「点棒」を含める。
 
 Run: `cargo test --package mahjong-engine invariant`
-Expected: 6テスト PASS
+Expected: 7テスト PASS
 
 ```bash
 git commit -m "feat(engine): 不変条件の検査を実装"
