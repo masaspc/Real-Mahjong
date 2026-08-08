@@ -9,3 +9,6 @@ protocol = { path = "../protocol" }
 
 [lints]
 workspace = true
+
+[dev-dependencies]
+test-fixtures = { path = "../test-fixtures" }
