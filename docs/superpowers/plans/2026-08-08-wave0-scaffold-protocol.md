@@ -1304,9 +1304,15 @@ use crate::seat::{Round, Seat};
 use crate::tile::Tile;
 use crate::yaku::YakuId;
 
-#[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Debug, Serialize, Deserialize)]
+/// プレイヤーの識別子。
+///
+/// 数値ではなく文字列にする。u64 だと JSON 上は数値になり、JavaScript の
+/// `JSON.parse` が安全整数の範囲（2^53）を超えた値を壊す。ID に算術は不要なので、
+/// 文字列にしておけばこの種の事故が原理的に起きず、後から UUID へ移っても
+/// 契約が変わらない。
+#[derive(Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Debug, Serialize, Deserialize)]
 #[serde(transparent)]
-pub struct PlayerId(pub u64);
+pub struct PlayerId(pub String);
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
