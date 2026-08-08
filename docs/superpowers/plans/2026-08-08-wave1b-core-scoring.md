@@ -184,7 +184,7 @@ mod tests {
     /// 111222333m は「111 222 333」とも「123 123 123」とも読める。
     #[test]
     fn ambiguous_hands_yield_every_decomposition() {
-        let found = forms("11122233m44556s", "4s");
+        let found = forms("111222333m456p4s", "4s");
         let standards: Vec<_> = found
             .iter()
             .filter_map(|f| match f {
@@ -448,8 +448,10 @@ fn kokushi_shape(counts: &HandCounts, win_kind: TileKind) -> Option<(TileKind, b
         return None;
     }
     let pair = pair?;
-    // 和了牌が対子を作った側なら単騎、そうでなければ十三面待ちだった。
-    Some((pair, pair != win_kind))
+    // 和了牌が対子を作ったなら、和了前は13種すべてを1枚ずつ持っていた
+    // ことになる（＝十三面待ち）。対子が既にあったなら、欠けていた1種を
+    // 待っていた単騎である。
+    Some((pair, pair == win_kind))
 }
 
 fn run_from(kind: TileKind) -> Option<[TileKind; 3]> {
@@ -665,30 +667,30 @@ mod tests {
 
     #[test]
     fn daisangen_needs_all_three_dragons() {
-        let found = detect_for("555z666z777z123m11p", "1p", WinType::Ron);
+        let found = detect_for("555z666z777z123m1p", "1p", WinType::Ron);
         assert!(found.contains(&YakuId::Daisangen));
     }
 
     #[test]
     fn tsuuiisou_needs_every_tile_to_be_an_honor() {
-        let found = detect_for("111z222z333z444z55z", "5z", WinType::Ron);
+        let found = detect_for("111z222z333z444z5z", "5z", WinType::Ron);
         assert!(found.contains(&YakuId::Tsuuiisou));
     }
 
     #[test]
     fn ryuuiisou_accepts_only_green_tiles() {
-        let found = detect_for("234s234s666s888s66z", "6z", WinType::Ron);
+        let found = detect_for("234s234s666s888s6z", "6z", WinType::Ron);
         assert!(found.contains(&YakuId::Ryuuiisou));
 
         // 5s は緑一色に使えない
-        let not_green = detect_for("345s345s666s888s66z", "6z", WinType::Ron);
+        let not_green = detect_for("345s345s666s888s6z", "6z", WinType::Ron);
         assert!(!not_green.contains(&YakuId::Ryuuiisou));
     }
 
     #[test]
     fn suuankou_requires_four_concealed_triplets() {
         // ツモなら4暗刻
-        let found = detect_for("111m222m333m444m55p", "5p", WinType::Tsumo);
+        let found = detect_for("111m222m333m444m5p", "5p", WinType::Tsumo);
         assert!(found.contains(&YakuId::Suuankou));
         assert!(found.contains(&YakuId::SuuankouTanki));
     }
@@ -854,19 +856,19 @@ mod tests {
 
     #[test]
     fn ittsu_needs_all_three_runs_in_one_suit() {
-        let found = detect_best("123456789m22p345s", "5s", &plain_tsumo());
+        let found = detect_best("123456789m22p34s", "5s", &plain_tsumo());
         assert!(found.iter().any(|(y, _)| *y == YakuId::Ittsu));
     }
 
     #[test]
     fn sanshoku_needs_the_same_numbers_in_three_suits() {
-        let found = detect_best("234m234p234s567m11z", "7m", &plain_tsumo());
+        let found = detect_best("234m234p234s56m11z", "7m", &plain_tsumo());
         assert!(found.iter().any(|(y, _)| *y == YakuId::SanshokuDoujun));
     }
 
     #[test]
     fn ryanpeikou_supersedes_iipeiko() {
-        let found = detect_best("112233m445566p11s", "6p", &plain_tsumo());
+        let found = detect_best("112233m44556p11s", "6p", &plain_tsumo());
         assert!(found.iter().any(|(y, _)| *y == YakuId::Ryanpeikou));
         assert!(
             !found.iter().any(|(y, _)| *y == YakuId::Iipeiko),
@@ -876,14 +878,14 @@ mod tests {
 
     #[test]
     fn junchan_supersedes_chanta() {
-        let found = detect_best("123m789m123p789p11s", "1s", &plain_tsumo());
+        let found = detect_best("123m789m123p789p1s", "1s", &plain_tsumo());
         assert!(found.iter().any(|(y, _)| *y == YakuId::Junchan));
         assert!(!found.iter().any(|(y, _)| *y == YakuId::Chanta));
     }
 
     #[test]
     fn chinitsu_supersedes_honitsu() {
-        let found = detect_best("11122345678999m", "9m", &plain_tsumo());
+        let found = detect_best("1112234567899m", "9m", &plain_tsumo());
         assert!(found.iter().any(|(y, _)| *y == YakuId::Chinitsu));
         assert!(!found.iter().any(|(y, _)| *y == YakuId::Honitsu));
     }
@@ -891,7 +893,7 @@ mod tests {
     #[test]
     fn seat_and_round_wind_stack_when_they_match() {
         let context = HandContext::plain(WinType::Tsumo, Wind::East, Wind::East);
-        let found = detect_best("111z234m567m234p11s", "1s", &context);
+        let found = detect_best("111z234m567m234p1s", "1s", &context);
         assert!(found.iter().any(|(y, _)| *y == YakuId::YakuhaiRoundWind));
         assert!(found.iter().any(|(y, _)| *y == YakuId::YakuhaiSeatWind));
     }
