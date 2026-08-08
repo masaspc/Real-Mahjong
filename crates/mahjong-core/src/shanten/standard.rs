@@ -139,10 +139,13 @@ mod tests {
         assert_eq!(shanten(&counts("123m456m12p11s"), 1), 0);
     }
 
+    /// 順子は色をまたがない。9m と 1p は隣り合わない。
     #[test]
     fn runs_do_not_cross_suits() {
-        let hand = counts("99m11p22p33s44s55z");
-        assert!(shanten(&hand, 0) > 0);
+        // 111s 222s 333s の3面子＋44s の雀頭＋孤立した 9m と 1p(13枚)。
+        // 9m1p が搭子になれるなら 8-6-1-1 = 0 だが、色をまたぐので搭子にならず
+        // 8-6-0-1 = 1 が正しい。
+        assert_eq!(shanten(&counts("9m1p11122233344s"), 0), 1);
     }
 
     /// 字牌は順子を作れない。刻子と対子だけで評価される。

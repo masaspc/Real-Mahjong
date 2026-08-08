@@ -76,10 +76,13 @@ mod tests {
             .collect();
         assert_eq!(waits, vec![kind("1p").index(), kind("1s").index()]);
     }
+    /// 自分で4枚持っている牌は待ちに含めない。
     #[test]
     fn a_tile_already_held_four_times_is_not_a_wait() {
-        assert!(!waiting_tiles(&counts("1111p234567m99s"), 0)
-            .iter()
-            .any(|k| *k == kind("1p")));
+        let hand = counts("234567m1111p999s");
+        assert!(
+            waiting_tiles(&hand, 0).is_empty(),
+            "残り0枚の牌を待ちとして返した"
+        );
     }
 }
