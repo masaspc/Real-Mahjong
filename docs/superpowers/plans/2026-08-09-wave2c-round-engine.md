@@ -868,6 +868,64 @@ mod discard_tests {
         assert_eq!(engine.state().seat(Seat::new(0)).think_bank_ms, 0);
     }
 
+    /// 締切を過ぎた打牌は、自動打牌のあとに届くので拒否される。
+    ///
+    /// `apply` が `tick` を通すかどうかで結果が変わってはならない。
+    #[test]
+    fn a_discard_after_the_deadline_loses_the_turn() {
+        let mut engine = start_at(0);
+        let events = engine.drain_events();
+        let Event::RequestAction { deadline_ms, .. } = &events[3] else {
+            panic!("要求が出ていない");
+        };
+        let tile = drawn_of(&engine);
+        let too_late = *deadline_ms as u64 + 1;
+
+        assert_eq!(
+            engine.apply(
+                Seat::new(0),
+                Command::Discard {
+                    tile,
+                    riichi: false
+                },
+                too_late
+            ),
+            Err(Reject::NotYourTurn),
+            "自動打牌が済んでいるので手番ではない"
+        );
+        // 自動打牌そのものは行われている。
+        let events = engine.drain_events();
+        assert!(events.iter().any(|e| matches!(e, Event::Discard { .. })));
+        assert_eq!(engine.state().seat(Seat::new(0)).think_bank_ms, 0);
+    }
+
+    /// tick を先に呼んでも、apply に任せても同じ結果になる。
+    #[test]
+    fn ticking_first_changes_nothing() {
+        let build = |explicit_tick: bool| {
+            let mut engine = start_at(0);
+            let events = engine.drain_events();
+            let Event::RequestAction { deadline_ms, .. } = &events[3] else {
+                panic!("要求が出ていない");
+            };
+            let tile = drawn_of(&engine);
+            let too_late = *deadline_ms as u64 + 1;
+            if explicit_tick {
+                engine.tick(too_late);
+            }
+            let result = engine.apply(
+                Seat::new(0),
+                Command::Discard {
+                    tile,
+                    riichi: false,
+                },
+                too_late,
+            );
+            (result, engine.drain_events())
+        };
+        assert_eq!(build(true), build(false));
+    }
+
     /// 幺九牌以外を切ると流し満貫の資格を失う。
     #[test]
     fn discarding_a_simple_ends_the_nagashi_claim() {
@@ -994,14 +1052,28 @@ pub enum Reject {
 }
 
 impl RoundEngine {
+    /// コマンドを受け付ける。
+    ///
+    /// **どのコマンドでも、まず `tick` で時間の分だけ進める。**これを飛ばすと、
+    /// `tick` を呼ぶかどうかでコマンドの可否が変わる。期限を過ぎた打牌は
+    /// 自動打牌のあとに届くので `NotYourTurn` になり、期限を過ぎた反応は
+    /// 閉じたウィンドウ宛になって `StaleWindow` になる。
+    ///
+    /// 同じシード・同じコマンド列・同じ時刻列から同じ結果を出すには、
+    /// 「時間を進める」入口が1つでなければならない。
     pub fn apply(&mut self, seat: Seat, command: Command, now_ms: u64) -> Result<(), Reject> {
+        self.tick(now_ms);
         match command {
             Command::Discard { tile, riichi } => self.apply_discard(seat, tile, riichi, now_ms),
             Command::CallResponse {
                 window_id,
                 response,
-            } => self.apply_response(seat, window_id, response, now_ms),
-            // 槓・ツモ・九種九牌は Wave 2d が扱う。
+            } => {
+                let accepted = self.accept_response(seat, window_id, response, now_ms);
+                self.resolve_window(now_ms);
+                accepted
+            }
+            // 槓・九種九牌は Wave 2d が扱う。ツモは Task 4 で結線する。
             _ => Err(Reject::NotOffered),
         }
     }
@@ -1187,25 +1259,6 @@ impl RoundEngine {
         self.phase = Phase::Reaction;
     }
 
-    /// 反応の応答を受け取る。
-    ///
-    /// **`tick` と同じ順序で状態を進める。**先に締切を反映し、応答を
-    /// 受け付けるか決め、最後に必ず解決を試みる。応答を拒否した場合でも
-    /// 解決へ進むのは、締切の反映でウィンドウが確定しうるためである。
-    /// ここで早期に return すると、`tick` を呼ぶか呼ばないかで結果が変わる。
-    fn apply_response(
-        &mut self,
-        seat: Seat,
-        window_id: u32,
-        response: CallResponse,
-        now_ms: u64,
-    ) -> Result<(), Reject> {
-        self.pass_expired_seats(now_ms);
-        let accepted = self.accept_response(seat, window_id, response, now_ms);
-        self.resolve_window(now_ms);
-        accepted
-    }
-
     fn accept_response(
         &mut self,
         seat: Seat,
@@ -1214,7 +1267,12 @@ impl RoundEngine {
         now_ms: u64,
     ) -> Result<(), Reject> {
         let Some(window) = self.window.as_ref() else {
-            return Err(Reject::NoWindow);
+            // 一度は開いた id なら遅れて届いた応答、そうでなければ誤りである。
+            return Err(if window_id < self.next_window_id {
+                Reject::StaleWindow
+            } else {
+                Reject::NoWindow
+            });
         };
         if window.id() != window_id {
             return Err(Reject::StaleWindow);
@@ -1335,7 +1393,7 @@ offered: [Vec<ActionOption>; 4],
 - [ ] **Step 4: テストが通ることを確認する**
 
 Run: `cargo test --package mahjong-engine discard_tests`
-Expected: 14テスト PASS
+Expected: 16テスト PASS
 
 - [ ] **Step 5: コミット**
 
@@ -1637,12 +1695,12 @@ mod call_tests {
         assert!(matches!(options[0], ActionOption::Discard { .. }));
     }
 
-    /// 明槓を拒否しても、締切の反映と解決は行われる。
+    /// 締切を過ぎたコマンドは、拒否されても状態機械を止めない。
     ///
-    /// `apply_response` の先頭で返してしまうと、`tick` を呼ぶかどうかで
-    /// 結果が変わる。拒否は `accept_response` の中で行う。
+    /// `apply` が先頭で `tick` を通すので、期限切れの反映と解決は
+    /// コマンドの種類によらず起こる。ここでは明槓で確かめる。
     #[test]
-    fn a_rejected_minkan_still_advances_the_round() {
+    fn a_late_command_still_advances_the_round() {
         let mut engine = start_at(0);
         engine.drain_events();
         let target = state_where_seat_one_can_pon(&mut engine, "5p");
@@ -1670,7 +1728,8 @@ mod call_tests {
             panic!("席1へ要求が出ていない: {events:?}");
         };
 
-        // 自分の締切を過ぎてから明槓を送る。tick は呼ばない。
+        // 自分の締切を過ぎてから送る。tick は呼ばない。
+        // apply が先に tick を通すので、ウィンドウはもう閉じている。
         let too_late = 1_000 + deadline_ms as u64 + 1;
         assert_eq!(
             engine.apply(
@@ -1681,7 +1740,7 @@ mod call_tests {
                 },
                 too_late
             ),
-            Err(Reject::NotOffered)
+            Err(Reject::StaleWindow)
         );
 
         let events = engine.drain_events();
@@ -1752,7 +1811,7 @@ impl RoundEngine {
         let (kind, from_hand) = match response {
             CallResponse::Chi { tiles } => (MeldKind::Chi, tiles),
             CallResponse::Pon { tiles } => (MeldKind::Pon, tiles),
-            // 明槓は Wave 2d が扱う。apply_response が先に弾く。
+            // 明槓は Wave 2d が扱う。accept_response が先に弾く。
             _ => unreachable!("鳴き以外がここへ来ることはない"),
         };
 
@@ -1802,10 +1861,9 @@ impl RoundEngine {
 }
 ```
 
-**明槓は `accept_response` の中で弾く。`apply_response` の先頭ではない。**
-先頭で早く返すと `pass_expired_seats` と `resolve_window` を飛ばすことになり、
-`tick` を呼ぶ経路と結論が変わってしまう。第3回のレビューで直した穴が
-そのまま戻る。
+**明槓は `accept_response` の中で弾く。`apply` の先頭ではない。**
+`apply` は先頭で `tick` を通してから振り分けるので、そこより手前で返すと
+期限の反映と解決を飛ばすことになり、`tick` を呼ぶ経路と結論が変わる。
 
 弾く必要があるのは、`ReactionWindow::respond` が応答と候補を**優先度でしか
 照合しない**ためである（`reaction.rs`）。`CallResponse::Kan` と
@@ -1906,7 +1964,7 @@ mod ending_tests {
     fn drain_the_wall(engine: &mut RoundEngine) {
         while engine.state().wall.live_remaining() > 0 {
             let tile = engine.state_mut().wall.draw().expect("残っている");
-            engine.state_mut().seat_mut(sink()).river.push(Discarded {
+            engine.state_mut().seat_mut(sink()).river.push(crate::state::Discarded {
                 tile,
                 manner: DiscardManner::Tsumogiri,
                 called_by: None,
@@ -3068,6 +3126,7 @@ fn settlement_scores(state: &RoundState, settlement: &protocol::event::Settlemen
 テストが局面を組み立てるための補助も同じファイルに置く。
 
 ```rust
+impl RoundEngine {
 /// 指定した席のツモ番を直接作る。手牌が13枚であることを前提にする。
 /// 自然な進行では狙った牌をツモらせられないので、テストだけが使う。
 ///
@@ -3098,6 +3157,7 @@ pub(crate) fn force_draw_turn(&mut self, seat: Seat, tile: Tile) {
         deadline_ms: u64::MAX,
     });
 }
+}
 ```
 
 - [ ] **Step 4: テストが通ることを確認する**
@@ -3119,7 +3179,7 @@ git commit -m "feat(engine): 和了と荒牌平局を実装"
 - [ ] `cargo test --workspace` が通る
 - [ ] `cargo clippy --all-targets -- -D warnings` が通る
 - [ ] `cargo fmt --check` が通る
-- [ ] Task 1 の12テスト、Task 2 の14テスト、Task 3 の8テスト、Task 4 の21テストがすべて通る
+- [ ] Task 1 の12テスト、Task 2 の16テスト、Task 3 の8テスト、Task 4 の21テストがすべて通る
 - [ ] ツモ切りだけで局が最後まで回る
 - [ ] 同じシード・同じ時刻列から同じイベント列が出る
 - [ ] すべての局面で牌136枚が保たれる
