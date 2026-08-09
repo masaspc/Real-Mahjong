@@ -428,6 +428,34 @@ mod tests {
         settle_agari(&[ron(1, 0, 2_000), ron(1, 0, 8_000)], Seat::new(0), 0, 0);
     }
 
+    /// 自分の打牌で自分が和了することはない。点棒は釣り合ってしまうので、
+    /// 上流の結線ミスを捕まえるにはここで弾く必要がある。
+    #[test]
+    #[should_panic(expected = "自分の打牌で和了している")]
+    fn a_seat_winning_off_its_own_discard_is_rejected() {
+        settle_agari(&[ron(1, 1, 3_900)], Seat::new(0), 0, 0);
+    }
+
+    /// 責任払いの相手が和了者本人になることもない。
+    #[test]
+    #[should_panic(expected = "和了者自身が責任を負っている")]
+    fn a_winner_liable_for_its_own_hand_is_rejected() {
+        let input = AgariInput {
+            seat: Seat::new(1),
+            from: None,
+            payment: Payment::TsumoNonDealer {
+                from_dealer: 16_000,
+                from_each_non_dealer: 8_000,
+            },
+            liability: Some(Liability {
+                seat: Seat::new(1),
+                yaku: protocol::yaku::YakuId::Daisangen,
+                mode: LiabilityMode::Full,
+            }),
+        };
+        settle_agari(&[input], Seat::new(0), 0, 0);
+    }
+
     /// 精算の内訳が復元できる。素点・本場・供託を分けて記録する。
     #[test]
     fn the_settlement_records_its_breakdown() {
@@ -554,6 +582,13 @@ fn validate(winners: &[AgariInput], dealer: Seat) {
     for win in winners {
         assert!(!seen[win.seat.index()], "同じ席が2回和了している");
         seen[win.seat.index()] = true;
+
+        assert_ne!(Some(win.seat), win.from, "自分の打牌で和了している");
+        assert_ne!(
+            win.liability.map(|l| l.seat),
+            Some(win.seat),
+            "和了者自身が責任を負っている"
+        );
 
         // 支払い形式は、和了種別と親子に一致していなければならない。
         match win.payment {
@@ -727,7 +762,15 @@ pub fn settle_agari(
         });
     }
 
-    Settlement { delta, entries }
+    let settlement = Settlement { delta, entries };
+    // 分岐を足したときの安全網。供託を delta から外しているので、
+    // ここは常に成り立たなければならない。
+    debug_assert!(
+        settlement.is_balanced(),
+        "点棒の移動が釣り合っていない: {:?}",
+        settlement.delta
+    );
+    settlement
 }
 
 /// 荒牌平局のテンパイ料。合計は常に `rules.noten_penalty`。
@@ -781,7 +824,7 @@ pub fn settle_nagashi(winners: &[Seat], dealer: Seat) -> Settlement {
 - [ ] **Step 4: テストが通ることを確認する**
 
 Run: `cargo test --package mahjong-engine settlement`
-Expected: 25テスト PASS
+Expected: 27テスト PASS
 
 - [ ] **Step 5: コミット**
 
@@ -1953,7 +1996,7 @@ git commit -m "feat(engine): 合法手の生成を実装"
 - [ ] `cargo test --workspace` が通る
 - [ ] `cargo clippy --all-targets -- -D warnings` が通る
 - [ ] `cargo fmt --check` が通る
-- [ ] 精算25テストと合法手38テストがすべて通る
+- [ ] 精算27テストと合法手38テストがすべて通る
 - [ ] `settle_*` が返す `Settlement` は**すべて** `is_balanced()` を満たす
 - [ ] 役なしの完成形にロンを提示しない
 - [ ] 振聴の3種（自河・同巡内・リーチ後）すべてでロンを提示しない
