@@ -1141,6 +1141,49 @@ mod kan_tests {
         );
     }
 
+    /// チーも提示していない牌では鳴けない。ポンと同じ扱いにする。
+    #[test]
+    fn a_chi_with_tiles_that_were_not_offered_is_rejected() {
+        let mut engine = start_at(0);
+        engine.drain_events();
+        // 席0は席1の上家なので、席1はチーの候補を持ちうる。
+        let target = parse_tile("5p").expect("正しい記法");
+        engine.state_mut().seat_mut(Seat::new(1)).hand[0] =
+            parse_tile("3p").expect("正しい記法");
+        engine.state_mut().seat_mut(Seat::new(1)).hand[1] =
+            parse_tile("4p").expect("正しい記法");
+        engine.state_mut().seat_mut(Seat::new(0)).hand[0] = target;
+        engine
+            .apply(
+                Seat::new(0),
+                Command::Discard {
+                    tile: target,
+                    riichi: false,
+                },
+                1_000,
+            )
+            .expect("切れる");
+        engine.drain_events();
+
+        let window_id = engine.next_window_id() - 1;
+        // 34p は提示されているが、89p は提示されていない。
+        let bogus = [
+            parse_tile("8p").expect("正しい記法"),
+            parse_tile("9p").expect("正しい記法"),
+        ];
+        assert_eq!(
+            engine.apply(
+                Seat::new(1),
+                Command::CallResponse {
+                    window_id,
+                    response: CallResponse::Chi { tiles: bogus },
+                },
+                1_400
+            ),
+            Err(Reject::NotOffered)
+        );
+    }
+
     /// 提示していない牌の組み合わせでは鳴けない。
     #[test]
     fn a_call_with_tiles_that_were_not_offered_is_rejected() {
@@ -1218,6 +1261,7 @@ mod kan_tests {
         };
         assert_eq!(kind, MeldKind::Kakan);
         assert_eq!(from, Seat::new(3), "6p のポンは席3から鳴いている");
+        crate::invariant::assert_tiles_conserved(engine.state());
     }
 
     /// 手番でない席は槓を宣言できない。
@@ -1604,12 +1648,12 @@ use protocol::tile::TileKind;
 - [ ] **Step 4: テストが通ることを確認する**
 
 Run: `cargo test --package mahjong-engine kan_tests`
-Expected: 19テスト PASS
+Expected: 20テスト PASS
 
 - [ ] **Step 5: 既存のテストを壊していないことを確認する**
 
 Run: `cargo test --workspace && cargo clippy --all-targets -- -D warnings && cargo fmt --check`
-Expected: engine 234テスト PASS、警告ゼロ
+Expected: engine 235テスト PASS、警告ゼロ
 
 - [ ] **Step 6: コミット**
 
@@ -1622,7 +1666,7 @@ git commit -m "feat(engine): 槓と槍槓を実装"
 
 ## Wave 2d 完了の判定
 
-- [ ] `cargo test --workspace` が通る（engine 234テスト）
+- [ ] `cargo test --workspace` が通る（engine 235テスト）
 - [ ] `cargo clippy --all-targets -- -D warnings` が通る
 - [ ] `cargo fmt --check` が通る
 - [ ] 既存の200件のうち、削除したのは `a_minkan_is_not_accepted_yet` の1件だけである
