@@ -336,6 +336,11 @@ mod abortive_tests {
         let events = engine.drain_events();
         assert_eq!(ryuukyoku_of(&events), (RyuukyokuKind::FourRiichi, None));
         assert_eq!(engine.state().riichi_sticks, 4, "4本とも供託に残る");
+        assert_eq!(
+            engine.state().scores.iter().sum::<i32>()
+                + engine.state().riichi_sticks as i32 * 1_000,
+            100_000
+        );
     }
 
     /// 3人のリーチでは流局しない。
@@ -767,6 +772,7 @@ mod liability_tests {
         ];
         engine.state_mut().seat_mut(seat).hand =
             parse_hand("23m11m").expect("正しい記法");
+        crate::invariant::assert_tiles_conserved(engine.state());
     }
 
     fn pon(notation: &str, from: Seat) -> Meld {
@@ -870,6 +876,7 @@ mod liability_tests {
             vec![pon("555z", Seat::new(0)), pon("666z", Seat::new(2))];
         engine.state_mut().seat_mut(seat).hand =
             parse_hand("777z23m11m").expect("正しい記法");
+        crate::invariant::assert_tiles_conserved(engine.state());
         let events = ron_on_four_man(&mut engine);
 
         let results = agari_of(&events);
@@ -952,6 +959,7 @@ mod liability_tests {
             vec![pon("555z", Seat::new(0)), pon("666z", Seat::new(2))];
         engine.state_mut().seat_mut(seat).hand =
             parse_hand("23m567m11m").expect("正しい記法");
+        crate::invariant::assert_tiles_conserved(engine.state());
         let events = ron_on_four_man(&mut engine);
         assert_eq!(agari_of(&events)[0].liability, None);
     }
@@ -971,6 +979,7 @@ mod liability_tests {
         // 副露12枚 + 手牌1枚 = 13枚。5z の単騎で和了る。
         engine.state_mut().seat_mut(seat).hand =
             parse_hand("5z").expect("正しい記法");
+        crate::invariant::assert_tiles_conserved(engine.state());
 
         // 席2と席3をノーテンにしてから切らせる。理由は ron_on_four_man と同じ。
         for other in [Seat::new(2), Seat::new(3)] {
