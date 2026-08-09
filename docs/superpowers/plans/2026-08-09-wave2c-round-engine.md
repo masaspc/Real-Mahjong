@@ -592,6 +592,7 @@ mod discard_tests {
     use super::*;
     use protocol::command::{CallResponse, Command};
     use protocol::event::DiscardManner;
+    use protocol::notation::parse_tile;
 
     /// どの席の締切も確実に過ぎている時刻。
     ///

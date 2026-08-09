@@ -79,7 +79,11 @@ def check_forward_references(text):
         for line in block.split("\n"):
             for name in re.findall(r"\bself\.(\w+)", line):
                 used[name].append((task, line.strip()))
-            for name in re.findall(r"[.\b](\w+)\s*\(", line):
+            # 受け手を self と engine に限る。`tile.kind()` のような
+            # 他の型のメソッドと名前が衝突しても誤検出しない。
+            for name in re.findall(r"(?:self|engine)\.(\w+)\s*\(", line):
+                used[name].append((task, line.strip()))
+            for name in re.findall(r"(?<![.\w:!])(\w+)\s*\(", line):
                 if name in defined:
                     used[name].append((task, line.strip()))
 
@@ -138,10 +142,94 @@ def check_unread_fields(text):
     return problems
 
 
+RUST_KEYWORDS = {
+    "pub", "if", "while", "for", "match", "return", "fn", "let", "mut", "else",
+    "unsafe", "impl", "where", "as", "in", "ref", "move", "dyn", "crate", "super",
+}
+
+BUILTIN_NAMES = {
+    "Some", "None", "Ok", "Err", "String", "Vec", "Box", "Default",
+    "from_fn", "take", "replace", "min", "max", "swap", "usize", "u8", "u32", "u64", "i32",
+}
+
+
+def test_modules(text):
+    """`mod xxx_tests { ... }` の範囲を (開始オフセット, 名前, 中身) で返す。"""
+    for m in re.finditer(r"^mod (\w+) \{\n(.*?)^\}", text, re.S | re.M):
+        yield m.start(), m.group(1), m.group(2)
+
+
+def names_from_use(line):
+    """use 文が導入する名前。`a::b::{c, d as e}` から c と e を取る。"""
+    m = re.match(r"\s*use ([\w:]+)(?:::\{([^}]*)\})?;", line)
+    if not m:
+        return []
+    if m.group(2):
+        out = []
+        for part in m.group(2).split(","):
+            part = part.strip()
+            if not part:
+                continue
+            out.append(part.split(" as ")[-1].strip())
+        return out
+    return [m.group(1).split("::")[-1]]
+
+
+def check_unresolved_calls(text):
+    """テストモジュール内の、どこからも入ってこない関数呼び出し。
+
+    `use super::*;` は親の私有 use も取り込むので、親の import も許す。
+    兄弟モジュールの項目は取り込まれないため、明示 use が無ければ落ちる。
+    """
+    module_spans = [(start, start + len(body)) for start, _, body in test_modules(text)]
+
+    def in_module(offset):
+        return any(a <= offset < b for a, b in module_spans)
+
+    parent_scope = set(BUILTIN_NAMES)
+    for offset, block in rust_blocks(text):
+        for line in block.split("\n"):
+            absolute = offset + block.index(line) if line in block else offset
+            if in_module(absolute):
+                continue
+            parent_scope.update(names_from_use(line))
+            for pattern in (r"\bfn (\w+)\s*\(", r"const (\w+)\s*:", r"(?:struct|enum) (\w+)"):
+                m = re.search(pattern, line)
+                if m:
+                    parent_scope.add(m.group(1))
+
+    problems = []
+    for _, name, body in test_modules(text):
+        scope = set(parent_scope)
+        for line in body.split("\n"):
+            scope.update(names_from_use(line))
+            m = re.search(r"\bfn (\w+)\s*\(", line)
+            if m:
+                scope.add(m.group(1))
+            m = re.search(r"const (\w+)\s*:", line)
+            if m:
+                scope.add(m.group(1))
+            m = re.search(r"let (\w+) = \|", line)  # クロージャ
+            if m:
+                scope.add(m.group(1))
+        # 属性とコメントは呼び出しではない。
+        code = "\n".join(
+            line
+            for line in body.split("\n")
+            if not line.lstrip().startswith(("#[", "//", "///"))
+        )
+        for called in sorted(set(re.findall(r"(?<![.\w:!])(\w+)\s*\(", code))):
+            if called in RUST_KEYWORDS:
+                continue
+            if called not in scope:
+                problems.append(f"{name}: {called}() を解決できない")
+    return problems
+
+
 def check_characters(text):
     bad = set()
     for ch in text:
-        if ord(ch) < 128 or ch in "、。「」『』（）ー・…—→×":
+        if ord(ch) < 128 or ch in "、。「」『』（）ー・…—→×〜":
             continue
         name = unicodedata.name(ch, "")
         if name.startswith(("CJK UNIFIED", "HIRAGANA", "KATAKANA", "FULLWIDTH",
@@ -207,6 +295,7 @@ def main(path):
     sections = [
         ("タスク境界をまたぐ前方参照", check_forward_references(text)),
         ("宣言したタスクで読まれないフィールド", check_unread_fields(text)),
+        ("解決できない関数呼び出し", check_unresolved_calls(text)),
         ("文字の混入", check_characters(text)),
         ("テスト数の不一致", check_test_counts(text)),
         ("プレースホルダ", check_placeholders(text)),
