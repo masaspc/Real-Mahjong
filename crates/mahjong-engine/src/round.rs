@@ -542,10 +542,15 @@ mod option_tests {
             from: Some(Seat::new(0)),
             called_tile: Some(parse_tile("4p").unwrap()),
         });
-        let (allowed, _) =
-            discard_of(&discard_options(&state, Seat::new(1), TurnStart::AfterCall));
-        assert!(!allowed.contains(&parse_tile("4p").unwrap()), "現物の食い替え");
-        assert!(!allowed.contains(&parse_tile("7p").unwrap()), "筋の食い替え");
+        let (allowed, _) = discard_of(&discard_options(&state, Seat::new(1), TurnStart::AfterCall));
+        assert!(
+            !allowed.contains(&parse_tile("4p").unwrap()),
+            "現物の食い替え"
+        );
+        assert!(
+            !allowed.contains(&parse_tile("7p").unwrap()),
+            "筋の食い替え"
+        );
         assert_eq!(allowed.len(), 9, "残る9種は打てる");
     }
 
@@ -560,10 +565,12 @@ mod option_tests {
             from: Some(Seat::new(0)),
             called_tile: Some(parse_tile("5p").unwrap()),
         });
-        let (allowed, _) =
-            discard_of(&discard_options(&state, Seat::new(1), TurnStart::AfterCall));
+        let (allowed, _) = discard_of(&discard_options(&state, Seat::new(1), TurnStart::AfterCall));
         assert!(!allowed.contains(&parse_tile("5p").unwrap()));
-        assert!(allowed.contains(&parse_tile("8p").unwrap()), "筋の制限は無い");
+        assert!(
+            allowed.contains(&parse_tile("8p").unwrap()),
+            "筋の制限は無い"
+        );
     }
 
     /// ポンは現物だけが打てない。
@@ -576,8 +583,7 @@ mod option_tests {
             from: Some(Seat::new(0)),
             called_tile: Some(parse_tile("5p").unwrap()),
         });
-        let (allowed, _) =
-            discard_of(&discard_options(&state, Seat::new(1), TurnStart::AfterCall));
+        let (allowed, _) = discard_of(&discard_options(&state, Seat::new(1), TurnStart::AfterCall));
         assert!(!allowed.contains(&parse_tile("5p").unwrap()));
         assert!(allowed.contains(&parse_tile("8p").unwrap()));
     }
@@ -824,7 +830,9 @@ mod option_tests {
             vec![KanCandidate::Minkan],
             "明槓が出ていない"
         );
-        assert!(options.iter().any(|o| matches!(o, ActionOption::Pon { .. })));
+        assert!(options
+            .iter()
+            .any(|o| matches!(o, ActionOption::Pon { .. })));
     }
 
     /// チーは上家からのみ。

@@ -228,8 +228,14 @@ pub fn settle_agari(
             riichi_sticks: sticks_here,
             // 責任払いで肩代わりされた分。無ければ 0。
             liability: match win.liability {
-                Some(Liability { mode: LiabilityMode::Full, .. }) => base,
-                Some(Liability { mode: LiabilityMode::Split, .. }) => base - base / 2,
+                Some(Liability {
+                    mode: LiabilityMode::Full,
+                    ..
+                }) => base,
+                Some(Liability {
+                    mode: LiabilityMode::Split,
+                    ..
+                }) => base - base / 2,
                 None => 0,
             },
         });
@@ -401,12 +407,7 @@ mod tests {
     #[test]
     fn a_double_ron_gives_honba_and_sticks_to_the_nearest_winner() {
         // 放銃は席3。下家方向で最も近い和了者は席0。
-        let s = settle_agari(
-            &[ron(0, 3, 2_000), ron(2, 3, 8_000)],
-            Seat::new(0),
-            1,
-            1,
-        );
+        let s = settle_agari(&[ron(0, 3, 2_000), ron(2, 3, 8_000)], Seat::new(0), 1, 1);
         // 席0: 2000 + 本場300 = 2300（供託は delta の外）
         // 席2: 8000
         // 席3: -(2000 + 300 + 8000) = -10300
