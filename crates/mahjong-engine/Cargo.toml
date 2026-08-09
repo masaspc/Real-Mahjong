@@ -7,6 +7,7 @@ license.workspace = true
 [dependencies]
 protocol = { path = "../protocol" }
 mahjong-core = { path = "../mahjong-core" }
+sha2 = "0.10.9"
 
 [lints]
 workspace = true
