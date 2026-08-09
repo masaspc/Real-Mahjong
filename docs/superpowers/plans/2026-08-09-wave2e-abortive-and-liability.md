@@ -45,7 +45,7 @@
 | 四風連打の判定時点 | 4人目の打牌への反応が解決した時点 |
 | 四家立直 | 4人目のリーチが**成立**した時点。宣言牌にロンがあれば和了が優先されるので、成立の側で数えれば自動的に正しい |
 | 四開槓 | 槓の合計が4で、**2人以上に分かれている**こと。1人で4つなら四槓子が確定しているので続行する |
-| 四開槓の判定時点 | 4つ目の槓のあとの打牌への反応が解決した時点 |
+| 四開槓の判定時点 | 4つ目の槓のあとの打牌への反応が解決した時点。**テストは `kan_count` を直接置いて条件だけを見る。**実際に4つの槓を積む局面を組み立てるのは手間に見合わない |
 | 三家和 | `Outcome::Ron` が3席を返した時点。頭ハネより先に判定する |
 | 責任払いの成立 | 三元牌の副露が3つ揃う、または風牌の副露が4つ揃うこと。**すべて副露であること**が要る |
 | 責任払いを負う席 | その最後の副露を鳴かせた席（`Meld.from`） |
@@ -114,6 +114,27 @@ mod abortive_tests {
                 }
             }
         }
+    }
+
+    /// 引いた牌を安全牌へ差し替えてからリーチ宣言する。
+    ///
+    /// **引いた牌をそのまま切ると、他家の待ちに刺さってロンで終わる。**
+    /// テンパイ形は数牌の待ちしか持たないので、字牌なら必ず安全である。
+    /// 手牌の枚数は変えないので牌の総数も変わらない。
+    fn declare_with_safe_tile(engine: &mut RoundEngine, seat: Seat, now_ms: u64) {
+        let safe = parse_tile("3z").expect("正しい記法");
+        let last = engine.state().seat(seat).hand.len() - 1;
+        engine.state_mut().seat_mut(seat).hand[last] = safe;
+        engine
+            .apply(
+                seat,
+                Command::Discard {
+                    tile: safe,
+                    riichi: true,
+                },
+                now_ms,
+            )
+            .expect("リーチできる");
     }
 
     fn ryuukyoku_of(events: &[Event]) -> (RyuukyokuKind, Option<Seat>) {
@@ -200,10 +221,12 @@ mod abortive_tests {
         let mut engine = start_at(0);
         engine.drain_events();
         let wind = parse_tile("1z").expect("正しい記法");
-        // 誰にもポンさせない。4席が1枚ずつ持てば4枚を使い切る。
-        evict_everywhere(&mut engine, wind.kind());
         let mut now = 1_000u64;
         for seat in Seat::ALL {
+            // **打つ直前に毎回追い出す。**一度だけだと、そのあと山から
+            // 同じ風牌を引いた席が2枚持ちになり、ポンできてしまう。
+            // 鳴きが入ると any_call_made が立って四風連打が消える。
+            evict_everywhere(&mut engine, wind.kind());
             engine.state_mut().seat_mut(seat).hand[0] = wind;
             engine
                 .apply(
@@ -230,12 +253,12 @@ mod abortive_tests {
         let mut engine = start_at(0);
         engine.drain_events();
         let winds = ["1z", "1z", "1z", "2z"];
-        for name in ["1z", "2z"] {
-            evict_everywhere(&mut engine, parse_tile(name).expect("正しい記法").kind());
-        }
         let mut now = 1_000u64;
         for (index, seat) in Seat::ALL.into_iter().enumerate() {
             let wind = parse_tile(winds[index]).expect("正しい記法");
+            for name in ["1z", "2z"] {
+                evict_everywhere(&mut engine, parse_tile(name).expect("正しい記法").kind());
+            }
             engine.state_mut().seat_mut(seat).hand[0] = wind;
             engine
                 .apply(
@@ -304,17 +327,8 @@ mod abortive_tests {
         for seat in [Seat::new(1), Seat::new(2), Seat::new(3)] {
             now += WAY_PAST_ANY_DEADLINE_MS;
             engine.tick(now);
-            let Phase::Turn {
-                start: TurnStart::Draw { tile, .. },
-                ..
-            } = *engine.phase()
-            else {
-                panic!("{seat:?} の手番になっていない");
-            };
             now += 1_000;
-            engine
-                .apply(seat, Command::Discard { tile, riichi: true }, now)
-                .expect("リーチできる");
+            declare_with_safe_tile(&mut engine, seat, now);
         }
         now += WAY_PAST_ANY_DEADLINE_MS;
         engine.tick(now);
@@ -347,17 +361,8 @@ mod abortive_tests {
         for seat in [Seat::new(1), Seat::new(2)] {
             now += WAY_PAST_ANY_DEADLINE_MS;
             engine.tick(now);
-            let Phase::Turn {
-                start: TurnStart::Draw { tile, .. },
-                ..
-            } = *engine.phase()
-            else {
-                panic!("{seat:?} の手番になっていない");
-            };
             now += 1_000;
-            engine
-                .apply(seat, Command::Discard { tile, riichi: true }, now)
-                .expect("リーチできる");
+            declare_with_safe_tile(&mut engine, seat, now);
         }
         now += WAY_PAST_ANY_DEADLINE_MS;
         engine.tick(now);
@@ -715,6 +720,21 @@ git commit -m "feat(engine): 途中流局5種を実装"
 **Files:**
 - Modify: `crates/mahjong-engine/src/match_flow.rs`
 
+**`force_draw_turn` の前提を広げる。**いまは `hand.len() == 13` を要求するが、
+副露があると手牌はそのぶん短い。ツモの責任払いを試すには副露3つの手へ
+ツモらせる必要がある。
+
+```rust
+    let expected = 13 - 3 * self.state.seat(seat).melds.len();
+    assert_eq!(
+        self.state.seat(seat).hand.len(),
+        expected,
+        "副露1つにつき手牌は3枚短い"
+    );
+```
+
+副露が無ければ13のままなので、既存のテストには影響しない。
+
 **Interfaces:**
 - Produces: `AgariInput.liability` と `AgariResult.liability` を埋める
 - Consumes: `protocol::event::{Liability, LiabilityMode}`、`protocol::yaku::YakuId`
@@ -760,7 +780,15 @@ mod liability_tests {
     }
 
     /// 席0に 4m を切らせて席1がロンする。
+    ///
+    /// **席2と席3を必ずノーテンにする。**配牌のままだと 4m でロンしたり
+    /// ポンしたりしうる。ダブロンになると results の順序が変わり、
+    /// 責任払いの主張が別の和了者を指してしまう。
     fn ron_on_four_man(engine: &mut RoundEngine) -> Vec<Event> {
+        for seat in [Seat::new(2), Seat::new(3)] {
+            engine.state_mut().seat_mut(seat).hand =
+                parse_hand("147m258p369s1234z").expect("正しい記法");
+        }
         let winning = parse_tile("4m").expect("正しい記法");
         engine.state_mut().seat_mut(Seat::new(0)).hand[0] = winning;
         engine
@@ -847,6 +875,64 @@ mod liability_tests {
         assert_eq!(results[0].liability, None);
     }
 
+    /// 暗槓が対象の途中にあっても責任払いは発生しない。
+    ///
+    /// 最後の副露だけを見ると、暗槓のあとに明副露が続いたときに
+    /// 責任者がいるように見えてしまう。
+    #[test]
+    fn a_concealed_kan_in_the_middle_cancels_the_liability() {
+        let mut engine = start_at(0);
+        engine.drain_events();
+        let seat = Seat::new(1);
+        // 暗槓 → ポン → ポン の順に積む。暗槓は4枚だが1面子である。
+        engine.state_mut().seat_mut(seat).melds = vec![
+            Meld {
+                kind: MeldKind::Ankan,
+                tiles: parse_hand("5555z").expect("正しい記法"),
+                from: None,
+                called_tile: None,
+            },
+            pon("666z", Seat::new(2)),
+            pon("777z", Seat::new(3)),
+        ];
+        // 暗槓4枚 + ポン6枚 = 10枚。1面子あたり3枚と数えるので手牌は4枚。
+        engine.state_mut().seat_mut(seat).hand =
+            parse_hand("23m11m").expect("正しい記法");
+        let events = ron_on_four_man(&mut engine);
+        assert_eq!(agari_of(&events)[0].liability, None);
+    }
+
+    /// ツモの責任払いは責任者が全額を負担する。
+    #[test]
+    fn a_tsumo_makes_the_liable_seat_pay_everything() {
+        let mut engine = start_at(0);
+        engine.drain_events();
+        set_daisangen(&mut engine, Seat::new(3));
+        engine.force_draw_turn(Seat::new(1), parse_tile("4m").expect("正しい記法"));
+        engine
+            .apply(Seat::new(1), Command::Tsumo, 2_000)
+            .expect("ツモ和了できる");
+
+        let events = engine.drain_events();
+        let liability = agari_of(&events)[0]
+            .liability
+            .expect("責任払いが成立する");
+        assert_eq!(liability.seat, Seat::new(3));
+        assert_eq!(liability.mode, LiabilityMode::Full, "ツモは全額");
+
+        let Some(Event::Agari { settlement, .. }) = events
+            .iter()
+            .find(|e| matches!(e, Event::Agari { .. }))
+            .cloned()
+        else {
+            panic!("Agari が出ていない");
+        };
+        assert_eq!(settlement.delta[0], 0, "責任者以外は払わない");
+        assert_eq!(settlement.delta[2], 0);
+        assert!(settlement.delta[3] < 0);
+        assert!(settlement.is_balanced());
+    }
+
     /// 三元牌が2つでは責任払いにならない。
     #[test]
     fn two_dragons_are_not_enough() {
@@ -877,6 +963,11 @@ mod liability_tests {
         engine.state_mut().seat_mut(seat).hand =
             parse_hand("5z").expect("正しい記法");
 
+        // 席2と席3をノーテンにしてから切らせる。理由は ron_on_four_man と同じ。
+        for other in [Seat::new(2), Seat::new(3)] {
+            engine.state_mut().seat_mut(other).hand =
+                parse_hand("147m258p369s1234z").expect("正しい記法");
+        }
         let winning = parse_tile("5z").expect("正しい記法");
         engine.state_mut().seat_mut(Seat::new(0)).hand[0] = winning;
         engine
@@ -1013,6 +1104,7 @@ use protocol::yaku::YakuId;
         ] {
             let mut last_from = None;
             let mut count = 0usize;
+            let mut has_concealed = false;
             for meld in melds {
                 let Some(kind) = meld.tiles.first().map(|t| t.kind()) else {
                     continue;
@@ -1021,10 +1113,15 @@ use protocol::yaku::YakuId;
                     continue;
                 }
                 count += 1;
-                // 暗槓は鳴いていないので責任者がいない。
-                last_from = meld.from;
+                match meld.from {
+                    Some(from) => last_from = Some(from),
+                    // **暗槓が1つでもあれば責任払いは無い。**
+                    // `last_from` を上書きするだけだと、暗槓のあとに明副露が
+                    // 続いたときに Some へ戻ってしまう。見つけたことを覚える。
+                    None => has_concealed = true,
+                }
             }
-            if count == needed {
+            if count == needed && !has_concealed {
                 if let Some(from) = last_from {
                     return Some(Liability { seat: from, yaku, mode });
                 }
@@ -1046,12 +1143,12 @@ use protocol::yaku::YakuId;
 - [ ] **Step 4: テストが通ることを確認する**
 
 Run: `cargo test --package mahjong-engine liability_tests`
-Expected: 8テスト PASS
+Expected: 10テスト PASS
 
 - [ ] **Step 5: 既存のテストを壊していないことを確認する**
 
 Run: `cargo test --workspace && cargo clippy --all-targets -- -D warnings && cargo fmt --check`
-Expected: engine 260テスト PASS、警告ゼロ
+Expected: engine 262テスト PASS、警告ゼロ
 
 - [ ] **Step 6: コミット**
 
@@ -1064,7 +1161,7 @@ git commit -m "feat(engine): 責任払いを副露列から導く"
 
 ## Wave 2e 完了の判定
 
-- [ ] `cargo test --workspace` が通る（engine 260テスト）
+- [ ] `cargo test --workspace` が通る（engine 262テスト）
 - [ ] `cargo clippy --all-targets -- -D warnings` が通る
 - [ ] `cargo fmt --check` が通る
 - [ ] 既存の235件を1つも壊していない
