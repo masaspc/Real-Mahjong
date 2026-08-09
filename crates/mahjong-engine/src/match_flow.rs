@@ -9,6 +9,7 @@ use crate::state::{charge_bank, deadline_for, lead_in_of, remaining_for_event, R
 use crate::wall::Seed;
 use protocol::command::{ActionOption, CallResponse, Command};
 use protocol::event::{DiscardManner, DrawSource, Event, RiichiStep};
+use protocol::meld::{Meld, MeldKind};
 use protocol::ruleset::Ruleset;
 use protocol::seat::{Round, Seat};
 use protocol::tile::Tile;
@@ -315,6 +316,9 @@ impl RoundEngine {
         if window.id() != window_id {
             return Err(Reject::StaleWindow);
         }
+        if response == CallResponse::Kan {
+            return Err(Reject::NotOffered);
+        }
         let is_discarder = window.from() == seat;
         let Some(open) = self.outstanding[seat.index()] else {
             return Err(if is_discarder {
@@ -347,9 +351,8 @@ impl RoundEngine {
                 self.record_passes(&[]);
                 self.advance_after_pass(from, now_ms);
             }
-            Outcome::Call { .. } | Outcome::Ron(_) => {
-                unimplemented!("鳴きと和了は Task 3 / Task 4 で実装する")
-            }
+            Outcome::Call { seat, response } => self.apply_call(seat, response, now_ms),
+            Outcome::Ron(_) => unimplemented!("和了は Task 4 で実装する"),
         }
     }
 
@@ -395,6 +398,53 @@ impl RoundEngine {
         let elapsed = now_ms.saturating_sub(open.issued_at_ms);
         let charged = charge_bank(&self.state.rules, bank, elapsed, open.lead_in_ms);
         self.state.seat_mut(seat).think_bank_ms = charged;
+    }
+
+    fn apply_call(&mut self, seat: Seat, response: CallResponse, now_ms: u64) {
+        let window = self.window.take().expect("反応ウィンドウが開いている");
+        let from = window.from();
+        let called = window.tile();
+        let (kind, from_hand) = match response {
+            CallResponse::Chi { tiles } => (MeldKind::Chi, tiles),
+            CallResponse::Pon { tiles } => (MeldKind::Pon, tiles),
+            _ => unreachable!("鳴き以外がここへ来ることはない"),
+        };
+        for tile in from_hand {
+            let position = self
+                .state
+                .seat(seat)
+                .hand
+                .iter()
+                .position(|t| *t == tile)
+                .expect("候補として提示した牌は手にある");
+            self.state.seat_mut(seat).hand.remove(position);
+        }
+        let mut tiles = from_hand.to_vec();
+        tiles.push(called);
+        self.state.seat_mut(seat).melds.push(Meld {
+            kind,
+            tiles: tiles.clone(),
+            from: Some(from),
+            called_tile: Some(called),
+        });
+        self.state.seat_mut(from).nagashi_alive = false;
+        if let Some(last) = self.state.seat_mut(from).river.last_mut() {
+            last.called_by = Some(seat);
+        }
+        self.state.any_call_made = true;
+        self.record_passes(&[seat]);
+        self.emit(Event::Call {
+            seat,
+            from,
+            kind,
+            tiles,
+        });
+        invariant::assert_tiles_conserved(&self.state);
+        self.phase = Phase::Turn {
+            seat,
+            start: TurnStart::AfterCall,
+        };
+        self.request_turn(now_ms);
     }
 
     fn emit(&mut self, event: Event) {
@@ -1153,5 +1203,375 @@ mod discard_tests {
             // 次の手番の要求はいま出たところなので、ここからは期限内である。
             now += 1_000;
         }
+    }
+}
+
+#[cfg(test)]
+mod call_tests {
+    // 兄弟モジュールの項目は use super::*; では入らない。明示して取り込む。
+    use super::discard_tests::state_where_seat_one_can_pon;
+    use super::start_tests::start_at;
+    use super::*;
+    use protocol::command::{CallResponse, Command};
+    use protocol::meld::MeldKind;
+
+    /// ポンすると Call が出て、鳴いた席の手番になる。ツモは無い。
+    #[test]
+    fn a_pon_gives_the_turn_to_the_caller_without_a_draw() {
+        let mut engine = start_at(0);
+        engine.drain_events();
+        let target = state_where_seat_one_can_pon(&mut engine, "5p");
+
+        // 親に 5p を切らせる。
+        engine.state_mut().seat_mut(Seat::new(0)).hand[0] = target;
+        engine
+            .apply(
+                Seat::new(0),
+                Command::Discard {
+                    tile: target,
+                    riichi: false,
+                },
+                1_000,
+            )
+            .expect("切れる");
+        // **意図した局面になっていることを、応答の前に固定する。**
+        // 席1以外にも候補があるとウィンドウが確定せず、以降の主張が空振りする。
+        // ここで見るのは打牌に対する反応の要求である。
+        let opened = engine.drain_events();
+        let requested: Vec<Seat> = opened
+            .iter()
+            .filter_map(|e| match e {
+                Event::RequestAction { seat, .. } => Some(*seat),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(requested, vec![Seat::new(1)], "反応できるのは席1だけ");
+
+        let window_id = engine.next_window_id() - 1;
+        engine
+            .apply(
+                Seat::new(1),
+                Command::CallResponse {
+                    window_id,
+                    response: CallResponse::Pon {
+                        tiles: [target, target],
+                    },
+                },
+                1_400,
+            )
+            .expect("ポンできる");
+
+        let events = engine.drain_events();
+        let Some(Event::Call {
+            seat, from, kind, ..
+        }) = events
+            .iter()
+            .find(|e| matches!(e, Event::Call { .. }))
+            .cloned()
+        else {
+            panic!("Call が出ていない: {events:?}");
+        };
+        assert_eq!(seat, Seat::new(1));
+        assert_eq!(from, Seat::new(0));
+        assert_eq!(kind, MeldKind::Pon);
+
+        // ツモは無い。
+        assert!(!events.iter().any(|e| matches!(e, Event::Draw { .. })));
+        assert_eq!(
+            *engine.phase(),
+            Phase::Turn {
+                seat: Seat::new(1),
+                start: TurnStart::AfterCall
+            }
+        );
+    }
+
+    /// ポンした牌は手から抜けて副露に入る。総数は変わらない。
+    #[test]
+    fn a_pon_moves_two_tiles_from_the_hand_into_a_meld() {
+        let mut engine = start_at(0);
+        engine.drain_events();
+        let target = state_where_seat_one_can_pon(&mut engine, "5p");
+        engine.state_mut().seat_mut(Seat::new(0)).hand[0] = target;
+        engine
+            .apply(
+                Seat::new(0),
+                Command::Discard {
+                    tile: target,
+                    riichi: false,
+                },
+                1_000,
+            )
+            .expect("切れる");
+        engine.drain_events();
+
+        let window_id = engine.next_window_id() - 1;
+        engine
+            .apply(
+                Seat::new(1),
+                Command::CallResponse {
+                    window_id,
+                    response: CallResponse::Pon {
+                        tiles: [target, target],
+                    },
+                },
+                1_400,
+            )
+            .expect("ポンできる");
+        engine.drain_events();
+
+        let seat = engine.state().seat(Seat::new(1));
+        assert_eq!(seat.hand.len(), 11);
+        assert_eq!(seat.melds.len(), 1);
+        assert_eq!(seat.melds[0].tiles.len(), 3);
+        assert_eq!(seat.melds[0].from, Some(Seat::new(0)));
+        assert_eq!(seat.melds[0].called_tile, Some(target));
+        crate::invariant::assert_tiles_conserved(engine.state());
+    }
+
+    /// 鳴かれた牌は河に残り、誰に鳴かれたかが記録される。
+    #[test]
+    fn a_called_tile_stays_in_the_river_and_records_the_caller() {
+        let mut engine = start_at(0);
+        engine.drain_events();
+        let target = state_where_seat_one_can_pon(&mut engine, "5p");
+        engine.state_mut().seat_mut(Seat::new(0)).hand[0] = target;
+        engine
+            .apply(
+                Seat::new(0),
+                Command::Discard {
+                    tile: target,
+                    riichi: false,
+                },
+                1_000,
+            )
+            .expect("切れる");
+        engine.drain_events();
+        let window_id = engine.next_window_id() - 1;
+        engine
+            .apply(
+                Seat::new(1),
+                Command::CallResponse {
+                    window_id,
+                    response: CallResponse::Pon {
+                        tiles: [target, target],
+                    },
+                },
+                1_400,
+            )
+            .expect("ポンできる");
+
+        let river = &engine.state().seat(Seat::new(0)).river;
+        assert_eq!(river.len(), 1);
+        assert_eq!(river[0].called_by, Some(Seat::new(1)));
+    }
+
+    /// 鳴かれた側は流し満貫の資格を失う。
+    #[test]
+    fn being_called_ends_the_discarders_nagashi_claim() {
+        let mut engine = start_at(0);
+        engine.drain_events();
+        // 幺九牌をポンさせる。切った側は幺九牌しか切っていない。
+        let target = state_where_seat_one_can_pon(&mut engine, "1z");
+        engine.state_mut().seat_mut(Seat::new(0)).hand[0] = target;
+        engine
+            .apply(
+                Seat::new(0),
+                Command::Discard {
+                    tile: target,
+                    riichi: false,
+                },
+                1_000,
+            )
+            .expect("切れる");
+        engine.drain_events();
+        assert!(
+            engine.state().seat(Seat::new(0)).nagashi_alive,
+            "幺九牌を切っただけでは失わない"
+        );
+
+        let window_id = engine.next_window_id() - 1;
+        engine
+            .apply(
+                Seat::new(1),
+                Command::CallResponse {
+                    window_id,
+                    response: CallResponse::Pon {
+                        tiles: [target, target],
+                    },
+                },
+                1_400,
+            )
+            .expect("ポンできる");
+        assert!(!engine.state().seat(Seat::new(0)).nagashi_alive);
+    }
+
+    /// 鳴きが1回でも入れば any_call_made が立つ。
+    #[test]
+    fn a_call_marks_the_round_as_opened() {
+        let mut engine = start_at(0);
+        engine.drain_events();
+        assert!(!engine.state().any_call_made);
+        let target = state_where_seat_one_can_pon(&mut engine, "5p");
+        engine.state_mut().seat_mut(Seat::new(0)).hand[0] = target;
+        engine
+            .apply(
+                Seat::new(0),
+                Command::Discard {
+                    tile: target,
+                    riichi: false,
+                },
+                1_000,
+            )
+            .expect("切れる");
+        engine.drain_events();
+        let window_id = engine.next_window_id() - 1;
+        engine
+            .apply(
+                Seat::new(1),
+                Command::CallResponse {
+                    window_id,
+                    response: CallResponse::Pon {
+                        tiles: [target, target],
+                    },
+                },
+                1_400,
+            )
+            .expect("ポンできる");
+        assert!(engine.state().any_call_made);
+    }
+
+    /// 鳴いた席は打牌しかできない。ツモも九種九牌も出ない。
+    #[test]
+    fn a_caller_is_only_offered_a_discard() {
+        let mut engine = start_at(0);
+        engine.drain_events();
+        let target = state_where_seat_one_can_pon(&mut engine, "5p");
+        engine.state_mut().seat_mut(Seat::new(0)).hand[0] = target;
+        engine
+            .apply(
+                Seat::new(0),
+                Command::Discard {
+                    tile: target,
+                    riichi: false,
+                },
+                1_000,
+            )
+            .expect("切れる");
+        engine.drain_events();
+        let window_id = engine.next_window_id() - 1;
+        engine
+            .apply(
+                Seat::new(1),
+                Command::CallResponse {
+                    window_id,
+                    response: CallResponse::Pon {
+                        tiles: [target, target],
+                    },
+                },
+                1_400,
+            )
+            .expect("ポンできる");
+
+        let events = engine.drain_events();
+        let Some(Event::RequestAction { seat, options, .. }) = events
+            .iter()
+            .find(|e| matches!(e, Event::RequestAction { .. }))
+            .cloned()
+        else {
+            panic!("要求が出ていない");
+        };
+        assert_eq!(seat, Seat::new(1));
+        assert_eq!(options.len(), 1);
+        assert!(matches!(options[0], ActionOption::Discard { .. }));
+    }
+
+    /// 締切を過ぎたコマンドは、拒否されても状態機械を止めない。
+    ///
+    /// `apply` が先頭で `tick` を通すので、期限切れの反映と解決は
+    /// コマンドの種類によらず起こる。ここでは明槓で確かめる。
+    #[test]
+    fn a_late_command_still_advances_the_round() {
+        let mut engine = start_at(0);
+        engine.drain_events();
+        let target = state_where_seat_one_can_pon(&mut engine, "5p");
+        engine.state_mut().seat_mut(Seat::new(0)).hand[0] = target;
+        engine
+            .apply(
+                Seat::new(0),
+                Command::Discard {
+                    tile: target,
+                    riichi: false,
+                },
+                1_000,
+            )
+            .expect("切れる");
+        let events = engine.drain_events();
+        let Some(Event::RequestAction {
+            window_id,
+            deadline_ms,
+            ..
+        }) = events
+            .iter()
+            .find(|e| matches!(e, Event::RequestAction { seat, .. } if *seat == Seat::new(1)))
+            .cloned()
+        else {
+            panic!("席1へ要求が出ていない: {events:?}");
+        };
+
+        // 自分の締切を過ぎてから送る。tick は呼ばない。
+        // apply が先に tick を通すので、ウィンドウはもう閉じている。
+        let too_late = 1_000 + deadline_ms as u64 + 1;
+        assert_eq!(
+            engine.apply(
+                Seat::new(1),
+                Command::CallResponse {
+                    window_id,
+                    response: CallResponse::Kan,
+                },
+                too_late
+            ),
+            Err(Reject::StaleWindow)
+        );
+
+        let events = engine.drain_events();
+        assert!(
+            events
+                .iter()
+                .any(|e| matches!(e, Event::Draw { seat, .. } if *seat == Seat::new(1))),
+            "拒否したまま止まっている: {events:?}"
+        );
+    }
+
+    /// 明槓は Wave 2d の担当。いまは拒否する。
+    #[test]
+    fn a_minkan_is_not_accepted_yet() {
+        let mut engine = start_at(0);
+        engine.drain_events();
+        let target = state_where_seat_one_can_pon(&mut engine, "5p");
+        engine.state_mut().seat_mut(Seat::new(0)).hand[0] = target;
+        engine
+            .apply(
+                Seat::new(0),
+                Command::Discard {
+                    tile: target,
+                    riichi: false,
+                },
+                1_000,
+            )
+            .expect("切れる");
+        engine.drain_events();
+        let window_id = engine.next_window_id() - 1;
+        assert_eq!(
+            engine.apply(
+                Seat::new(1),
+                Command::CallResponse {
+                    window_id,
+                    response: CallResponse::Kan,
+                },
+                1_400
+            ),
+            Err(Reject::NotOffered)
+        );
     }
 }
