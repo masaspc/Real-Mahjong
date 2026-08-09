@@ -856,6 +856,7 @@ pub enum TurnStart {
 | `allowed` の重複 | 同じ `Tile` 値は1つにまとめる。赤5（`0p`）と通常の5（`5p`）は別の値なので区別は残る |
 | 食い替え | **現物と筋の両方を禁止する。** ポンは現物のみ。チーで順子の端を鳴いた場合は反対側の隣も禁止 |
 | リーチ宣言の条件 | 門前・未リーチ・持ち点1000以上・山の残り4枚以上・その牌を切ってテンパイが保てる |
+| 待ちを自分で4枚持つ形 | テンパイと見なさない。`waiting_tiles` は自分が4枚持つ牌を待ちから外すため、この形ではリーチも提示されない |
 | リーチ中の打牌 | ツモ牌のみ |
 | リーチ中の暗槓 | **いま引いた牌で4枚目が揃い、かつ暗槓の前後で待ちが変わらない**場合のみ（送り槓の禁止） |
 | リーチ中の加槓 | 不可（手牌の構成が変わるため） |
@@ -864,6 +865,11 @@ pub enum TurnStart {
 | ツモ和了と振聴 | 振聴はツモ和了を妨げない。振聴の検査はロンにだけ効く |
 | 鳴きとリーチ | リーチ成立後はチー・ポン・明槓ができない |
 | 暗槓への槍槓 | 国士無双のみ。`score` の役に `KokushiMusou` / `KokushiMusou13` が含まれるかで判定する |
+
+待ちを自分で4枚持つ形（たとえば `1111m 234p 567p 789s` の 1m 単騎）は、
+`mahjong_core::wait::waiting_tiles` が `counts.get(kind) >= 4` を除外するため
+空の待ちになる。この形をリーチさせない判断はここから自動的に従う。
+**荒牌平局のテンパイ料でも同じ扱いになる点を Wave 2c は把握しておくこと。**
 
 **振聴は3種すべてを見る。**
 
@@ -1617,6 +1623,8 @@ fn is_riichi_accepted(seat: &SeatState) -> bool {
     matches!(&seat.riichi, Some(r) if r.step == RiichiStep::Accepted)
 }
 
+/// 待ち牌。`waiting_tiles` は牌種の昇順で返すが、待ちどうしを比較する箇所が
+/// あるので、順序の前提をこの関数の中に閉じておく。
 fn waits_of(hand: &[Tile], melds: usize) -> Vec<TileKind> {
     let mut waits = waiting_tiles(&HandCounts::from_tiles(hand), melds as u8);
     waits.sort_by_key(|k| k.index());
