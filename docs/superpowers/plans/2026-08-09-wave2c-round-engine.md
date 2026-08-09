@@ -634,7 +634,8 @@ mod discard_tests {
     /// 依存して落ちる。
     ///
     /// 追い出し先の牌は種類が違えばよい。席2と席3は席0の下家ではないので
-    /// チーはできず、配牌がその牌で和了形になることもない。
+    /// チーもできない。**ロン待ちである可能性までは消せない**が、その場合は
+    /// 要求が出る席を数えるテストで気づける。
     pub(super) fn state_where_seat_one_can_pon(engine: &mut RoundEngine, tile: &str) -> Tile {
         let target = parse_tile(tile).expect("正しい記法");
         let filler = {
@@ -1118,6 +1119,13 @@ pub enum Reject {
 }
 
 impl RoundEngine {
+    /// テストが局面を組み立てるために使う。
+    /// **Task 2 のテスト補助が既に呼ぶので、ここで足す。**
+    #[cfg(test)]
+    pub(crate) fn state_mut(&mut self) -> &mut RoundState {
+        &mut self.state
+    }
+
     /// コマンドを受け付ける。
     ///
     /// **どのコマンドでも、まず `tick` で時間の分だけ進める。**これを飛ばすと、
@@ -1498,6 +1506,8 @@ git commit -m "feat(engine): 打牌と反応ウィンドウを実装"
 ```rust
 #[cfg(test)]
 mod call_tests {
+    // 兄弟モジュールの項目は use super::*; では入らない。明示して取り込む。
+    use super::discard_tests::{state_where_seat_one_can_pon, WAY_PAST_ANY_DEADLINE_MS};
     use super::start_tests::{rules, start_at};
     use super::*;
     use protocol::command::{CallResponse, Command};
@@ -1540,6 +1550,17 @@ mod call_tests {
             .expect("ポンできる");
 
         let events = engine.drain_events();
+        // 意図した局面になっていることを先に固定する。席1以外に候補があると
+        // ウィンドウが確定せず、以降の主張が空振りする。
+        let requested: Vec<Seat> = events
+            .iter()
+            .filter_map(|e| match e {
+                Event::RequestAction { seat, .. } => Some(*seat),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(requested, vec![Seat::new(1)], "反応できるのは席1だけ");
+
         let Some(Event::Call {
             seat, from, kind, ..
         }) = events
@@ -1994,6 +2015,7 @@ git commit -m "feat(engine): 鳴きの成立を実装"
 ```rust
 #[cfg(test)]
 mod ending_tests {
+    // 兄弟モジュールの項目は use super::*; では入らない。明示して取り込む。
     use super::discard_tests::WAY_PAST_ANY_DEADLINE_MS;
     use super::start_tests::{rules, start_at};
     use super::*;
@@ -2001,10 +2023,28 @@ mod ending_tests {
     use protocol::event::{ContinuationReason, RyuukyokuKind};
     use protocol::notation::{parse_hand, parse_tile};
 
-    /// 席1へ和了形の一歩手前を持たせる。234567m 23478p 22s は 6p/9p 待ち。
+    /// 指定した席へ和了形の一歩手前を持たせる。234567m 23478p 22s は 6p/9p 待ち。
+    ///
+    /// **枚数を保つ。**親は配牌のあとツモ済みなので14枚である。13枚の形へ
+    /// 差し替えると1枚消えるので、あふれた分は捨て台の河へ移す。
+    /// 河の牌も `assert_tiles_conserved` の数え上げに入る。
     fn make_tenpai(engine: &mut RoundEngine, seat: Seat) {
-        engine.state_mut().seat_mut(seat).hand =
-            parse_hand("234567m23478p22s").expect("正しい記法");
+        assert_ne!(seat, sink(), "捨て台の席は書き換えられない");
+        let target = parse_hand("234567m23478p22s").expect("正しい記法");
+        let old = std::mem::replace(&mut engine.state_mut().seat_mut(seat).hand, target);
+        for tile in old.into_iter().skip(13) {
+            engine
+                .state_mut()
+                .seat_mut(sink())
+                .river
+                .push(crate::state::Discarded {
+                    tile,
+                    manner: DiscardManner::Tsumogiri,
+                    called_by: None,
+                    riichi_declaration: false,
+                });
+        }
+        crate::invariant::assert_tiles_conserved(engine.state());
     }
 
     /// 流し満貫の資格を全席から落とす。
@@ -2808,6 +2848,58 @@ mod ending_tests {
         );
     }
 
+    /// 局の途中から採番を始めても、未使用の id は NoWindow になる。
+    ///
+    /// window_id は半荘を通して単調増加するので、東1局以外では 1 から
+    /// 始まらない。範囲を `id < next_window_id` だけで見ると、使ったことの
+    /// ない小さい id を「遅れて届いた応答」と誤判定する。
+    #[test]
+    fn an_id_below_the_first_one_is_not_a_stale_window() {
+        let mut engine = RoundEngine::start(
+            rules(),
+            Round {
+                wind: protocol::seat::Wind::East,
+                number: 1,
+            },
+            Seat::new(0),
+            0,
+            0,
+            [25_000; 4],
+            &super::start_tests::seed(),
+            100,
+            0,
+        );
+        engine.drain_events();
+        make_tenpai(&mut engine, Seat::new(1));
+        let winning = parse_tile("6p").expect("正しい記法");
+        engine.state_mut().seat_mut(Seat::new(0)).hand[0] = winning;
+        engine
+            .apply(
+                Seat::new(0),
+                Command::Discard {
+                    tile: winning,
+                    riichi: false,
+                },
+                1_000,
+            )
+            .expect("切れる");
+        engine.drain_events();
+
+        // 1 はこの局では一度も採番していない。
+        assert_eq!(
+            engine.apply(
+                Seat::new(1),
+                Command::CallResponse {
+                    window_id: 1,
+                    response: CallResponse::Ron,
+                },
+                1_200
+            ),
+            Err(Reject::StaleWindow),
+            "開いているウィンドウとの id 不一致なので Stale"
+        );
+    }
+
     /// 局が終わったあとはコマンドを受け付けない。
     #[test]
     fn a_finished_round_rejects_further_commands() {
@@ -3255,11 +3347,14 @@ pub(crate) fn force_draw_turn(&mut self, seat: Seat, tile: Tile) {
             source: DrawSource::Wall,
         },
     };
+    // **締切は有限にする。**u64::MAX にすると tick が永久に期限切れと
+    // 見なさず、自動打牌も自動和了も起きない。
+    let bank = self.state.seat(seat).think_bank_ms;
     self.outstanding[seat.index()] = Some(Outstanding {
         window_id: 0,
         issued_at_ms: 0,
         lead_in_ms: 0,
-        deadline_ms: u64::MAX,
+        deadline_ms: deadline_for(&self.state.rules, 0, bank, 0),
     });
 }
 }
@@ -3268,7 +3363,7 @@ pub(crate) fn force_draw_turn(&mut self, seat: Seat, tile: Tile) {
 - [ ] **Step 4: テストが通ることを確認する**
 
 Run: `cargo test --package mahjong-engine ending_tests`
-Expected: 22テスト PASS
+Expected: 23テスト PASS
 
 - [ ] **Step 5: コミット**
 
@@ -3284,7 +3379,7 @@ git commit -m "feat(engine): 和了と荒牌平局を実装"
 - [ ] `cargo test --workspace` が通る
 - [ ] `cargo clippy --all-targets -- -D warnings` が通る
 - [ ] `cargo fmt --check` が通る
-- [ ] Task 1 の12テスト、Task 2 の16テスト、Task 3 の8テスト、Task 4 の22テストがすべて通る
+- [ ] Task 1 の12テスト、Task 2 の16テスト、Task 3 の8テスト、Task 4 の23テストがすべて通る
 - [ ] ツモ切りだけで局が最後まで回る
 - [ ] 同じシード・同じ時刻列から同じイベント列が出る
 - [ ] すべての局面で牌136枚が保たれる
