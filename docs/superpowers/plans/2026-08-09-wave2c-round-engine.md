@@ -1427,8 +1427,33 @@ mod call_tests {
     use protocol::notation::parse_tile;
 
     /// 席1がポンできる局面を作る。配牌に頼らず、手牌を直接置く。
+    ///
+    /// **席2と席3から同じ種類の牌を追い出す。**配牌でそこにも同じ牌が
+    /// 2枚あると、その席もポンの候補になる。`ReactionWindow::resolve` は
+    /// 「未応答の席が同じ優先度以上を出しうる」あいだ確定しないので、
+    /// 席1がポンしてもウィンドウが開いたままになり、テストがシードに
+    /// 依存して落ちる。
+    ///
+    /// 追い出し先の牌は種類が違えばよい。席2と席3は席0の下家ではないので
+    /// チーはできず、配牌がその牌で和了形になることもない。
     fn state_where_seat_one_can_pon(engine: &mut RoundEngine, tile: &str) -> Tile {
         let target = parse_tile(tile).expect("正しい記法");
+        let filler = {
+            let nine_man = parse_tile("9m").expect("正しい記法");
+            if nine_man.kind() == target.kind() {
+                parse_tile("1m").expect("正しい記法")
+            } else {
+                nine_man
+            }
+        };
+        for seat in [Seat::new(2), Seat::new(3)] {
+            for held in engine.state_mut().seat_mut(seat).hand.iter_mut() {
+                if held.kind() == target.kind() {
+                    *held = filler;
+                }
+            }
+        }
+
         let hand = &mut engine.state_mut().seat_mut(Seat::new(1)).hand;
         hand[0] = target;
         hand[1] = target;
