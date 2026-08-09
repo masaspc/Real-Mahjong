@@ -1637,6 +1637,62 @@ mod call_tests {
         assert!(matches!(options[0], ActionOption::Discard { .. }));
     }
 
+    /// 明槓を拒否しても、締切の反映と解決は行われる。
+    ///
+    /// `apply_response` の先頭で返してしまうと、`tick` を呼ぶかどうかで
+    /// 結果が変わる。拒否は `accept_response` の中で行う。
+    #[test]
+    fn a_rejected_minkan_still_advances_the_round() {
+        let mut engine = start_at(0);
+        engine.drain_events();
+        let target = state_where_seat_one_can_pon(&mut engine, "5p");
+        engine.state_mut().seat_mut(Seat::new(0)).hand[0] = target;
+        engine
+            .apply(
+                Seat::new(0),
+                Command::Discard {
+                    tile: target,
+                    riichi: false,
+                },
+                1_000,
+            )
+            .expect("切れる");
+        let events = engine.drain_events();
+        let Some(Event::RequestAction {
+            window_id,
+            deadline_ms,
+            ..
+        }) = events
+            .iter()
+            .find(|e| matches!(e, Event::RequestAction { seat, .. } if *seat == Seat::new(1)))
+            .cloned()
+        else {
+            panic!("席1へ要求が出ていない: {events:?}");
+        };
+
+        // 自分の締切を過ぎてから明槓を送る。tick は呼ばない。
+        let too_late = 1_000 + deadline_ms as u64 + 1;
+        assert_eq!(
+            engine.apply(
+                Seat::new(1),
+                Command::CallResponse {
+                    window_id,
+                    response: CallResponse::Kan,
+                },
+                too_late
+            ),
+            Err(Reject::NotOffered)
+        );
+
+        let events = engine.drain_events();
+        assert!(
+            events
+                .iter()
+                .any(|e| matches!(e, Event::Draw { seat, .. } if *seat == Seat::new(1))),
+            "拒否したまま止まっている: {events:?}"
+        );
+    }
+
     /// 明槓は Wave 2d の担当。いまは拒否する。
     #[test]
     fn a_minkan_is_not_accepted_yet() {
@@ -1746,10 +1802,24 @@ impl RoundEngine {
 }
 ```
 
-`apply_response` の `CallResponse::Kan` を先に弾く。
+**明槓は `accept_response` の中で弾く。`apply_response` の先頭ではない。**
+先頭で早く返すと `pass_expired_seats` と `resolve_window` を飛ばすことになり、
+`tick` を呼ぶ経路と結論が変わってしまう。第3回のレビューで直した穴が
+そのまま戻る。
+
+弾く必要があるのは、`ReactionWindow::respond` が応答と候補を**優先度でしか
+照合しない**ためである（`reaction.rs`）。`CallResponse::Kan` と
+`CallResponse::Pon` はどちらも `Priority::Pon` なので、ポン候補を持つ席の
+明槓は `respond` を素通りしてしまう。
+
+`accept_response` の `window.id()` 照合の直後へ置く。
 
 ```rust
         // 明槓は Wave 2d が扱う。
+        //
+        // ReactionWindow::respond は優先度でしか照合せず、Kan と Pon は
+        // どちらも Priority::Pon なので、ここで弾かないとポン候補を持つ席の
+        // 明槓が通ってしまう。
         if response == CallResponse::Kan {
             return Err(Reject::NotOffered);
         }
@@ -1766,7 +1836,7 @@ impl RoundEngine {
 - [ ] **Step 4: テストが通ることを確認する**
 
 Run: `cargo test --package mahjong-engine call_tests`
-Expected: 7テスト PASS
+Expected: 8テスト PASS
 
 - [ ] **Step 5: コミット**
 
@@ -3049,7 +3119,7 @@ git commit -m "feat(engine): 和了と荒牌平局を実装"
 - [ ] `cargo test --workspace` が通る
 - [ ] `cargo clippy --all-targets -- -D warnings` が通る
 - [ ] `cargo fmt --check` が通る
-- [ ] Task 1 の12テスト、Task 2 の14テスト、Task 3 の7テスト、Task 4 の21テストがすべて通る
+- [ ] Task 1 の12テスト、Task 2 の14テスト、Task 3 の8テスト、Task 4 の21テストがすべて通る
 - [ ] ツモ切りだけで局が最後まで回る
 - [ ] 同じシード・同じ時刻列から同じイベント列が出る
 - [ ] すべての局面で牌136枚が保たれる
