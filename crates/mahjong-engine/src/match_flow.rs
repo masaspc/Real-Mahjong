@@ -440,7 +440,7 @@ impl RoundEngine {
             }
             Outcome::Call { seat, response } => self.apply_call(seat, response, now_ms),
             Outcome::Ron(winners) if winners.len() == 3 => {
-                unimplemented!("三家和は Wave 2d で実装する")
+                unimplemented!("三家和は Wave 2e で実装する")
             }
             Outcome::Ron(winners) => self.finish_with_ron(winners),
         }
