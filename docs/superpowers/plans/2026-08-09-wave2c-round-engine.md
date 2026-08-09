@@ -28,12 +28,27 @@
 
 ## 使う既存 API（すべて実在を確認済み）
 
+**`timing` は `crate::timing` として参照できない。**`lib.rs` が宣言している
+モジュールは `invariant` / `match_flow` / `reaction` / `round` / `state` / `wall`
+だけである。`timing.rs` は `state.rs` が `#[path]` で読み込む**私有モジュール**で、
+4つの関数だけが `pub use` で再公開されている。
+
 ```rust
-// crates/mahjong-engine/src/timing.rs
-timing::lead_in_of(events: &[Event]) -> u32
-timing::deadline_for(rules: &Ruleset, now_ms: u64, bank_remaining_ms: u32, lead_in_ms: u32) -> u64
-timing::charge_bank(rules: &Ruleset, bank_remaining_ms: u32, elapsed_ms: u64, lead_in_ms: u32) -> u32
-timing::remaining_for_event(absolute_deadline: u64, now_ms: u64) -> u32
+// crates/mahjong-engine/src/state.rs の先頭（Wave 2a）
+#[path = "timing.rs"]
+mod timing;
+pub use timing::{charge_bank, deadline_for, lead_in_of, remaining_for_event};
+```
+
+したがって `use crate::state::{charge_bank, deadline_for, lead_in_of, remaining_for_event};`
+と書く。`lib.rs` は編集しない。
+
+```rust
+// crates/mahjong-engine/src/timing.rs（crate::state 経由で使う）
+lead_in_of(events: &[Event]) -> u32
+deadline_for(rules: &Ruleset, now_ms: u64, bank_remaining_ms: u32, lead_in_ms: u32) -> u64
+charge_bank(rules: &Ruleset, bank_remaining_ms: u32, elapsed_ms: u64, lead_in_ms: u32) -> u32
+remaining_for_event(absolute_deadline: u64, now_ms: u64) -> u32
 
 // crates/mahjong-engine/src/invariant.rs
 invariant::assert_tiles_conserved(state: &RoundState)
@@ -77,6 +92,30 @@ since_request: [Vec<Event>; 4],
 Wave 2e がまだ無いので、`RoundEngine` は開始時に最初の値を受け取り、局の終わりに
 次の値を返す。**手番の要求も反応ウィンドウも同じ採番を使う。**遅れて届いた応答を
 取り違えないためである。
+
+## テスト局面の組み立て方
+
+`invariant::assert_tiles_conserved` は **枚数の合計しか見ない。**
+
+```rust
+total = 各席の hand.len()
+      + 各席の melds の牌数
+      + 各席の river のうち called_by.is_none() の数
+      + wall.tiles_in_wall().count()
+assert_eq!(total, 136);
+```
+
+種類ごとの枚数は検査しない。したがって次が成り立つ。
+
+| 操作 | 総数 | 可否 |
+|---|---|---|
+| `hand[i] = 別の牌` | 変わらない | **そのまま使える** |
+| `hand = 13枚の別の手` | 変わらない（元も13枚） | **そのまま使える** |
+| `hand.push(牌)` | +1 | 山から1枚引いて相殺する |
+| `wall.draw()` して捨てる | -1 | どこかの河へ入れて相殺する |
+
+在庫の辻褄（同じ牌が5枚になるなど）は合わなくなるが、
+`RoundEngine` の進行を確かめるうえでは支障がない。**山と手の枚数だけを合わせる。**
 
 ## コーディネータが確定させたルール
 
@@ -264,9 +303,9 @@ mod start_tests {
         let Event::RequestAction { deadline_ms, .. } = &events[3] else {
             panic!("RequestAction が無い");
         };
-        let lead_in = timing::lead_in_of(&events[..3]);
-        let absolute = timing::deadline_for(&rules(), 0, rules().think_bank_ms, lead_in);
-        assert_eq!(*deadline_ms, timing::remaining_for_event(absolute, 0));
+        let lead_in = lead_in_of(&events[..3]);
+        let absolute = deadline_for(&rules(), 0, rules().think_bank_ms, lead_in);
+        assert_eq!(*deadline_ms, remaining_for_event(absolute, 0));
     }
 
     /// 期限は相対値なので、開始時刻が変わっても同じ値になる。
@@ -344,10 +383,10 @@ Expected: コンパイルエラー
 //! 同じシード・同じコマンド列・同じ時刻列からは、必ず同じイベント列が出る。
 
 use crate::invariant;
-use crate::reaction::ReactionWindow;
 use crate::round::{discard_options, TurnStart};
-use crate::state::RoundState;
-use crate::timing;
+use crate::state::{
+    charge_bank, deadline_for, lead_in_of, remaining_for_event, RoundState,
+};
 use crate::wall::Seed;
 use protocol::command::ActionOption;
 use protocol::event::{DrawSource, Event};
@@ -372,10 +411,15 @@ pub struct RoundEngine {
     /// まだ取り出されていないイベント。
     pending: Vec<Event>,
     /// 席ごとの、前回その席へ RequestAction を出して以降に配信したイベント。
-    /// `timing::lead_in_of` は席を取らないので、区間の切り出しはここで行う。
+    /// `lead_in_of` は席を取らないので、区間の切り出しはここで行う。
     since_request: [Vec<Event>; 4],
     /// 席ごとの、いま開いている要求。応答が来たらバンクを課金する。
     outstanding: [Option<Outstanding>; 4],
+    /// いま開いているウィンドウで各席へ提示した候補。
+    /// `ReactionWindow` の candidates は private で読み出せないため自分で持つ。
+    offered: [Vec<ActionOption>; 4],
+    /// 直前に開いたウィンドウの id。`ActionPassed` に載せる。
+    last_window_id: u32,
     next_window_id: u32,
 }
 
@@ -385,6 +429,9 @@ struct Outstanding {
     window_id: u32,
     issued_at_ms: u64,
     lead_in_ms: u32,
+    /// 絶対時刻の締切。`ReactionWindow` は締切を1つしか持てないので、
+    /// 席ごとの締切はここに持って `tick` が守る。
+    deadline_ms: u64,
 }
 
 impl RoundEngine {
@@ -406,7 +453,6 @@ impl RoundEngine {
         let mut engine = RoundEngine {
             state,
             phase: Phase::Done,
-            window: None,
             pending: Vec::new(),
             since_request: std::array::from_fn(|_| Vec::new()),
             outstanding: [None; 4],
@@ -498,10 +544,10 @@ impl RoundEngine {
     }
 
     fn request(&mut self, seat: Seat, options: Vec<ActionOption>, now_ms: u64) {
-        let lead_in_ms = timing::lead_in_of(&self.since_request[seat.index()]);
+        let lead_in_ms = lead_in_of(&self.since_request[seat.index()]);
         self.since_request[seat.index()].clear();
 
-        let absolute = timing::deadline_for(
+        let absolute = deadline_for(
             &self.state.rules,
             now_ms,
             self.state.seat(seat).think_bank_ms,
@@ -512,12 +558,13 @@ impl RoundEngine {
             window_id,
             issued_at_ms: now_ms,
             lead_in_ms,
+            deadline_ms: absolute,
         });
         self.pending.push(Event::RequestAction {
             seat,
             window_id,
             options,
-            deadline_ms: timing::remaining_for_event(absolute, now_ms),
+            deadline_ms: remaining_for_event(absolute, now_ms),
         });
     }
 
@@ -556,7 +603,7 @@ git commit -m "feat(engine): 局の開始から第一要求までを実装"
   - `RoundEngine::apply(&mut self, seat: Seat, command: Command, now_ms: u64) -> Result<(), Reject>`
   - `RoundEngine::tick(&mut self, now_ms: u64)`
 
-**バンクの課金は応答を受け取った時に行う。** `timing::charge_bank` へ
+**バンクの課金は応答を受け取った時に行う。** `charge_bank` へ
 `elapsed_ms = now_ms - issued_at_ms` と、要求時に記録した `lead_in_ms` を渡す。
 
 - [ ] **Step 1: 失敗するテストを書く**
@@ -806,7 +853,7 @@ mod discard_tests {
     fn thinking_past_the_base_time_eats_the_bank() {
         let mut engine = start_at(0);
         let events = engine.drain_events();
-        let lead_in = timing::lead_in_of(&events[..3]);
+        let lead_in = lead_in_of(&events[..3]);
         let r = rules();
 
         // 基準時間を 2 秒超えるまで待って打つ。
@@ -899,8 +946,29 @@ Expected: コンパイルエラー
 
 - [ ] **Step 3: 実装を書く**
 
+**このタスクで `RoundEngine` へ足すフィールドと列挙子。**
+
 ```rust
-use crate::reaction::{Outcome, Rejection, WindowKind};
+// Phase へ
+    /// 打牌への反応を待つ。
+    Reaction,
+
+// RoundEngine へ
+    window: Option<ReactionWindow>,
+    /// いま開いているウィンドウで各席へ提示した候補。
+    /// `ReactionWindow` の candidates は private で読み出せないため自分で持つ。
+    offered: [Vec<ActionOption>; 4],
+    /// 直前に開いたウィンドウの id。`ActionPassed` に載せる。
+    last_window_id: u32,
+
+// start の初期化へ
+    window: None,
+    offered: std::array::from_fn(|_| Vec::new()),
+    last_window_id: 0,
+```
+
+```rust
+use crate::reaction::{Outcome, ReactionWindow, Rejection, WindowKind};
 use crate::round::reaction_options;
 use protocol::command::{CallResponse, Command};
 use protocol::event::{DiscardManner, RiichiStep};
@@ -941,13 +1009,7 @@ impl RoundEngine {
                 let Some(open) = self.outstanding[seat.index()] else {
                     return;
                 };
-                let absolute = timing::deadline_for(
-                    &self.state.rules,
-                    open.issued_at_ms,
-                    self.state.seat(seat).think_bank_ms,
-                    open.lead_in_ms,
-                );
-                if now_ms <= absolute {
+                if now_ms <= open.deadline_ms {
                     return;
                 }
                 // 無応答はツモ切り。鳴いた直後なら手の先頭を切る。
@@ -955,12 +1017,38 @@ impl RoundEngine {
                     TurnStart::Draw { tile, .. } => tile,
                     TurnStart::AfterCall => self.state.seat(seat).hand[0],
                 };
+                // 仕様 6.2.2: 時間切れはバンクを使い切ったものとして扱う。
                 self.state.seat_mut(seat).think_bank_ms = 0;
                 self.outstanding[seat.index()] = None;
                 self.discard(seat, tile, now_ms);
             }
-            Phase::Reaction => self.resolve_window(now_ms),
+            Phase::Reaction => {
+                self.pass_expired_seats(now_ms);
+                self.resolve_window(now_ms);
+            }
             Phase::Done => {}
+        }
+    }
+
+    /// 自分の締切を過ぎた席をパス扱いにする。
+    ///
+    /// `ReactionWindow` は締切を1つしか持てないが、席ごとにバンクと lead_in が
+    /// 違うので締切も違う。クライアントへ通知した締切をサーバも守るため、
+    /// ここで席ごとに閉じる。仕様 6.2.2 のとおり、時間切れはバンクを使い切る。
+    fn pass_expired_seats(&mut self, now_ms: u64) {
+        for seat in Seat::ALL {
+            let Some(open) = self.outstanding[seat.index()] else {
+                continue;
+            };
+            if now_ms <= open.deadline_ms {
+                continue;
+            }
+            self.state.seat_mut(seat).think_bank_ms = 0;
+            self.outstanding[seat.index()] = None;
+            if let Some(window) = self.window.as_mut() {
+                // 既に答えていれば拒否されるだけで、害はない。
+                let _ = window.respond(seat, CallResponse::Pass);
+            }
         }
     }
 
@@ -1056,9 +1144,9 @@ impl RoundEngine {
             if candidates[seat.index()].is_empty() {
                 continue;
             }
-            let lead_in_ms = timing::lead_in_of(&self.since_request[seat.index()]);
+            let lead_in_ms = lead_in_of(&self.since_request[seat.index()]);
             self.since_request[seat.index()].clear();
-            let absolute = timing::deadline_for(
+            let absolute = deadline_for(
                 &self.state.rules,
                 now_ms,
                 self.state.seat(seat).think_bank_ms,
@@ -1069,15 +1157,18 @@ impl RoundEngine {
                 window_id,
                 issued_at_ms: now_ms,
                 lead_in_ms,
+                deadline_ms: absolute,
             });
             self.pending.push(Event::RequestAction {
                 seat,
                 window_id,
                 options: candidates[seat.index()].clone(),
-                deadline_ms: timing::remaining_for_event(absolute, now_ms),
+                deadline_ms: remaining_for_event(absolute, now_ms),
             });
         }
 
+        self.offered = candidates.clone();
+        self.last_window_id = window_id;
         let window = ReactionWindow::open(
             window_id,
             WindowKind::Discard,
@@ -1120,7 +1211,8 @@ impl RoundEngine {
             Outcome::Pending => {}
             Outcome::PassAll => {
                 let from = window.from();
-                self.close_window_with_passes();
+                self.window = None;
+                self.record_passes(&[]);
                 self.advance_after_pass(from, now_ms);
             }
             // 鳴きと和了は Task 3 と Task 4 で実装する。
@@ -1130,17 +1222,20 @@ impl RoundEngine {
         }
     }
 
-    /// 見逃しを記録してウィンドウを閉じる。
+    /// 見逃しを記録する。
     ///
-    /// **候補があった席にだけ `ActionPassed` を出す。**候補が無かった席にも
-    /// 出すと、誰が鳴けたのかが牌譜から漏れる。
-    fn close_window_with_passes(&mut self) {
-        let Some(window) = self.window.take() else {
-            return;
-        };
+    /// **候補があった席のうち、`acted` に無い席にだけ `ActionPassed` を出す。**
+    /// 候補が無かった席にも出すと、誰が鳴けたのかが牌譜から漏れる。
+    /// 鳴いた席・和了した席には出さない。
+    ///
+    /// 和了でもここを通す。通さないと、もう一方のロン候補が見送ったことが
+    /// 牌譜から失われる。
+    fn record_passes(&mut self, acted: &[Seat]) {
+        let window_id = self.last_window_id;
         for seat in Seat::ALL {
             let declined = std::mem::take(&mut self.offered[seat.index()]);
-            if declined.is_empty() {
+            self.outstanding[seat.index()] = None;
+            if declined.is_empty() || acted.contains(&seat) {
                 continue;
             }
             // ロンを見逃したなら同巡内フリテンになる。
@@ -1153,10 +1248,9 @@ impl RoundEngine {
                 );
                 self.state.seat_mut(seat).passed_this_turn.extend(waits);
             }
-            self.outstanding[seat.index()] = None;
             self.emit(Event::ActionPassed {
                 seat,
-                window_id: window.id(),
+                window_id,
                 declined,
             });
         }
@@ -1180,8 +1274,9 @@ impl RoundEngine {
         };
         let bank = self.state.seat(seat).think_bank_ms;
         let elapsed = now_ms.saturating_sub(open.issued_at_ms);
-        self.state.seat_mut(seat).think_bank_ms =
-            timing::charge_bank(&self.state.rules, bank, elapsed, open.lead_in_ms);
+        // 代入式の中で seat_mut と &self.state.rules を重ねると借用検査に落ちる。
+        let charged = charge_bank(&self.state.rules, bank, elapsed, open.lead_in_ms);
+        self.state.seat_mut(seat).think_bank_ms = charged;
     }
 }
 ```
@@ -1593,8 +1688,8 @@ impl RoundEngine {
         }
         self.state.any_call_made = true;
 
-        // 見逃した席の記録は、鳴きが成立した場合も残す。
-        self.record_passes_after(&window, seat);
+        // 見逃した席の記録は、鳴きが成立した場合も残す。鳴いた席には出さない。
+        self.record_passes(&[seat]);
 
         self.emit(Event::Call {
             seat,
@@ -1629,8 +1724,7 @@ impl RoundEngine {
             Outcome::Call { seat, response } => self.apply_call(seat, response, now_ms),
 ```
 
-`record_passes_after` は `close_window_with_passes` と同じ処理を、鳴いた席を
-除いて行う。**鳴いた席には `ActionPassed` を出さない。**
+`record_passes(&[seat])` が、鳴いた席を除いて見逃しを記録する。
 
 - [ ] **Step 4: テストが通ることを確認する**
 
@@ -1675,7 +1769,7 @@ mod ending_tests {
     use super::start_tests::{rules, start_at};
     use super::*;
     use protocol::command::{CallResponse, Command};
-    use protocol::event::RyuukyokuKind;
+    use protocol::event::{ContinuationReason, RyuukyokuKind};
     use protocol::notation::{parse_hand, parse_tile};
 
     /// 席1へ和了形の一歩手前を持たせる。234567m 23478p 22s は 6p/9p 待ち。
@@ -1685,10 +1779,27 @@ mod ending_tests {
     }
 
     /// 山を空にする。荒牌平局を起こすため。
+    ///
+    /// **引いた牌を捨てるだけでは牌が消える。**`assert_tiles_conserved` は
+    /// 手牌 + 副露 + 鳴かれていない河 + 山 の合計が136であることを要求する
+    /// （`invariant.rs`）。山から引いた分は、どこかの河へ入れて数を保つ。
+    /// 捨て台には席3を使う。テスト対象にしない席である。
     fn drain_the_wall(engine: &mut RoundEngine) {
         while engine.state().wall.live_remaining() > 0 {
-            engine.state_mut().wall.draw().expect("残っている");
+            let tile = engine.state_mut().wall.draw().expect("残っている");
+            engine.state_mut().seat_mut(sink()).river.push(Discarded {
+                tile,
+                manner: DiscardManner::Tsumogiri,
+                called_by: None,
+                riichi_declaration: false,
+            });
         }
+        crate::invariant::assert_tiles_conserved(engine.state());
+    }
+
+    /// 捨て台の席。牌の総数を保つための行き先に使う。
+    fn sink() -> Seat {
+        Seat::new(3)
     }
 
     /// ロンすると Agari が出て、局が終わる。
@@ -2102,6 +2213,186 @@ mod ending_tests {
         assert_eq!(settlement.delta, [-4_000, -2_000, 8_000, -2_000]);
     }
 
+    /// 荒牌平局の連荘理由は、親のテンパイで分かれる。
+    #[test]
+    fn an_exhaustive_draw_reports_why_the_dealership_moves() {
+        let mut engine = start_at(0);
+        engine.drain_events();
+        drain_the_wall(&mut engine);
+        let seat = Seat::new(0);
+        let tile = engine.state().seat(seat).hand[0];
+        engine
+            .apply(
+                seat,
+                Command::Discard {
+                    tile,
+                    riichi: false,
+                },
+                1_000,
+            )
+            .expect("切れる");
+        engine.drain_events();
+        engine.tick(1_000 + rules().min_reaction_window_ms as u64);
+        engine.drain_events();
+
+        let outcome = engine.outcome().expect("終わっている");
+        let expected = if outcome.dealer_repeats {
+            ContinuationReason::DealerTenpai
+        } else {
+            ContinuationReason::DealerLoss
+        };
+        assert_eq!(outcome.reason, expected);
+    }
+
+    /// 流し満貫は荒牌平局と別の理由になる。
+    #[test]
+    fn a_nagashi_reports_its_own_reason() {
+        let mut engine = start_at(0);
+        engine.drain_events();
+        drain_the_wall(&mut engine);
+        // 捨て台へ牌を積んだあとに立てる。順序を逆にすると消える。
+        for seat in Seat::ALL {
+            engine.state_mut().seat_mut(seat).nagashi_alive = seat == Seat::new(2);
+        }
+        let seat = Seat::new(0);
+        let tile = engine.state().seat(seat).hand[0];
+        engine
+            .apply(
+                seat,
+                Command::Discard {
+                    tile,
+                    riichi: false,
+                },
+                1_000,
+            )
+            .expect("切れる");
+        engine.drain_events();
+        engine.tick(1_000 + rules().min_reaction_window_ms as u64);
+        engine.drain_events();
+        assert_eq!(
+            engine.outcome().expect("終わっている").reason,
+            ContinuationReason::NagashiMangan
+        );
+    }
+
+    /// ダブロンを認めないルールでは頭ハネになる。
+    /// 放銃者から下家回りで最も近い1人だけが和了する。
+    #[test]
+    fn head_bump_keeps_only_the_nearest_winner() {
+        let mut engine = RoundEngine::start(
+            Ruleset {
+                double_ron: false,
+                ..rules()
+            },
+            Round {
+                wind: protocol::seat::Wind::East,
+                number: 1,
+            },
+            Seat::new(0),
+            0,
+            0,
+            [25_000; 4],
+            &super::start_tests::seed(),
+            1,
+            0,
+        );
+        engine.drain_events();
+        // 席1と席2の両方が 6p でロンできる形にする。
+        make_tenpai(&mut engine, Seat::new(1));
+        make_tenpai(&mut engine, Seat::new(2));
+        let winning = parse_tile("6p").expect("正しい記法");
+        engine.state_mut().seat_mut(Seat::new(0)).hand[0] = winning;
+        engine
+            .apply(
+                Seat::new(0),
+                Command::Discard {
+                    tile: winning,
+                    riichi: false,
+                },
+                1_000,
+            )
+            .expect("切れる");
+        engine.drain_events();
+
+        let window_id = engine.next_window_id() - 1;
+        for seat in [Seat::new(2), Seat::new(1)] {
+            engine
+                .apply(
+                    seat,
+                    Command::CallResponse {
+                        window_id,
+                        response: CallResponse::Ron,
+                    },
+                    1_400,
+                )
+                .expect("ロンできる");
+        }
+        engine.tick(1_400);
+
+        let events = engine.drain_events();
+        let Some(Event::Agari { results, .. }) = events
+            .iter()
+            .find(|e| matches!(e, Event::Agari { .. }))
+            .cloned()
+        else {
+            panic!("Agari が出ていない: {events:?}");
+        };
+        assert_eq!(results.len(), 1, "頭ハネなので1人だけ");
+        assert_eq!(results[0].seat, Seat::new(1), "放銃者 席0 に最も近いのは席1");
+    }
+
+    /// 見逃した側にも ActionPassed が出る。和了しても記録は残す。
+    #[test]
+    fn a_declined_ron_is_recorded_even_when_someone_else_wins() {
+        let mut engine = start_at(0);
+        engine.drain_events();
+        make_tenpai(&mut engine, Seat::new(1));
+        make_tenpai(&mut engine, Seat::new(2));
+        let winning = parse_tile("6p").expect("正しい記法");
+        engine.state_mut().seat_mut(Seat::new(0)).hand[0] = winning;
+        engine
+            .apply(
+                Seat::new(0),
+                Command::Discard {
+                    tile: winning,
+                    riichi: false,
+                },
+                1_000,
+            )
+            .expect("切れる");
+        engine.drain_events();
+
+        let window_id = engine.next_window_id() - 1;
+        engine
+            .apply(
+                Seat::new(2),
+                Command::CallResponse {
+                    window_id,
+                    response: CallResponse::Pass,
+                },
+                1_200,
+            )
+            .expect("見逃せる");
+        engine
+            .apply(
+                Seat::new(1),
+                Command::CallResponse {
+                    window_id,
+                    response: CallResponse::Ron,
+                },
+                1_400,
+            )
+            .expect("ロンできる");
+
+        let events = engine.drain_events();
+        assert!(
+            events.iter().any(
+                |e| matches!(e, Event::ActionPassed { seat, .. } if *seat == Seat::new(2))
+            ),
+            "見逃した席の記録が失われている: {events:?}"
+        );
+    }
+
     /// 局が終わったあとはコマンドを受け付けない。
     #[test]
     fn a_finished_round_rejects_further_commands() {
@@ -2186,7 +2477,7 @@ use crate::round::{score_change, settle_agari, settle_exhaustive, settle_nagashi
 use mahjong_core::score::{score, WinType};
 use mahjong_core::wait::waiting_tiles;
 use mahjong_core::hand::HandCounts;
-use protocol::event::{AgariResult, RyuukyokuKind};
+use protocol::event::{AgariResult, ContinuationReason, RyuukyokuKind};
 
 /// 局が終わったときの結果。Wave 2e の `MatchEngine` が次局を組み立てるのに使う。
 #[derive(Clone, PartialEq, Eq, Debug)]
@@ -2194,6 +2485,9 @@ pub struct RoundOutcome {
     pub scores: [i32; 4],
     pub riichi_sticks: u8,
     pub dealer_repeats: bool,
+    /// Wave 2e が `RoundEnd.reason` を組み立てるのに使う。
+    /// 流し満貫は荒牌平局と区別しなければ牌譜から復元できない。
+    pub reason: ContinuationReason,
 }
 
 impl RoundEngine {
@@ -2201,18 +2495,29 @@ impl RoundEngine {
         self.outcome.as_ref()
     }
 
-    /// ロンを確定させる。ダブロンなら席順で並べる。
+    /// ロンを確定させる。
+    ///
+    /// `ReactionWindow::resolve` はロン応答をすべて返すので、`double_ron` が
+    /// 偽なら**ここで頭ハネにする。**放銃者から下家回りで最も近い1人だけが
+    /// 和了する。
     fn finish_with_ron(&mut self, winners: Vec<Seat>) {
         let window = self.window.take().expect("反応ウィンドウが開いている");
         let from = window.from();
         let tile = window.tile();
 
+        let winners = self.head_bump(from, winners);
+
+        // 見逃した席の記録は和了が成立した場合も残す。
+        // 出さないと、誰がロンを見送ったのかが牌譜から失われる。
+        self.record_passes(&winners);
+
         let mut inputs = Vec::new();
         let mut results = Vec::new();
         for seat in &winners {
             let context = self.state.hand_context(*seat, WinType::Ron);
-            let s = self.state.seat(*seat);
-            let result = score(&s.hand, &s.melds, tile, &context, &self.state.rules)
+            let hand = self.state.seat(*seat).hand.clone();
+            let melds = self.state.seat(*seat).melds.clone();
+            let result = score(&hand, &melds, tile, &context, &self.state.rules)
                 .expect("ロンを提示した以上、役がある");
             inputs.push(AgariInput {
                 seat: *seat,
@@ -2223,8 +2528,8 @@ impl RoundEngine {
             results.push(AgariResult {
                 seat: *seat,
                 from: Some(from),
-                hand: s.hand.clone(),
-                melds: s.melds.clone(),
+                hand,
+                melds,
                 win_tile: tile,
                 yaku: result.yaku.clone(),
                 fu: result.fu,
@@ -2248,7 +2553,89 @@ impl RoundEngine {
         });
 
         let dealer_repeats = winners.contains(&self.state.dealer);
-        self.finish(settlement_scores(&self.state, &settlement), 0, dealer_repeats);
+        // 引数の中で &self.state を作ると receiver の &mut self と衝突する。
+        let scores = settlement_scores(&self.state, &settlement);
+        self.finish(
+            scores,
+            0,
+            dealer_repeats,
+            if dealer_repeats {
+                ContinuationReason::DealerWin
+            } else {
+                ContinuationReason::DealerLoss
+            },
+        );
+    }
+
+    /// 頭ハネ。`double_ron` が真ならそのまま席順で返す。
+    fn head_bump(&self, from: Seat, mut winners: Vec<Seat>) -> Vec<Seat> {
+        if self.state.rules.double_ron || winners.len() <= 1 {
+            winners.sort_by_key(|s| s.index());
+            return winners;
+        }
+        let head = winners
+            .into_iter()
+            .min_by_key(|s| (s.index() + 4 - from.index()) % 4)
+            .expect("1人以上いる");
+        vec![head]
+    }
+
+    /// ツモ和了を確定させる。
+    fn finish_with_tsumo(&mut self, seat: Seat, win_tile: Tile) {
+        let context = self.state.hand_context(seat, WinType::Tsumo);
+        // `score` は和了牌を除いた手牌を取る。
+        let mut hand = self.state.seat(seat).hand.clone();
+        let position = hand
+            .iter()
+            .position(|t| *t == win_tile)
+            .expect("ツモ牌は手にある");
+        hand.remove(position);
+        let melds = self.state.seat(seat).melds.clone();
+
+        let result = score(&hand, &melds, win_tile, &context, &self.state.rules)
+            .expect("ツモを提示した以上、役がある");
+        let input = AgariInput {
+            seat,
+            from: None,
+            payment: result.payment,
+            liability: None,
+        };
+        let settlement = settle_agari(
+            &[input],
+            self.state.dealer,
+            self.state.honba,
+            self.state.riichi_sticks,
+        );
+        let results = vec![AgariResult {
+            seat,
+            from: None,
+            hand,
+            melds,
+            win_tile,
+            yaku: result.yaku.clone(),
+            fu: result.fu,
+            han: result.han,
+            score: payment_total(&result.payment),
+            liability: None,
+            ura_indicators: None,
+        }];
+        self.emit(Event::Agari {
+            results,
+            settlement: settlement.clone(),
+        });
+
+        let dealer_repeats = seat == self.state.dealer;
+        let scores = settlement_scores(&self.state, &settlement);
+        self.finish(
+            scores,
+            0,
+            dealer_repeats,
+            if dealer_repeats {
+                ContinuationReason::DealerWin
+            } else {
+                ContinuationReason::DealerLoss
+            },
+        );
     }
 
     /// 荒牌平局。流し満貫が成立していればテンパイ料は発生しない。
@@ -2263,10 +2650,11 @@ impl RoundEngine {
             .filter(|s| self.state.seat(*s).nagashi_alive)
             .collect();
 
-        let settlement = if nagashi_winners.is_empty() {
-            settle_exhaustive(tenpai, &self.state.rules)
-        } else {
+        let nagashi = !nagashi_winners.is_empty();
+        let settlement = if nagashi {
             settle_nagashi(&nagashi_winners, self.state.dealer)
+        } else {
+            settle_exhaustive(tenpai, &self.state.rules)
         };
 
         // テンパイしている席の手牌だけを開く。
@@ -2291,12 +2679,27 @@ impl RoundEngine {
         for seat in Seat::ALL {
             scores[seat.index()] += settlement.delta[seat.index()];
         }
+        // 流し満貫も荒牌平局の一種なので、連荘は親のテンパイで決まる。
+        // ただし理由は分けないと Wave 2e が RoundEnd.reason を復元できない。
         let dealer_repeats = tenpai[self.state.dealer.index()];
-        self.finish(scores, self.state.riichi_sticks, dealer_repeats);
+        let reason = if nagashi {
+            ContinuationReason::NagashiMangan
+        } else if dealer_repeats {
+            ContinuationReason::DealerTenpai
+        } else {
+            ContinuationReason::DealerLoss
+        };
+        self.finish(scores, self.state.riichi_sticks, dealer_repeats, reason);
     }
 
     /// 局を閉じる。
-    fn finish(&mut self, scores: [i32; 4], riichi_sticks: u8, dealer_repeats: bool) {
+    fn finish(
+        &mut self,
+        scores: [i32; 4],
+        riichi_sticks: u8,
+        dealer_repeats: bool,
+        reason: ContinuationReason,
+    ) {
         let before = self.state.scores;
         let sticks_delta =
             (riichi_sticks as i32 - self.state.riichi_sticks as i32) * crate::state::RIICHI_STICK;
@@ -2316,6 +2719,7 @@ impl RoundEngine {
             scores,
             riichi_sticks,
             dealer_repeats,
+            reason,
         });
     }
 }
@@ -2343,8 +2747,8 @@ fn settlement_scores(state: &RoundState, settlement: &protocol::event::Settlemen
 `resolve_window` と `advance_after_pass` の `unimplemented!` を差し替える。
 
 ```rust
+            // 三家和は Wave 2d が流局にする。頭ハネより先に判定する。
             Outcome::Ron(winners) if winners.len() == 3 => {
-                // 三家和は Wave 2d が流局にする。
                 unimplemented!("三家和は Wave 2d で実装する")
             }
             Outcome::Ron(winners) => self.finish_with_ron(winners),
@@ -2357,17 +2761,47 @@ fn settlement_scores(state: &RoundState, settlement: &protocol::event::Settlemen
         }
 ```
 
-`Command::Tsumo` を `apply` へ結線する。手番の席が `ActionOption::Tsumo` を
-提示されている場合のみ受け付ける。
+`apply` へツモを結線する。
 
-**`RoundEngine` へ `outcome: Option<RoundOutcome>` フィールドを足し、
-`start` で `None` に初期化すること。**
+```rust
+            Command::Tsumo => self.apply_tsumo(seat, now_ms),
+```
+
+```rust
+    fn apply_tsumo(&mut self, seat: Seat, now_ms: u64) -> Result<(), Reject> {
+        let Phase::Turn { seat: turn, start } = self.phase.clone() else {
+            return Err(Reject::NotYourTurn);
+        };
+        if turn != seat {
+            return Err(Reject::NotYourTurn);
+        }
+        // 提示していないツモは受け付けない。役の有無は discard_options が見る。
+        if !discard_options(&self.state, seat, start)
+            .iter()
+            .any(|o| matches!(o, ActionOption::Tsumo))
+        {
+            return Err(Reject::NotOffered);
+        }
+        let TurnStart::Draw { tile, .. } = start else {
+            return Err(Reject::NotOffered);
+        };
+        self.charge(seat, now_ms);
+        self.finish_with_tsumo(seat, tile);
+        Ok(())
+    }
+```
+
+**このタスクで `RoundEngine` へ `outcome: Option<RoundOutcome>` を足し、
+`start` で `None` に初期化する。**
 
 テストが局面を組み立てるための補助も同じファイルに置く。
 
 ```rust
 /// 指定した席のツモ番を直接作る。手牌が13枚であることを前提にする。
 /// 自然な進行では狙った牌をツモらせられないので、テストだけが使う。
+///
+/// **手へ1枚足す分、山から1枚抜く。**そうしないと総数が137になり、
+/// `assert_tiles_conserved` が落ちる。
 #[cfg(test)]
 pub(crate) fn force_draw_turn(&mut self, seat: Seat, tile: Tile) {
     assert_eq!(
@@ -2375,6 +2809,7 @@ pub(crate) fn force_draw_turn(&mut self, seat: Seat, tile: Tile) {
         13,
         "13枚の手へ1枚足して14枚にする"
     );
+    self.state.wall.draw().expect("山に残っている");
     self.state.seat_mut(seat).hand.push(tile);
     self.state.last_draw = Some((seat, DrawSource::Wall));
     self.state.draw_count[seat.index()] += 1;
@@ -2389,6 +2824,7 @@ pub(crate) fn force_draw_turn(&mut self, seat: Seat, tile: Tile) {
         window_id: 0,
         issued_at_ms: 0,
         lead_in_ms: 0,
+        deadline_ms: u64::MAX,
     });
 }
 ```
@@ -2396,7 +2832,7 @@ pub(crate) fn force_draw_turn(&mut self, seat: Seat, tile: Tile) {
 - [ ] **Step 4: テストが通ることを確認する**
 
 Run: `cargo test --package mahjong-engine ending_tests`
-Expected: 14テスト PASS
+Expected: 18テスト PASS
 
 - [ ] **Step 5: コミット**
 
@@ -2412,7 +2848,7 @@ git commit -m "feat(engine): 和了と荒牌平局を実装"
 - [ ] `cargo test --workspace` が通る
 - [ ] `cargo clippy --all-targets -- -D warnings` が通る
 - [ ] `cargo fmt --check` が通る
-- [ ] Task 1 の12テスト、Task 2 の14テスト、Task 3 の7テスト、Task 4 の14テストがすべて通る
+- [ ] Task 1 の12テスト、Task 2 の14テスト、Task 3 の7テスト、Task 4 の18テストがすべて通る
 - [ ] ツモ切りだけで局が最後まで回る
 - [ ] 同じシード・同じ時刻列から同じイベント列が出る
 - [ ] すべての局面で牌136枚が保たれる
