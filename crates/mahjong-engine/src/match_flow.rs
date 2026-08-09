@@ -204,22 +204,78 @@ impl RoundEngine {
         if turn != seat {
             return Err(Reject::NotYourTurn);
         }
-        if riichi {
-            return Err(Reject::NotOffered);
-        }
-        let allowed = discard_options(&self.state, seat, start)
-            .into_iter()
+        // 打牌の候補とリーチ宣言の候補は別に見る。
+        let options = discard_options(&self.state, seat, start);
+        let (allowed, riichi_allowed) = options
+            .iter()
             .find_map(|o| match o {
-                ActionOption::Discard { allowed, .. } => Some(allowed),
+                ActionOption::Discard {
+                    allowed,
+                    riichi_allowed,
+                } => Some((allowed.clone(), riichi_allowed.clone())),
                 _ => None,
             })
             .unwrap_or_default();
-        if !allowed.contains(&tile) {
+        if riichi {
+            if !riichi_allowed.contains(&tile) {
+                return Err(Reject::NotOffered);
+            }
+        } else if !allowed.contains(&tile) {
             return Err(Reject::NotOffered);
         }
         self.charge(seat, now_ms);
+        if riichi {
+            self.declare_riichi(seat);
+        }
         self.discard(seat, tile, now_ms);
         Ok(())
+    }
+
+    /// リーチを宣言する。打牌より先に出す。
+    fn declare_riichi(&mut self, seat: Seat) {
+        let double = self.state.draw_count[seat.index()] == 1 && !self.state.any_call_made;
+        self.state.seat_mut(seat).riichi = Some(crate::state::RiichiState {
+            step: RiichiStep::Declare,
+            declared_at_turn: self.state.draw_count[seat.index()],
+            ippatsu: false,
+            double,
+        });
+        self.emit(Event::Riichi {
+            seat,
+            step: RiichiStep::Declare,
+        });
+    }
+
+    /// 宣言だけのリーチを成立させる。
+    fn accept_riichi_of(&mut self, seat: Seat) {
+        let pending = matches!(
+            &self.state.seat(seat).riichi,
+            Some(r) if r.step == RiichiStep::Declare
+        );
+        if !pending {
+            return;
+        }
+        let before = self.state.scores;
+        if let Some(riichi) = self.state.seat_mut(seat).riichi.as_mut() {
+            riichi.step = RiichiStep::Accepted;
+            riichi.ippatsu = true;
+        }
+        self.state.scores[seat.index()] -= crate::state::RIICHI_STICK;
+        self.state.riichi_sticks += 1;
+        invariant::assert_scores_conserved(&before, &self.state.scores, crate::state::RIICHI_STICK);
+        self.emit(Event::Riichi {
+            seat,
+            step: RiichiStep::Accepted,
+        });
+    }
+
+    /// 一発を全席から消す。鳴きが入ったときに呼ぶ。
+    fn clear_ippatsu(&mut self) {
+        for seat in Seat::ALL {
+            if let Some(riichi) = self.state.seat_mut(seat).riichi.as_mut() {
+                riichi.ippatsu = false;
+            }
+        }
     }
 
     fn discard(&mut self, seat: Seat, tile: Tile, now_ms: u64) {
@@ -256,6 +312,13 @@ impl RoundEngine {
             });
         if !tile.kind().is_terminal_or_honor() {
             self.state.seat_mut(seat).nagashi_alive = false;
+        }
+        // 成立済みのリーチの席が打った時点で一発は切れる。
+        // 宣言牌のときは step が Declare なので、ここは通らない。
+        if let Some(riichi) = self.state.seat_mut(seat).riichi.as_mut() {
+            if riichi.step == RiichiStep::Accepted {
+                riichi.ippatsu = false;
+            }
         }
         self.emit(Event::Discard { seat, tile, manner });
         invariant::assert_tiles_conserved(&self.state);
@@ -396,6 +459,8 @@ impl RoundEngine {
     }
 
     fn advance_after_pass(&mut self, from: Seat, now_ms: u64) {
+        // 誰も和了しなかったので、宣言していたリーチが成立する。
+        self.accept_riichi_of(from);
         if self.state.wall.live_remaining() == 0 {
             self.finish_exhaustive();
             return;
@@ -446,6 +511,9 @@ impl RoundEngine {
         if let Some(last) = self.state.seat_mut(from).river.last_mut() {
             last.called_by = Some(seat);
         }
+        // 鳴かれても宣言は生きる。ただし一発は消える。
+        self.accept_riichi_of(from);
+        self.clear_ippatsu();
         self.state.any_call_made = true;
         self.record_passes(&[seat]);
         self.emit(Event::Call {
@@ -1222,6 +1290,350 @@ mod discard_tests {
 }
 
 #[cfg(test)]
+mod riichi_tests {
+    // RiichiState は match_flow.rs の親スコープに入っていない。明示して取り込む。
+    use super::discard_tests::WAY_PAST_ANY_DEADLINE_MS;
+    use super::ending_tests::{make_tenpai, set_dealer_hand};
+    use super::start_tests::start_at;
+    use super::*;
+    use crate::state::RiichiState;
+    use protocol::command::{CallResponse, Command};
+    use protocol::notation::{parse_hand, parse_tile};
+
+    /// 親に 6p/9p 待ちのテンパイを持たせ、1z でリーチ宣言する。
+    fn declare_riichi(engine: &mut RoundEngine, now_ms: u64) -> Tile {
+        set_dealer_hand(engine, "234567m23478p22s1z");
+        let tile = parse_tile("1z").expect("正しい記法");
+        engine
+            .apply(
+                Seat::new(0),
+                Command::Discard { tile, riichi: true },
+                now_ms,
+            )
+            .expect("リーチできる");
+        tile
+    }
+
+    fn riichi_of(engine: &RoundEngine, seat: Seat) -> RiichiState {
+        engine.state().seat(seat).riichi.expect("リーチしている")
+    }
+
+    /// 宣言は打牌より先に出る。
+    #[test]
+    fn the_declaration_comes_before_the_discard() {
+        let mut engine = start_at(0);
+        engine.drain_events();
+        declare_riichi(&mut engine, 1_000);
+
+        let events = engine.drain_events();
+        let declare = events
+            .iter()
+            .position(|e| {
+                matches!(
+                    e,
+                    Event::Riichi {
+                        step: RiichiStep::Declare,
+                        ..
+                    }
+                )
+            })
+            .expect("宣言が出ていない");
+        let discard = events
+            .iter()
+            .position(|e| matches!(e, Event::Discard { .. }))
+            .expect("打牌が出ていない");
+        assert!(declare < discard, "宣言が打牌より後に出ている");
+    }
+
+    /// 宣言牌は河で横向きになる。
+    #[test]
+    fn the_declaration_tile_is_marked_in_the_river() {
+        let mut engine = start_at(0);
+        engine.drain_events();
+        declare_riichi(&mut engine, 1_000);
+        let river = &engine.state().seat(Seat::new(0)).river;
+        assert!(river.last().expect("河に1枚ある").riichi_declaration);
+    }
+
+    /// 宣言しただけでは供託は出ない。
+    #[test]
+    fn declaring_alone_does_not_pay_the_stick() {
+        let mut engine = start_at(0);
+        engine.drain_events();
+        declare_riichi(&mut engine, 1_000);
+        assert_eq!(riichi_of(&engine, Seat::new(0)).step, RiichiStep::Declare);
+        assert_eq!(engine.state().scores[0], 25_000);
+        assert_eq!(engine.state().riichi_sticks, 0);
+    }
+
+    /// 誰も和了しなければ成立し、1000点が供託へ移る。
+    #[test]
+    fn a_riichi_is_accepted_once_nobody_wins_on_it() {
+        let mut engine = start_at(0);
+        engine.drain_events();
+        declare_riichi(&mut engine, 1_000);
+        engine.drain_events();
+        engine.tick(WAY_PAST_ANY_DEADLINE_MS);
+
+        let events = engine.drain_events();
+        assert!(events.iter().any(|e| matches!(
+            e,
+            Event::Riichi {
+                step: RiichiStep::Accepted,
+                seat
+            } if *seat == Seat::new(0)
+        )));
+        assert_eq!(riichi_of(&engine, Seat::new(0)).step, RiichiStep::Accepted);
+        assert_eq!(engine.state().scores[0], 24_000);
+        assert_eq!(engine.state().riichi_sticks, 1);
+    }
+
+    /// 成立すると一発が立つ。
+    #[test]
+    fn an_accepted_riichi_starts_with_ippatsu() {
+        let mut engine = start_at(0);
+        engine.drain_events();
+        declare_riichi(&mut engine, 1_000);
+        engine.drain_events();
+        engine.tick(WAY_PAST_ANY_DEADLINE_MS);
+        assert!(riichi_of(&engine, Seat::new(0)).ippatsu);
+    }
+
+    /// 宣言牌をロンされたらリーチは成立しない。供託も出ない。
+    #[test]
+    fn a_ron_on_the_declaration_cancels_the_riichi() {
+        let mut engine = start_at(0);
+        engine.drain_events();
+        // 席1が 1z の単騎で和了れる形にする。123m456m789m は一気通貫なので
+        // 門前ロンに役がある。13枚を13枚へ差し替えるので総数は変わらない。
+        engine.state_mut().seat_mut(Seat::new(1)).hand =
+            parse_hand("123m456m789m123s1z").expect("正しい記法");
+        let tile = declare_riichi(&mut engine, 1_000);
+        engine.drain_events();
+
+        let window_id = engine.next_window_id() - 1;
+        let responded = engine.apply(
+            Seat::new(1),
+            Command::CallResponse {
+                window_id,
+                response: CallResponse::Ron,
+            },
+            1_400,
+        );
+        assert_eq!(responded, Ok(()), "1z でロンできる形にしてある");
+        let _ = tile;
+
+        assert_eq!(riichi_of(&engine, Seat::new(0)).step, RiichiStep::Declare);
+        assert_eq!(engine.state().riichi_sticks, 0, "供託は出ていない");
+        // **持ち点そのものは見ない。**ロンの精算で放銃分が動いており、
+        // その額は配牌のドラ次第で変わる。供託が出ていないことは
+        // 「卓の点棒の合計が減っていない」で見るほうが確実である。
+        // 供託が1本出ていれば合計は 99,000 になる。
+        assert_eq!(engine.state().scores.iter().sum::<i32>(), 100_000);
+    }
+
+    /// 宣言牌を鳴かれてもリーチは成立する。ただし一発は消える。
+    #[test]
+    fn a_call_on_the_declaration_keeps_the_riichi_but_kills_ippatsu() {
+        let mut engine = start_at(0);
+        engine.drain_events();
+        // 席1が 1z をポンできる形にする。
+        let target = parse_tile("1z").expect("正しい記法");
+        for seat in [Seat::new(2), Seat::new(3)] {
+            for held in engine.state_mut().seat_mut(seat).hand.iter_mut() {
+                if held.kind() == target.kind() {
+                    *held = parse_tile("9m").expect("正しい記法");
+                }
+            }
+        }
+        engine.state_mut().seat_mut(Seat::new(1)).hand[0] = target;
+        engine.state_mut().seat_mut(Seat::new(1)).hand[1] = target;
+
+        declare_riichi(&mut engine, 1_000);
+        engine.drain_events();
+
+        let window_id = engine.next_window_id() - 1;
+        engine
+            .apply(
+                Seat::new(1),
+                Command::CallResponse {
+                    window_id,
+                    response: CallResponse::Pon {
+                        tiles: [target, target],
+                    },
+                },
+                1_400,
+            )
+            .expect("ポンできる");
+
+        let state = riichi_of(&engine, Seat::new(0));
+        assert_eq!(state.step, RiichiStep::Accepted, "宣言は生きている");
+        assert!(!state.ippatsu, "鳴かれたら一発は消える");
+        assert_eq!(engine.state().riichi_sticks, 1);
+    }
+
+    /// 最初のツモでのリーチはダブルリーチになる。
+    #[test]
+    fn a_riichi_on_the_first_draw_is_double() {
+        let mut engine = start_at(0);
+        engine.drain_events();
+        declare_riichi(&mut engine, 1_000);
+        assert!(riichi_of(&engine, Seat::new(0)).double);
+    }
+
+    /// 2巡目以降のリーチはダブルリーチにならない。
+    #[test]
+    fn a_later_riichi_is_not_double() {
+        let mut engine = start_at(0);
+        engine.drain_events();
+        engine.state_mut().draw_count[0] = 2;
+        declare_riichi(&mut engine, 1_000);
+        assert!(!riichi_of(&engine, Seat::new(0)).double);
+    }
+
+    /// 誰かが鳴いていればダブルリーチにならない。
+    #[test]
+    fn a_call_anywhere_cancels_double_riichi() {
+        let mut engine = start_at(0);
+        engine.drain_events();
+        engine.state_mut().any_call_made = true;
+        declare_riichi(&mut engine, 1_000);
+        assert!(!riichi_of(&engine, Seat::new(0)).double);
+    }
+
+    /// リーチできない牌でリーチ宣言はできない。
+    #[test]
+    fn a_discard_that_breaks_tenpai_cannot_declare_riichi() {
+        let mut engine = start_at(0);
+        engine.drain_events();
+        set_dealer_hand(&mut engine, "234567m23478p22s1z");
+        // 2m を切るとテンパイが崩れる。
+        assert_eq!(
+            engine.apply(
+                Seat::new(0),
+                Command::Discard {
+                    tile: parse_tile("2m").expect("正しい記法"),
+                    riichi: true,
+                },
+                1_000
+            ),
+            Err(Reject::NotOffered)
+        );
+    }
+
+    /// リーチ中は一発ツモが成立する。
+    #[test]
+    fn a_riichi_seat_can_win_with_ippatsu_tsumo() {
+        let mut engine = start_at(0);
+        engine.drain_events();
+        declare_riichi(&mut engine, 1_000);
+        engine.drain_events();
+        engine.tick(WAY_PAST_ANY_DEADLINE_MS);
+        engine.drain_events();
+
+        // 親の番を作り直して 6p を引かせる。
+        // `force_draw_turn` は締切を「発行時刻0 + 基準 + バンク + 猶予」で
+        // 作る。WAY_PAST を渡すと tick が期限切れと見なして自動和了するので、
+        // 期限内の小さい時刻で宣言する。
+        engine.force_draw_turn(Seat::new(0), parse_tile("6p").expect("正しい記法"));
+        engine
+            .apply(Seat::new(0), Command::Tsumo, 2_000)
+            .expect("ツモ和了できる");
+
+        let events = engine.drain_events();
+        let Some(Event::Agari { results, .. }) = events
+            .iter()
+            .find(|e| matches!(e, Event::Agari { .. }))
+            .cloned()
+        else {
+            panic!("Agari が出ていない: {events:?}");
+        };
+        let ids: Vec<protocol::yaku::YakuId> = results[0].yaku.iter().map(|(id, _)| *id).collect();
+        assert!(ids.contains(&protocol::yaku::YakuId::Ippatsu), "{ids:?}");
+        assert!(
+            ids.contains(&protocol::yaku::YakuId::DoubleRiichi),
+            "{ids:?}"
+        );
+    }
+
+    /// 和了者のリーチが成立していれば裏ドラを渡す。
+    #[test]
+    fn a_riichi_winner_receives_the_ura_indicators() {
+        let mut engine = start_at(0);
+        engine.drain_events();
+        declare_riichi(&mut engine, 1_000);
+        engine.drain_events();
+        engine.tick(WAY_PAST_ANY_DEADLINE_MS);
+        engine.drain_events();
+        engine.force_draw_turn(Seat::new(0), parse_tile("6p").expect("正しい記法"));
+        // 締切の理由は上のテストと同じ。期限内の時刻で宣言する。
+        engine
+            .apply(Seat::new(0), Command::Tsumo, 2_000)
+            .expect("ツモ和了できる");
+
+        let events = engine.drain_events();
+        let Some(Event::Agari { results, .. }) = events
+            .iter()
+            .find(|e| matches!(e, Event::Agari { .. }))
+            .cloned()
+        else {
+            panic!("Agari が出ていない");
+        };
+        assert_eq!(
+            results[0].ura_indicators,
+            Some(engine.state().wall.ura_indicators().to_vec())
+        );
+    }
+
+    /// リーチしていない和了者に裏ドラは渡さない。
+    #[test]
+    fn a_winner_without_riichi_gets_no_ura() {
+        let mut engine = start_at(0);
+        engine.drain_events();
+        make_tenpai(&mut engine, Seat::new(0));
+        engine.force_draw_turn(Seat::new(0), parse_tile("6p").expect("正しい記法"));
+        engine
+            .apply(Seat::new(0), Command::Tsumo, 1_000)
+            .expect("ツモ和了できる");
+        let events = engine.drain_events();
+        let Some(Event::Agari { results, .. }) = events
+            .iter()
+            .find(|e| matches!(e, Event::Agari { .. }))
+            .cloned()
+        else {
+            panic!("Agari が出ていない");
+        };
+        assert_eq!(results[0].ura_indicators, None);
+    }
+
+    /// 供託を出しても点棒の合計は変わらない。
+    #[test]
+    fn paying_the_stick_keeps_the_table_total() {
+        let mut engine = start_at(0);
+        engine.drain_events();
+        declare_riichi(&mut engine, 1_000);
+        engine.drain_events();
+        engine.tick(WAY_PAST_ANY_DEADLINE_MS);
+        engine.drain_events();
+
+        let total: i32 =
+            engine.state().scores.iter().sum::<i32>() + engine.state().riichi_sticks as i32 * 1_000;
+        assert_eq!(total, 100_000);
+    }
+
+    /// リーチが成立しても牌の総数は変わらない。
+    #[test]
+    fn a_riichi_conserves_every_tile() {
+        let mut engine = start_at(0);
+        engine.drain_events();
+        declare_riichi(&mut engine, 1_000);
+        engine.drain_events();
+        engine.tick(WAY_PAST_ANY_DEADLINE_MS);
+        crate::invariant::assert_tiles_conserved(engine.state());
+    }
+}
+
+#[cfg(test)]
 mod call_tests {
     // 兄弟モジュールの項目は use super::*; では入らない。明示して取り込む。
     use super::discard_tests::state_where_seat_one_can_pon;
@@ -1656,7 +2068,7 @@ impl RoundEngine {
                 score: payment_total(&result.payment),
                 liability: None,
                 // リーチ和了のみ Some。空配列との使い分けに頼らない設計である。
-                ura_indicators: None,
+                ura_indicators: self.ura_for(*seat),
             });
         }
 
@@ -1736,7 +2148,7 @@ impl RoundEngine {
             han: result.han,
             score: payment_total(&result.payment),
             liability: None,
-            ura_indicators: None,
+            ura_indicators: self.ura_for(seat),
         }];
         self.emit(Event::Agari {
             results,
@@ -1755,6 +2167,15 @@ impl RoundEngine {
                 ContinuationReason::DealerLoss
             },
         );
+    }
+
+    /// 裏ドラは、リーチが成立している和了者にだけ渡す。
+    fn ura_for(&self, seat: Seat) -> Option<Vec<Tile>> {
+        matches!(
+            &self.state.seat(seat).riichi,
+            Some(r) if r.step == RiichiStep::Accepted
+        )
+        .then(|| self.state.wall.ura_indicators().to_vec())
     }
 
     /// 荒牌平局。流し満貫が成立していればテンパイ料は発生しない。
@@ -1937,7 +2358,7 @@ mod ending_tests {
     /// **枚数を保つ。**親は配牌のあとツモ済みなので14枚である。13枚の形へ
     /// 差し替えると1枚消えるので、あふれた分は捨て台の河へ移す。
     /// 河の牌も `assert_tiles_conserved` の数え上げに入る。
-    fn make_tenpai(engine: &mut RoundEngine, seat: Seat) {
+    pub(super) fn make_tenpai(engine: &mut RoundEngine, seat: Seat) {
         assert_ne!(seat, sink(), "捨て台の席は書き換えられない");
         let target = parse_hand("234567m23478p22s").expect("正しい記法");
         let old = std::mem::replace(&mut engine.state_mut().seat_mut(seat).hand, target);
@@ -2455,7 +2876,7 @@ mod ending_tests {
 
     /// 親の手を14枚の指定した形にする。親は配牌後にツモ済みなので14枚であり、
     /// 14枚を14枚に差し替えるだけなら牌の総数は変わらない。
-    fn set_dealer_hand(engine: &mut RoundEngine, notation: &str) {
+    pub(super) fn set_dealer_hand(engine: &mut RoundEngine, notation: &str) {
         let hand = parse_hand(notation).expect("正しい記法");
         assert_eq!(hand.len(), 14, "親の手は14枚である");
         assert_eq!(engine.state().seat(Seat::new(0)).hand.len(), 14);
