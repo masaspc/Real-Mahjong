@@ -413,6 +413,8 @@ pub struct RoundEngine {
     /// 席ごとの、前回その席へ RequestAction を出して以降に配信したイベント。
     /// `lead_in_of` は席を取らないので、区間の切り出しはここで行う。
     since_request: [Vec<Event>; 4],
+    /// 最初に受け取った採番。過去に開いた id の範囲を知るために持つ。
+    first_window_id: u32,
     next_window_id: u32,
 }
 
@@ -437,6 +439,7 @@ impl RoundEngine {
             phase: Phase::Done,
             pending: Vec::new(),
             since_request: std::array::from_fn(|_| Vec::new()),
+            first_window_id,
             next_window_id: first_window_id,
         };
 
@@ -593,6 +596,16 @@ mod discard_tests {
     use protocol::command::{CallResponse, Command};
     use protocol::event::DiscardManner;
 
+    /// どの席の締切も確実に過ぎている時刻。
+    ///
+    /// **最低待機を過ぎただけではウィンドウは確定しない。**
+    /// `ReactionWindow::resolve` は「未応答の席がいまの最高優先度以上を
+    /// 出しうる」あいだ `Pending` を返す（`reaction.rs`）。他家の手牌を
+    /// 固定していないテストでは、鳴ける席がいるかどうかがシードで変わる。
+    /// 反応の締切は基準時間 + バンク + 通信猶予 + lead_in なので、
+    /// これを超える時刻で確定させる。
+    pub(super) const WAY_PAST_ANY_DEADLINE_MS: u64 = 1_000_000;
+
     /// 手番の席の手牌から、いま引いた牌を返す。
     fn drawn_of(engine: &RoundEngine) -> Tile {
         let Phase::Turn {
@@ -610,6 +623,40 @@ mod discard_tests {
             panic!("手番ではない");
         };
         *seat
+    }
+
+    /// 席1がポンできる局面を作る。配牌に頼らず、手牌を直接置く。
+    ///
+    /// **席2と席3から同じ種類の牌を追い出す。**配牌でそこにも同じ牌が
+    /// 2枚あると、その席もポンの候補になる。`ReactionWindow::resolve` は
+    /// 「未応答の席が同じ優先度以上を出しうる」あいだ確定しないので、
+    /// 席1がポンしてもウィンドウが開いたままになり、テストがシードに
+    /// 依存して落ちる。
+    ///
+    /// 追い出し先の牌は種類が違えばよい。席2と席3は席0の下家ではないので
+    /// チーはできず、配牌がその牌で和了形になることもない。
+    pub(super) fn state_where_seat_one_can_pon(engine: &mut RoundEngine, tile: &str) -> Tile {
+        let target = parse_tile(tile).expect("正しい記法");
+        let filler = {
+            let nine_man = parse_tile("9m").expect("正しい記法");
+            if nine_man.kind() == target.kind() {
+                parse_tile("1m").expect("正しい記法")
+            } else {
+                nine_man
+            }
+        };
+        for seat in [Seat::new(2), Seat::new(3)] {
+            for held in engine.state_mut().seat_mut(seat).hand.iter_mut() {
+                if held.kind() == target.kind() {
+                    *held = filler;
+                }
+            }
+        }
+
+        let hand = &mut engine.state_mut().seat_mut(Seat::new(1)).hand;
+        hand[0] = target;
+        hand[1] = target;
+        target
     }
 
     /// ツモ切りする。
@@ -758,7 +805,7 @@ mod discard_tests {
         tsumogiri(&mut engine, 1_000);
         engine.drain_events();
 
-        engine.tick(1_000 + rules().min_reaction_window_ms as u64);
+        engine.tick(WAY_PAST_ANY_DEADLINE_MS);
         let events = engine.drain_events();
         let Some(Event::Draw { seat, .. }) = events
             .iter()
@@ -773,24 +820,41 @@ mod discard_tests {
             .any(|e| matches!(e, Event::RequestAction { seat: s, .. } if *s == Seat::new(1))));
     }
 
-    /// 見逃した席には ActionPassed が出る。候補が無かった席には出ない。
+    /// 候補があった席にだけ ActionPassed が出る。
+    ///
+    /// 席1にポンの候補を作り、席2と席3からは同じ牌を追い出しておく。
+    /// これで「出る席」と「出ない席」の両方を同じ局面で検査できる。
     #[test]
-    fn only_seats_with_candidates_get_an_action_passed() {
+    fn action_passed_goes_exactly_to_the_seats_with_candidates() {
         let mut engine = start_at(0);
         engine.drain_events();
-        tsumogiri(&mut engine, 1_000);
+        let target = state_where_seat_one_can_pon(&mut engine, "5p");
+        engine.state_mut().seat_mut(Seat::new(0)).hand[0] = target;
+        engine
+            .apply(
+                Seat::new(0),
+                Command::Discard {
+                    tile: target,
+                    riichi: false,
+                },
+                1_000,
+            )
+            .expect("切れる");
         engine.drain_events();
-        engine.tick(1_000 + rules().min_reaction_window_ms as u64);
+        engine.tick(WAY_PAST_ANY_DEADLINE_MS);
 
         let events = engine.drain_events();
-        for event in &events {
-            if let Event::ActionPassed { seat, declined, .. } = event {
-                assert!(
-                    !declined.is_empty(),
-                    "候補が無い席 {seat:?} に ActionPassed を出している"
-                );
-            }
-        }
+        let passed: Vec<Seat> = events
+            .iter()
+            .filter_map(|e| match e {
+                Event::ActionPassed { seat, declined, .. } => {
+                    assert!(!declined.is_empty(), "候補が空の ActionPassed");
+                    Some(*seat)
+                }
+                _ => None,
+            })
+            .collect();
+        assert_eq!(passed, vec![Seat::new(1)], "候補があったのは席1だけ");
     }
 
     /// 打牌した席は自分の打牌に反応できない。
@@ -963,10 +1027,12 @@ mod discard_tests {
         for _ in 0..8 {
             tsumogiri(&mut engine, now);
             engine.drain_events();
-            now += rules().min_reaction_window_ms as u64;
+            // 鳴ける席がいてもウィンドウが確定するよう、締切を越えて進める。
+            now += WAY_PAST_ANY_DEADLINE_MS;
             engine.tick(now);
             engine.drain_events();
             crate::invariant::assert_tiles_conserved(engine.state());
+            // 次の手番の要求はいま出たところなので、ここからは期限内である。
             now += 1_000;
         }
     }
@@ -1082,6 +1148,11 @@ impl RoundEngine {
     pub fn tick(&mut self, now_ms: u64) {
         match self.phase.clone() {
             Phase::Turn { seat, start } => {
+                // 手番の席には必ず要求が出ている。抜けると局が黙って止まる。
+                debug_assert!(
+                    self.outstanding[seat.index()].is_some(),
+                    "手番の席 {seat:?} に要求が出ていない"
+                );
                 let Some(open) = self.outstanding[seat.index()] else {
                     return;
                 };
@@ -1089,6 +1160,9 @@ impl RoundEngine {
                     return;
                 }
                 // 無応答はツモ切り。鳴いた直後なら手の先頭を切る。
+                //
+                // **仕様 8.2 は「和了可能であれば自動で和了る」と定める。**
+                // その分岐は Task 4 で足す。ここではまだ和了を作れない。
                 let tile = match start {
                     TurnStart::Draw { tile, .. } => tile,
                     TurnStart::AfterCall => self.state.seat(seat).hand[0],
@@ -1268,7 +1342,11 @@ impl RoundEngine {
     ) -> Result<(), Reject> {
         let Some(window) = self.window.as_ref() else {
             // 一度は開いた id なら遅れて届いた応答、そうでなければ誤りである。
-            return Err(if window_id < self.next_window_id {
+            // `first_window_id` は外から渡されるので、0 からではなくそこから
+            // 数える。1 始まりと決めつけると、半荘の途中の局で誤判定する。
+            let was_issued =
+                self.first_window_id <= window_id && window_id < self.next_window_id;
+            return Err(if was_issued {
                 Reject::StaleWindow
             } else {
                 Reject::NoWindow
@@ -1425,40 +1503,6 @@ mod call_tests {
     use protocol::command::{CallResponse, Command};
     use protocol::meld::MeldKind;
     use protocol::notation::parse_tile;
-
-    /// 席1がポンできる局面を作る。配牌に頼らず、手牌を直接置く。
-    ///
-    /// **席2と席3から同じ種類の牌を追い出す。**配牌でそこにも同じ牌が
-    /// 2枚あると、その席もポンの候補になる。`ReactionWindow::resolve` は
-    /// 「未応答の席が同じ優先度以上を出しうる」あいだ確定しないので、
-    /// 席1がポンしてもウィンドウが開いたままになり、テストがシードに
-    /// 依存して落ちる。
-    ///
-    /// 追い出し先の牌は種類が違えばよい。席2と席3は席0の下家ではないので
-    /// チーはできず、配牌がその牌で和了形になることもない。
-    fn state_where_seat_one_can_pon(engine: &mut RoundEngine, tile: &str) -> Tile {
-        let target = parse_tile(tile).expect("正しい記法");
-        let filler = {
-            let nine_man = parse_tile("9m").expect("正しい記法");
-            if nine_man.kind() == target.kind() {
-                parse_tile("1m").expect("正しい記法")
-            } else {
-                nine_man
-            }
-        };
-        for seat in [Seat::new(2), Seat::new(3)] {
-            for held in engine.state_mut().seat_mut(seat).hand.iter_mut() {
-                if held.kind() == target.kind() {
-                    *held = filler;
-                }
-            }
-        }
-
-        let hand = &mut engine.state_mut().seat_mut(Seat::new(1)).hand;
-        hand[0] = target;
-        hand[1] = target;
-        target
-    }
 
     /// ポンすると Call が出て、鳴いた席の手番になる。ツモは無い。
     #[test]
@@ -1956,6 +2000,7 @@ git commit -m "feat(engine): 鳴きの成立を実装"
 ```rust
 #[cfg(test)]
 mod ending_tests {
+    use super::discard_tests::WAY_PAST_ANY_DEADLINE_MS;
     use super::start_tests::{rules, start_at};
     use super::*;
     use protocol::command::{CallResponse, Command};
@@ -2003,6 +2048,7 @@ mod ending_tests {
     fn sink() -> Seat {
         Seat::new(3)
     }
+
 
     /// ロンすると Agari が出て、局が終わる。
     #[test]
@@ -2187,6 +2233,28 @@ mod ending_tests {
         assert!(engine.outcome().expect("終わっている").dealer_repeats);
     }
 
+    /// 締切を過ぎても、和了できる状態なら自動で和了る（仕様 8.2）。
+    /// 切断した側が和了を取り逃がさないための規則である。
+    #[test]
+    fn an_unanswered_turn_wins_when_it_can() {
+        let mut engine = start_at(0);
+        engine.drain_events();
+        make_tenpai(&mut engine, Seat::new(0));
+        engine.force_draw_turn(Seat::new(0), parse_tile("6p").expect("正しい記法"));
+
+        engine.tick(WAY_PAST_ANY_DEADLINE_MS);
+        let events = engine.drain_events();
+        assert!(
+            events.iter().any(|e| matches!(e, Event::Agari { .. })),
+            "自動でツモ和了していない: {events:?}"
+        );
+        assert!(
+            !events.iter().any(|e| matches!(e, Event::Discard { .. })),
+            "和了できるのに打牌している"
+        );
+        assert_eq!(*engine.phase(), Phase::Done);
+    }
+
     /// 和了形でない席はツモ和了できない。
     #[test]
     fn a_seat_without_a_winning_hand_cannot_declare_tsumo() {
@@ -2255,7 +2323,7 @@ mod ending_tests {
             )
             .expect("切れる");
         engine.drain_events();
-        engine.tick(1_000 + rules().min_reaction_window_ms as u64);
+        engine.tick(WAY_PAST_ANY_DEADLINE_MS);
 
         let events = engine.drain_events();
         let Some(Event::Ryuukyoku { kind, tenpai, .. }) = events
@@ -2292,7 +2360,7 @@ mod ending_tests {
             )
             .expect("切れる");
         engine.drain_events();
-        engine.tick(1_000 + rules().min_reaction_window_ms as u64);
+        engine.tick(WAY_PAST_ANY_DEADLINE_MS);
         engine.drain_events();
 
         let outcome = engine.outcome().expect("終わっている");
@@ -2332,7 +2400,7 @@ mod ending_tests {
             )
             .expect("切れる");
         engine.drain_events();
-        engine.tick(1_000 + rules().min_reaction_window_ms as u64);
+        engine.tick(WAY_PAST_ANY_DEADLINE_MS);
         engine.drain_events();
 
         assert_eq!(engine.outcome().expect("終わっている").riichi_sticks, 1);
@@ -2399,7 +2467,7 @@ mod ending_tests {
             )
             .expect("切れる");
         engine.drain_events();
-        engine.tick(1_000 + rules().min_reaction_window_ms as u64);
+        engine.tick(WAY_PAST_ANY_DEADLINE_MS);
 
         let events = engine.drain_events();
         let Some(Event::Ryuukyoku {
@@ -2435,7 +2503,7 @@ mod ending_tests {
             )
             .expect("切れる");
         engine.drain_events();
-        engine.tick(1_000 + rules().min_reaction_window_ms as u64);
+        engine.tick(WAY_PAST_ANY_DEADLINE_MS);
         engine.drain_events();
     }
 
@@ -2497,7 +2565,7 @@ mod ending_tests {
             )
             .expect("切れる");
         engine.drain_events();
-        engine.tick(1_000 + rules().min_reaction_window_ms as u64);
+        engine.tick(WAY_PAST_ANY_DEADLINE_MS);
         engine.drain_events();
         assert_eq!(
             engine.outcome().expect("終わっている").reason,
@@ -3098,6 +3166,24 @@ fn settlement_scores(state: &RoundState, settlement: &protocol::event::Settlemen
 }
 ```
 
+**`tick` の自動処理へ和了を足す。**仕様 8.2 は「締切でツモ切り。ただし和了
+可能な状態であれば自動で和了る」と定めている。切断した側が和了を取り逃がさない
+ようにするためであり、点棒も終局理由も変わるので落とせない。
+
+`Phase::Turn` の期限切れの分岐を、打牌の前に次で始める。
+
+```rust
+                // 仕様 8.2: 和了できる状態なら自動で和了る。
+                let options = discard_options(&self.state, seat, start);
+                let can_tsumo = options.iter().any(|o| matches!(o, ActionOption::Tsumo));
+                if let (true, TurnStart::Draw { tile, .. }) = (can_tsumo, start) {
+                    self.state.seat_mut(seat).think_bank_ms = 0;
+                    self.outstanding[seat.index()] = None;
+                    self.finish_with_tsumo(seat, tile);
+                    return;
+                }
+```
+
 `resolve_window` と `advance_after_pass` の `unimplemented!` を差し替える。
 
 ```rust
@@ -3188,7 +3274,7 @@ pub(crate) fn force_draw_turn(&mut self, seat: Seat, tile: Tile) {
 - [ ] **Step 4: テストが通ることを確認する**
 
 Run: `cargo test --package mahjong-engine ending_tests`
-Expected: 21テスト PASS
+Expected: 22テスト PASS
 
 - [ ] **Step 5: コミット**
 
@@ -3204,7 +3290,7 @@ git commit -m "feat(engine): 和了と荒牌平局を実装"
 - [ ] `cargo test --workspace` が通る
 - [ ] `cargo clippy --all-targets -- -D warnings` が通る
 - [ ] `cargo fmt --check` が通る
-- [ ] Task 1 の12テスト、Task 2 の16テスト、Task 3 の8テスト、Task 4 の21テストがすべて通る
+- [ ] Task 1 の12テスト、Task 2 の16テスト、Task 3 の8テスト、Task 4 の22テストがすべて通る
 - [ ] ツモ切りだけで局が最後まで回る
 - [ ] 同じシード・同じ時刻列から同じイベント列が出る
 - [ ] すべての局面で牌136枚が保たれる
