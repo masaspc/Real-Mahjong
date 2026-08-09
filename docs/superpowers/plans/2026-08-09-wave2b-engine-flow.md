@@ -356,6 +356,78 @@ mod tests {
         settle_agari(&[ron(0, 3, 2_000), ron(2, 1, 8_000)], Seat::new(0), 0, 0);
     }
 
+    /// 親の和了に子の支払い形式を渡すと、親から取るはずの分を誰も
+    /// 払わないまま素点だけが増え、合計が0にならない。
+    #[test]
+    #[should_panic(expected = "親の和了に TsumoNonDealer を渡している")]
+    fn a_dealer_win_with_a_child_payment_is_rejected() {
+        let input = AgariInput {
+            seat: Seat::new(0),
+            from: None,
+            payment: Payment::TsumoNonDealer {
+                from_dealer: 1_300,
+                from_each_non_dealer: 700,
+            },
+            liability: None,
+        };
+        settle_agari(&[input], Seat::new(0), 0, 0);
+    }
+
+    #[test]
+    #[should_panic(expected = "子の和了に TsumoDealer を渡している")]
+    fn a_child_win_with_a_dealer_payment_is_rejected() {
+        let input = AgariInput {
+            seat: Seat::new(1),
+            from: None,
+            payment: Payment::TsumoDealer { from_each: 4_000 },
+            liability: None,
+        };
+        settle_agari(&[input], Seat::new(0), 0, 0);
+    }
+
+    /// protocol は Full をツモ、Split をロンと定義している。
+    /// 食い違ったまま通すと、責任払いが黙って無視される。
+    #[test]
+    #[should_panic(expected = "ロンなのに責任払いが Full である")]
+    fn a_ron_with_a_full_liability_is_rejected() {
+        let input = AgariInput {
+            seat: Seat::new(1),
+            from: Some(Seat::new(0)),
+            payment: Payment::Ron { total: 32_000 },
+            liability: Some(Liability {
+                seat: Seat::new(2),
+                yaku: protocol::yaku::YakuId::Daisangen,
+                mode: LiabilityMode::Full,
+            }),
+        };
+        settle_agari(&[input], Seat::new(0), 0, 0);
+    }
+
+    #[test]
+    #[should_panic(expected = "ツモなのに責任払いが Split である")]
+    fn a_tsumo_with_a_split_liability_is_rejected() {
+        let input = AgariInput {
+            seat: Seat::new(1),
+            from: None,
+            payment: Payment::TsumoNonDealer {
+                from_dealer: 16_000,
+                from_each_non_dealer: 8_000,
+            },
+            liability: Some(Liability {
+                seat: Seat::new(2),
+                yaku: protocol::yaku::YakuId::Daisangen,
+                mode: LiabilityMode::Split,
+            }),
+        };
+        settle_agari(&[input], Seat::new(0), 0, 0);
+    }
+
+    #[test]
+    #[should_panic(expected = "同じ席が2回和了している")]
+    fn the_same_seat_winning_twice_is_rejected() {
+        settle_agari(&[ron(1, 0, 2_000), ron(1, 0, 8_000)], Seat::new(0), 0, 0);
+    }
+
     /// 精算の内訳が復元できる。素点・本場・供託を分けて記録する。
     #[test]
     fn the_settlement_records_its_breakdown() {
@@ -471,21 +543,49 @@ pub fn score_change(settlement: &Settlement) -> [i32; 4] {
     out
 }
 
-pub fn settle_agari(
-    winners: &[AgariInput],
-    dealer: Seat,
-    honba: u8,
-    riichi_sticks: u8,
-) -> Settlement {
+/// 入力の不変条件。ここを通ったものだけが `Settlement` になる。
+///
+/// 黙って通すと非ゼロサムの精算が出てしまう。たとえば親のツモを
+/// `TsumoNonDealer` で渡すと、親から取るはずの分を誰も払わない。
+fn validate(winners: &[AgariInput], dealer: Seat) {
     assert!(!winners.is_empty(), "和了者がいない");
+
+    let mut seen = [false; 4];
+    for win in winners {
+        assert!(!seen[win.seat.index()], "同じ席が2回和了している");
+        seen[win.seat.index()] = true;
+
+        // 支払い形式は、和了種別と親子に一致していなければならない。
+        match win.payment {
+            Payment::Ron { .. } => assert!(win.from.is_some(), "ロンなのに放銃者がいない"),
+            Payment::TsumoDealer { .. } => {
+                assert!(win.from.is_none(), "ツモなのに放銃者がいる");
+                assert_eq!(win.seat, dealer, "子の和了に TsumoDealer を渡している");
+            }
+            Payment::TsumoNonDealer { .. } => {
+                assert!(win.from.is_none(), "ツモなのに放銃者がいる");
+                assert_ne!(win.seat, dealer, "親の和了に TsumoNonDealer を渡している");
+            }
+        }
+
+        // 責任払いの形式も和了種別と一致していなければならない。
+        // protocol は Full をツモ、Split をロンと定義している。
+        match win.liability {
+            Some(Liability {
+                mode: LiabilityMode::Full,
+                ..
+            }) => assert!(win.from.is_none(), "ロンなのに責任払いが Full である"),
+            Some(Liability {
+                mode: LiabilityMode::Split,
+                ..
+            }) => assert!(win.from.is_some(), "ツモなのに責任払いが Split である"),
+            None => {}
+        }
+    }
+
     // 同時和了は必ず「同じ牌に対する複数のロン」である。
     // ツモは他家の応答を待たないため、同時には起こりえない。
-    let is_ron = winners[0].from.is_some();
-    assert!(
-        winners.iter().all(|w| w.from.is_some() == is_ron),
-        "ロンとツモが混ざっている"
-    );
-    if is_ron {
+    if winners[0].from.is_some() {
         assert!(
             winners.iter().all(|w| w.from == winners[0].from),
             "放銃者が一致しない"
@@ -493,6 +593,15 @@ pub fn settle_agari(
     } else {
         assert_eq!(winners.len(), 1, "ツモは同時に起こらない");
     }
+}
+
+pub fn settle_agari(
+    winners: &[AgariInput],
+    dealer: Seat,
+    honba: u8,
+    riichi_sticks: u8,
+) -> Settlement {
+    validate(winners, dealer);
 
     let mut delta = [0i32; 4];
     let mut entries = Vec::new();
@@ -506,10 +615,10 @@ pub fn settle_agari(
     let sticks_total = riichi_sticks as i32 * STICK_VALUE;
 
     for win in winners {
-        let mut base = 0i32;
-        match (win.payment, win.from) {
+        // `let mut base = 0` にすると、全分岐で上書きされる初期値が
+        // 読まれないため unused_assignments 警告になる。
+        let base = match (win.payment, win.from) {
             (Payment::Ron { total }, Some(from)) => {
-                base = total;
                 match win.liability {
                     // ロンの責任払いは放銃者と折半。
                     Some(Liability {
@@ -522,9 +631,10 @@ pub fn settle_agari(
                     }
                     _ => delta[from.index()] -= total,
                 }
+                total
             }
             (Payment::TsumoDealer { from_each }, None) => {
-                base = from_each * 3;
+                let base = from_each * 3;
                 match win.liability {
                     // ツモの責任払いは責任者が全額。
                     Some(Liability {
@@ -540,6 +650,7 @@ pub fn settle_agari(
                         }
                     }
                 }
+                base
             }
             (
                 Payment::TsumoNonDealer {
@@ -548,7 +659,7 @@ pub fn settle_agari(
                 },
                 None,
             ) => {
-                base = from_dealer + from_each_non_dealer * 2;
+                let base = from_dealer + from_each_non_dealer * 2;
                 match win.liability {
                     Some(Liability {
                         seat,
@@ -569,9 +680,11 @@ pub fn settle_agari(
                         }
                     }
                 }
+                base
             }
+            // `validate` が弾いている。
             _ => unreachable!("和了種別と支払い形式が食い違っている"),
-        }
+        };
         delta[win.seat.index()] += base;
 
         // 本場と供託は最も近い和了者だけが受け取る。
@@ -668,7 +781,7 @@ pub fn settle_nagashi(winners: &[Seat], dealer: Seat) -> Settlement {
 - [ ] **Step 4: テストが通ることを確認する**
 
 Run: `cargo test --package mahjong-engine settlement`
-Expected: 20テスト PASS
+Expected: 25テスト PASS
 
 - [ ] **Step 5: コミット**
 
@@ -925,6 +1038,10 @@ mod option_tests {
     // ---------- 食い替え ----------
 
     /// チーで順子の下端を鳴いたら、その牌と上端の隣が打てない。
+    ///
+    /// 手牌が11枚なのは正しい。配牌13枚から2枚を出してチーすると
+    /// 手は11枚になり、副露3枚と合わせて14枚相当になる。ここから1枚
+    /// 切って10枚＋副露3枚＝13枚に戻る。
     #[test]
     fn chi_forbids_the_called_tile_and_its_suji() {
         // 4p を上家からチーして 456p。4p（現物）と 7p（筋）が打てない。
@@ -1027,19 +1144,25 @@ mod option_tests {
 
     // ---------- 九種九牌 ----------
 
-    /// 最初のツモで幺九牌が9種類あれば九種九牌を提示する。
+    /// 境界をまたぐ2件は同じ手牌を使い、ツモ牌だけを変える。
+    /// 13枚の時点の幺九牌は 1m 9m 1p 9p 1s 9s 1z 2z の8種類である。
+    const EIGHT_KINDS: &str = "19m34555m19p19s12z";
+
+    /// ツモで9種類目が入れば九種九牌を提示する。ちょうど9種類の境界。
     #[test]
-    fn nine_kinds_of_terminals_offer_an_abort() {
-        let mut state = state_with(Seat::new(1), "19m555m19p19s1234z");
-        let start = after_drawing(&mut state, Seat::new(1), "5z");
+    fn exactly_nine_kinds_offer_an_abort() {
+        let mut state = state_with(Seat::new(1), EIGHT_KINDS);
+        // 3z が9種類目になる。
+        let start = after_drawing(&mut state, Seat::new(1), "3z");
         let options = discard_options(&state, Seat::new(1), start);
         assert!(options.iter().any(|o| matches!(o, ActionOption::Kyuushu)));
     }
 
-    /// 8種類では出ない。
+    /// 8種類のままでは出ない。
     #[test]
-    fn eight_kinds_of_terminals_do_not_offer_an_abort() {
-        let mut state = state_with(Seat::new(1), "19m555m66m19p1s123z");
+    fn eight_kinds_do_not_offer_an_abort() {
+        let mut state = state_with(Seat::new(1), EIGHT_KINDS);
+        // 6m は幺九牌ではないので種類数は8のままである。
         let start = after_drawing(&mut state, Seat::new(1), "6m");
         let options = discard_options(&state, Seat::new(1), start);
         assert!(!options.iter().any(|o| matches!(o, ActionOption::Kyuushu)));
@@ -1048,9 +1171,9 @@ mod option_tests {
     /// 2巡目には出ない。
     #[test]
     fn an_abort_is_only_offered_on_the_first_draw() {
-        let mut state = state_with(Seat::new(1), "19m555m19p19s1234z");
+        let mut state = state_with(Seat::new(1), EIGHT_KINDS);
         state.draw_count[1] = 2;
-        let start = after_drawing(&mut state, Seat::new(1), "5z");
+        let start = after_drawing(&mut state, Seat::new(1), "3z");
         let options = discard_options(&state, Seat::new(1), start);
         assert!(!options.iter().any(|o| matches!(o, ActionOption::Kyuushu)));
     }
@@ -1058,9 +1181,9 @@ mod option_tests {
     /// 誰かが鳴いていれば出ない。
     #[test]
     fn a_call_cancels_the_abort() {
-        let mut state = state_with(Seat::new(1), "19m555m19p19s1234z");
+        let mut state = state_with(Seat::new(1), EIGHT_KINDS);
         state.any_call_made = true;
-        let start = after_drawing(&mut state, Seat::new(1), "5z");
+        let start = after_drawing(&mut state, Seat::new(1), "3z");
         let options = discard_options(&state, Seat::new(1), start);
         assert!(!options.iter().any(|o| matches!(o, ActionOption::Kyuushu)));
     }
@@ -1117,6 +1240,12 @@ mod option_tests {
         // 持っており、9s 待ちのテンパイである。
         let mut state = state_with(Seat::new(1), "1111m23m234p567p9s");
         accept_riichi(&mut state, Seat::new(1));
+        // テストデータの意味を固定する。リーチできる形であることを先に示す。
+        assert_eq!(
+            waits_of(&state.seat(Seat::new(1)).hand, 0),
+            vec![parse_tile("9s").unwrap().kind()],
+            "9s の単騎テンパイでなければ、この局面はリーチできない"
+        );
         // 引いたのは 1m ではないので、いま暗槓すれば送り槓になる。
         let start = after_drawing(&mut state, Seat::new(1), "5z");
         assert!(kans_of(&discard_options(&state, Seat::new(1), start)).is_empty());
@@ -1816,7 +1945,7 @@ git commit -m "feat(engine): 合法手の生成を実装"
 - [ ] `cargo test --workspace` が通る
 - [ ] `cargo clippy --all-targets -- -D warnings` が通る
 - [ ] `cargo fmt --check` が通る
-- [ ] 精算20テストと合法手38テストがすべて通る
+- [ ] 精算25テストと合法手38テストがすべて通る
 - [ ] `settle_*` が返す `Settlement` は**すべて** `is_balanced()` を満たす
 - [ ] 役なしの完成形にロンを提示しない
 - [ ] 振聴の3種（自河・同巡内・リーチ後）すべてでロンを提示しない
@@ -1839,3 +1968,9 @@ git commit -m "feat(engine): 合法手の生成を実装"
 
 `ActionOption::Pass` はどの関数も出さない。Wave 2a の `ReactionWindow::respond` が
 候補を持つ席へ常に許しているためである。
+
+**Wave 2c は、受け取ったコマンドの牌が候補に含まれることを自分で検査する。**
+`ReactionWindow::respond` が見るのは優先度だけで（`reaction.rs` の
+`respond`）、`Command::Chi { tiles }` の牌が `ActionOption::Chi { candidates }`
+のどれかと一致するかまでは照合しない。ここを抜くと、持っていない牌で
+鳴けてしまう。
