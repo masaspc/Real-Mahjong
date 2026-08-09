@@ -221,8 +221,12 @@ mod riichi_tests {
         let _ = tile;
 
         assert_eq!(riichi_of(&engine, Seat::new(0)).step, RiichiStep::Declare);
-        assert_eq!(engine.state().scores[0], 25_000 - 0, "供託は出ていない");
-        assert_eq!(engine.state().riichi_sticks, 0);
+        assert_eq!(engine.state().riichi_sticks, 0, "供託は出ていない");
+        // **持ち点そのものは見ない。**ロンの精算で放銃分が動いており、
+        // その額は配牌のドラ次第で変わる。供託が出ていないことは
+        // 「卓の点棒の合計が減っていない」で見るほうが確実である。
+        // 供託が1本出ていれば合計は 99,000 になる。
+        assert_eq!(engine.state().scores.iter().sum::<i32>(), 100_000);
     }
 
     /// 宣言牌を鳴かれてもリーチは成立する。ただし一発は消える。
