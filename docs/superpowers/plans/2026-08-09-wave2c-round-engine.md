@@ -1866,12 +1866,6 @@ Expected: コンパイルエラー
 use protocol::meld::{Meld, MeldKind};
 
 impl RoundEngine {
-    /// テストが局面を組み立てるために使う。
-    #[cfg(test)]
-    pub(crate) fn state_mut(&mut self) -> &mut RoundState {
-        &mut self.state
-    }
-
     fn apply_call(&mut self, seat: Seat, response: CallResponse, now_ms: u64) {
         let window = self.window.take().expect("反応ウィンドウが開いている");
         let from = window.from();
