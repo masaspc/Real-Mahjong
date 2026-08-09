@@ -437,7 +437,6 @@ impl RoundEngine {
             phase: Phase::Done,
             pending: Vec::new(),
             since_request: std::array::from_fn(|_| Vec::new()),
-            outstanding: [None; 4],
             next_window_id: first_window_id,
         };
 
@@ -719,13 +718,12 @@ mod discard_tests {
     fn a_tile_not_in_hand_cannot_be_discarded() {
         let mut engine = start_at(0);
         engine.drain_events();
-        let missing = Seat::ALL // 手に無い牌を探す
-            .iter()
-            .flat_map(|_| (0..34u8))
-            .filter_map(TileKind::from_index)
+        // 手に無い牌を探す。14枚では34種を埋められない。
+        let missing = (0..34u8)
+            .filter_map(protocol::tile::TileKind::from_index)
             .map(Tile::from_kind)
             .find(|t| !engine.state().seat(Seat::new(0)).hand.contains(t))
-            .expect("14枚では34種を埋められない");
+            .expect("必ず見つかる");
         assert_eq!(
             engine.apply(
                 Seat::new(0),
@@ -978,7 +976,7 @@ use crate::reaction::{Outcome, ReactionWindow, Rejection, WindowKind};
 use crate::round::reaction_options;
 use protocol::command::{CallResponse, Command};
 use protocol::event::{DiscardManner, RiichiStep};
-use protocol::tile::{Tile, TileKind};
+use protocol::tile::Tile;
 
 /// コマンドを受け付けなかった理由。
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
@@ -1189,6 +1187,12 @@ impl RoundEngine {
         self.phase = Phase::Reaction;
     }
 
+    /// 反応の応答を受け取る。
+    ///
+    /// **`tick` と同じ順序で状態を進める。**先に締切を反映し、応答を
+    /// 受け付けるか決め、最後に必ず解決を試みる。応答を拒否した場合でも
+    /// 解決へ進むのは、締切の反映でウィンドウが確定しうるためである。
+    /// ここで早期に return すると、`tick` を呼ぶか呼ばないかで結果が変わる。
     fn apply_response(
         &mut self,
         seat: Seat,
@@ -1196,24 +1200,43 @@ impl RoundEngine {
         response: CallResponse,
         now_ms: u64,
     ) -> Result<(), Reject> {
-        // **先に締切を反映する。**そうしないと、`tick` が呼ばれる前に
-        // 期限後の応答が届いたときだけ受理されてしまい、結果が呼び出し順に
-        // 依存する。ここを通せば `tick` 経由と同じ結論になる。
         self.pass_expired_seats(now_ms);
+        let accepted = self.accept_response(seat, window_id, response, now_ms);
+        self.resolve_window(now_ms);
+        accepted
+    }
+
+    fn accept_response(
+        &mut self,
+        seat: Seat,
+        window_id: u32,
+        response: CallResponse,
+        now_ms: u64,
+    ) -> Result<(), Reject> {
+        let Some(window) = self.window.as_ref() else {
+            return Err(Reject::NoWindow);
+        };
+        if window.id() != window_id {
+            return Err(Reject::StaleWindow);
+        }
+        let is_discarder = window.from() == seat;
 
         let Some(open) = self.outstanding[seat.index()] else {
-            // 締切を過ぎたか、そもそも要求していない席である。
-            return Err(Reject::StaleWindow);
+            // 打牌者には候補を出していないので `outstanding` が無い。
+            // 締切を過ぎた席も同じく無い。理由を取り違えないよう分ける。
+            return Err(if is_discarder {
+                Reject::Window(Rejection::IsTheDiscarder)
+            } else {
+                Reject::StaleWindow
+            });
         };
         if open.window_id != window_id {
             return Err(Reject::StaleWindow);
         }
-        let Some(window) = self.window.as_mut() else {
-            return Err(Reject::NoWindow);
-        };
+
+        let window = self.window.as_mut().expect("直前に確認した");
         window.respond(seat, response).map_err(Reject::Window)?;
         self.charge(seat, now_ms);
-        self.resolve_window(now_ms);
         Ok(())
     }
 
@@ -1792,6 +1815,18 @@ mod ending_tests {
             parse_hand("234567m23478p22s").expect("正しい記法");
     }
 
+    /// 流し満貫の資格を全席から落とす。
+    ///
+    /// **局の開始時は4席とも `nagashi_alive` が真である**（`state.rs`）。
+    /// 資格が消えるのは中張牌を切ったときと、自分の捨て牌を鳴かれたときだけ。
+    /// テストでは誰もほとんど打牌しないので、明示的に落とさないと全員が
+    /// 流し満貫になり、荒牌平局のテンパイ料が発生しない。
+    fn clear_nagashi(engine: &mut RoundEngine) {
+        for seat in Seat::ALL {
+            engine.state_mut().seat_mut(seat).nagashi_alive = false;
+        }
+    }
+
     /// 山を空にする。荒牌平局を起こすため。
     ///
     /// **引いた牌を捨てるだけでは牌が消える。**`assert_tiles_conserved` は
@@ -2051,6 +2086,7 @@ mod ending_tests {
     fn an_empty_wall_ends_the_round_in_a_draw() {
         let mut engine = start_at(0);
         engine.drain_events();
+        clear_nagashi(&mut engine);
         drain_the_wall(&mut engine);
 
         let seat = Seat::new(0);
@@ -2087,6 +2123,7 @@ mod ending_tests {
         let mut engine = start_at(0);
         engine.drain_events();
         make_tenpai(&mut engine, Seat::new(1));
+        clear_nagashi(&mut engine);
         drain_the_wall(&mut engine);
 
         let seat = Seat::new(0);
@@ -2127,6 +2164,7 @@ mod ending_tests {
             0,
         );
         engine.drain_events();
+        clear_nagashi(&mut engine);
         drain_the_wall(&mut engine);
         let seat = Seat::new(0);
         let tile = engine.state().seat(seat).hand[0];
@@ -2153,6 +2191,7 @@ mod ending_tests {
         let mut engine = start_at(0);
         engine.drain_events();
         make_tenpai(&mut engine, Seat::new(1));
+        clear_nagashi(&mut engine);
         drain_the_wall(&mut engine);
 
         let winning = parse_tile("6p").expect("正しい記法");
@@ -2191,9 +2230,8 @@ mod ending_tests {
         let mut engine = start_at(0);
         engine.drain_events();
         // 席2だけ幺九牌しか切っていないことにする。
-        for seat in Seat::ALL {
-            engine.state_mut().seat_mut(seat).nagashi_alive = seat == Seat::new(2);
-        }
+        clear_nagashi(&mut engine);
+        engine.state_mut().seat_mut(Seat::new(2)).nagashi_alive = true;
         drain_the_wall(&mut engine);
         let seat = Seat::new(0);
         let tile = engine.state().seat(seat).hand[0];
@@ -2231,6 +2269,7 @@ mod ending_tests {
     ///
     /// 切る牌を引数で受けるのは、テンパイを保つかどうかを狙って決めるためである。
     fn run_to_exhaustive_draw(engine: &mut RoundEngine, discard: Tile) {
+        clear_nagashi(engine);
         drain_the_wall(engine);
         engine
             .apply(
@@ -2289,11 +2328,9 @@ mod ending_tests {
     fn a_nagashi_reports_its_own_reason() {
         let mut engine = start_at(0);
         engine.drain_events();
+        clear_nagashi(&mut engine);
         drain_the_wall(&mut engine);
-        // 捨て台へ牌を積んだあとに立てる。順序を逆にすると消える。
-        for seat in Seat::ALL {
-            engine.state_mut().seat_mut(seat).nagashi_alive = seat == Seat::new(2);
-        }
+        engine.state_mut().seat_mut(Seat::new(2)).nagashi_alive = true;
         let seat = Seat::new(0);
         let tile = engine.state().seat(seat).hand[0];
         engine
@@ -2445,6 +2482,17 @@ mod ending_tests {
             0,
             "時間切れはバンクを使い切る"
         );
+
+        // **拒否しただけで止まってはならない。**締切の反映でウィンドウは
+        // 確定しており、tick を呼んだ場合と同じところまで進んでいる。
+        let events = engine.drain_events();
+        assert!(
+            events
+                .iter()
+                .any(|e| matches!(e, Event::Draw { seat, .. } if *seat == Seat::new(1))),
+            "次のツモまで進んでいない: {events:?}"
+        );
+        assert!(matches!(engine.phase(), Phase::Turn { .. }));
     }
 
     /// 別のウィンドウ宛の応答は受け付けない。
@@ -2466,6 +2514,8 @@ mod ending_tests {
             )
             .expect("切れる");
         engine.drain_events();
+        let window_id = engine.next_window_id() - 1;
+        assert_ne!(window_id, 99);
         assert_eq!(
             engine.apply(
                 Seat::new(1),
@@ -2476,6 +2526,18 @@ mod ending_tests {
                 1_200
             ),
             Err(Reject::StaleWindow)
+        );
+        // 拒否でウィンドウが壊れていないこと。正しい id なら受理される。
+        assert_eq!(
+            engine.apply(
+                Seat::new(1),
+                Command::CallResponse {
+                    window_id,
+                    response: CallResponse::Ron,
+                },
+                1_300
+            ),
+            Ok(())
         );
     }
 
