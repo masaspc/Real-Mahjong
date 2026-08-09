@@ -413,8 +413,6 @@ pub struct RoundEngine {
     /// 席ごとの、前回その席へ RequestAction を出して以降に配信したイベント。
     /// `lead_in_of` は席を取らないので、区間の切り出しはここで行う。
     since_request: [Vec<Event>; 4],
-    /// 最初に受け取った採番。過去に開いた id の範囲を知るために持つ。
-    first_window_id: u32,
     next_window_id: u32,
 }
 
@@ -439,7 +437,6 @@ impl RoundEngine {
             phase: Phase::Done,
             pending: Vec::new(),
             since_request: std::array::from_fn(|_| Vec::new()),
-            first_window_id,
             next_window_id: first_window_id,
         };
 
@@ -1055,6 +1052,9 @@ Expected: コンパイルエラー
     Reaction,
 
 // RoundEngine へ
+    /// 最初に受け取った採番。過去に開いた id の範囲を知るために持つ。
+    /// **Task 1 では読まないので、ここで足す。**
+    first_window_id: u32,
     window: Option<ReactionWindow>,
     /// 席ごとの、いま開いている要求。応答が来たらバンクを課金する。
     outstanding: [Option<Outstanding>; 4],
@@ -1065,6 +1065,7 @@ Expected: コンパイルエラー
     last_window_id: u32,
 
 // start の初期化へ
+    first_window_id,
     window: None,
     outstanding: [None; 4],
     offered: std::array::from_fn(|_| Vec::new()),
@@ -1508,7 +1509,7 @@ git commit -m "feat(engine): 打牌と反応ウィンドウを実装"
 mod call_tests {
     // 兄弟モジュールの項目は use super::*; では入らない。明示して取り込む。
     use super::discard_tests::{state_where_seat_one_can_pon, WAY_PAST_ANY_DEADLINE_MS};
-    use super::start_tests::{rules, start_at};
+    use super::start_tests::start_at;
     use super::*;
     use protocol::command::{CallResponse, Command};
     use protocol::meld::MeldKind;
@@ -1533,7 +1534,18 @@ mod call_tests {
                 1_000,
             )
             .expect("切れる");
-        engine.drain_events();
+        // **意図した局面になっていることを、応答の前に固定する。**
+        // 席1以外にも候補があるとウィンドウが確定せず、以降の主張が空振りする。
+        // ここで見るのは打牌に対する反応の要求である。
+        let opened = engine.drain_events();
+        let requested: Vec<Seat> = opened
+            .iter()
+            .filter_map(|e| match e {
+                Event::RequestAction { seat, .. } => Some(*seat),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(requested, vec![Seat::new(1)], "反応できるのは席1だけ");
 
         let window_id = engine.next_window_id() - 1;
         engine
@@ -1550,17 +1562,6 @@ mod call_tests {
             .expect("ポンできる");
 
         let events = engine.drain_events();
-        // 意図した局面になっていることを先に固定する。席1以外に候補があると
-        // ウィンドウが確定せず、以降の主張が空振りする。
-        let requested: Vec<Seat> = events
-            .iter()
-            .filter_map(|e| match e {
-                Event::RequestAction { seat, .. } => Some(*seat),
-                _ => None,
-            })
-            .collect();
-        assert_eq!(requested, vec![Seat::new(1)], "反応できるのは席1だけ");
-
         let Some(Event::Call {
             seat, from, kind, ..
         }) = events
@@ -2848,13 +2849,15 @@ mod ending_tests {
         );
     }
 
-    /// 局の途中から採番を始めても、未使用の id は NoWindow になる。
+    /// 局の途中から採番を始めても、未使用の id は受け付けない。
     ///
     /// window_id は半荘を通して単調増加するので、東1局以外では 1 から
-    /// 始まらない。範囲を `id < next_window_id` だけで見ると、使ったことの
-    /// ない小さい id を「遅れて届いた応答」と誤判定する。
+    /// 始まらない。ここではウィンドウが開いているので `window.id()` との
+    /// 不一致で `StaleWindow` になる。`first_window_id` を持つ意味は、
+    /// ウィンドウが閉じたあとに同じ id が来たとき `NoWindow` と区別する
+    /// ためであり、その判定の存在をこのテストで固定しておく。
     #[test]
-    fn an_id_below_the_first_one_is_not_a_stale_window() {
+    fn an_unissued_id_is_not_accepted() {
         let mut engine = RoundEngine::start(
             rules(),
             Round {
