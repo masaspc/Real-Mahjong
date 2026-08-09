@@ -550,7 +550,8 @@ mod abortive_tests {
 - [ ] **Step 2: テストが失敗することを確認する**
 
 Run: `cargo test --package mahjong-engine abortive_tests`
-Expected: コンパイルエラー
+Expected: テストの失敗。参照している型もコマンドも既にあるのでコンパイルは通り、
+`Reject::NotOffered` や `unimplemented!` で落ちる
 
 - [ ] **Step 3: 実装を書く**
 
@@ -895,9 +896,17 @@ mod liability_tests {
             pon("666z", Seat::new(2)),
             pon("777z", Seat::new(3)),
         ];
-        // 暗槓4枚 + ポン6枚 = 10枚。1面子あたり3枚と数えるので手牌は4枚。
+        // 暗槓4枚 + ポン6枚 + 手牌4枚 = 14枚。元の13枚と入れ替えると
+        // 卓全体が137枚になる。**暗槓だけは物理4枚で1面子を数えるため、
+        // 他の副露と違って1枚増える。**山から1枚抜いて相殺する。
         engine.state_mut().seat_mut(seat).hand =
             parse_hand("23m11m").expect("正しい記法");
+        engine
+            .state_mut()
+            .wall
+            .draw()
+            .expect("山に残っている");
+        crate::invariant::assert_tiles_conserved(engine.state());
         let events = ron_on_four_man(&mut engine);
         assert_eq!(agari_of(&events)[0].liability, None);
     }
@@ -1072,7 +1081,8 @@ mod liability_tests {
 - [ ] **Step 2: テストが失敗することを確認する**
 
 Run: `cargo test --package mahjong-engine liability_tests`
-Expected: コンパイルエラー
+Expected: テストの失敗。`liability` がまだ `None` のままなので、
+`expect("責任払いが成立する")` で落ちる
 
 - [ ] **Step 3: 実装を書く**
 
