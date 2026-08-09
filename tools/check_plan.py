@@ -152,6 +152,43 @@ BUILTIN_NAMES = {
     "from_fn", "take", "replace", "min", "max", "swap", "usize", "u8", "u32", "u64", "i32",
 }
 
+# 標準ライブラリと prelude の型。use を書かなくても使える。
+BUILTIN_TYPES = {
+    "Some", "None", "Ok", "Err", "Option", "Result", "String", "Vec", "Box",
+    "Default", "Iterator", "Clone", "Copy", "PartialEq", "Eq", "Debug", "Self",
+}
+
+
+def target_files(text, base):
+    """計画が Modify / Create と書いたファイルのうち、実在するもの。
+
+    既存ファイルへ差分を当てる計画では、親モジュールの use や定義が
+    計画本文に現れない。対象ファイルを読まないとスコープを見誤る。
+    """
+    import os
+
+    for path in re.findall(r"- (?:Modify|Create): `([^`]+)`", text):
+        full = os.path.join(base, path)
+        if os.path.isfile(full):
+            yield open(full).read()
+
+
+def scope_of_source(source):
+    """ソースが親モジュールへ持ち込む名前。"""
+    names = set()
+    inside_test = False
+    for line in source.split("\n"):
+        if re.match(r"^mod \w+ \{", line):
+            inside_test = True
+        elif line == "}":
+            inside_test = False
+        if inside_test:
+            continue
+        names.update(names_from_use(line))
+        for pattern in (r"(?:struct|enum|trait|type) (\w+)", r"\bfn (\w+)", r"const (\w+)\s*:"):
+            names.update(re.findall(pattern, line))
+    return names
+
 
 def test_modules(text):
     """`mod xxx_tests { ... }` の範囲を (開始オフセット, 名前, 中身) で返す。"""
@@ -175,7 +212,7 @@ def names_from_use(line):
     return [m.group(1).split("::")[-1]]
 
 
-def check_unresolved_calls(text):
+def check_unresolved_calls(text, base="."):
     """テストモジュール内の、どこからも入ってこない関数呼び出し。
 
     `use super::*;` は親の私有 use も取り込むので、親の import も許す。
@@ -187,6 +224,8 @@ def check_unresolved_calls(text):
         return any(a <= offset < b for a, b in module_spans)
 
     parent_scope = set(BUILTIN_NAMES)
+    for source in target_files(text, base):
+        parent_scope.update(scope_of_source(source))
     for offset, block in rust_blocks(text):
         for line in block.split("\n"):
             absolute = offset + block.index(line) if line in block else offset
@@ -223,6 +262,55 @@ def check_unresolved_calls(text):
                 continue
             if called not in scope:
                 problems.append(f"{name}: {called}() を解決できない")
+    return problems
+
+
+def check_unresolved_types(text, base="."):
+    """テストモジュール内の、どこからも入ってこない型名。
+
+    `RiichiState` のように `use` を書き忘れた型を捕まえる。大文字始まりの
+    識別子だけを見て、モジュール自身の use・親の use・親の定義・標準の型の
+    いずれにも無いものを報告する。
+    """
+    module_spans = [(start, start + len(body)) for start, _, body in test_modules(text)]
+
+    def in_module(offset):
+        return any(a <= offset < b for a, b in module_spans)
+
+    parent_scope = set(BUILTIN_TYPES)
+    for source in target_files(text, base):
+        parent_scope.update(scope_of_source(source))
+    for offset, block in rust_blocks(text):
+        for line in block.split("\n"):
+            if in_module(offset + block.find(line)):
+                continue
+            parent_scope.update(names_from_use(line))
+            for pattern in (r"(?:struct|enum|trait|type) (\w+)", r"\bfn (\w+)"):
+                for name in re.findall(pattern, line):
+                    parent_scope.add(name)
+
+    problems = []
+    for _, name, body in test_modules(text):
+        scope = set(parent_scope)
+        for line in body.split("\n"):
+            scope.update(names_from_use(line))
+            for pattern in (r"(?:struct|enum|trait|type) (\w+)", r"\bfn (\w+)"):
+                for found in re.findall(pattern, line):
+                    scope.add(found)
+        code = "\n".join(
+            line
+            for line in body.split("\n")
+            if not line.lstrip().startswith(("#[", "//", "///"))
+        )
+        # 完全修飾（`crate::state::RiichiState`）は use が要らない。
+        code = re.sub(r"\b\w+(?:::\w+)+", lambda m: m.group(0).split("::")[0], code)
+        # 型が置かれる位置だけを見る。値の側まで見ると列挙子と衝突して騒がしい。
+        used_types = set()
+        for pattern in (r"->\s*([A-Z]\w*)", r":\s*&?(?:mut )?([A-Z]\w*)"):
+            used_types.update(re.findall(pattern, code))
+        for used in sorted(used_types):
+            if used not in scope:
+                problems.append(f"{name}: {used} を解決できない")
     return problems
 
 
@@ -291,11 +379,16 @@ def check_hands(text):
 
 
 def main(path):
+    import os
+
     text = open(path).read()
+    # 計画のパスから見たリポジトリの根。docs/superpowers/plans/ の3つ上。
+    base = os.path.abspath(os.path.join(os.path.dirname(path), "..", "..", ".."))
     sections = [
         ("タスク境界をまたぐ前方参照", check_forward_references(text)),
         ("宣言したタスクで読まれないフィールド", check_unread_fields(text)),
-        ("解決できない関数呼び出し", check_unresolved_calls(text)),
+        ("解決できない関数呼び出し", check_unresolved_calls(text, base)),
+        ("解決できない型名", check_unresolved_types(text, base)),
         ("文字の混入", check_characters(text)),
         ("テスト数の不一致", check_test_counts(text)),
         ("プレースホルダ", check_placeholders(text)),

@@ -22,7 +22,7 @@
 - `crates/protocol` と `crates/mahjong-core` は凍結済み。**編集も追加もしない**
 - **時刻を直接読まない。** `Instant::now()` / `SystemTime::now()` / `rand` を呼ばない
 - **時間の式をここに書き直さない。** `crate::state` が再公開している4関数を呼ぶだけにする
-- 既存の200件のテストを1つも壊さない
+- 既存の200件のうち、`call_tests::a_minkan_is_not_accepted_yet` **だけ**を削除してよい。他は1つも壊さない
 - 完了条件は `cargo test --workspace` / `cargo clippy --all-targets -- -D warnings` / `cargo fmt --check` がすべて通ること
 
 ## 既存コードのどこへ足すか
@@ -91,6 +91,8 @@
 ```rust
 #[cfg(test)]
 mod riichi_tests {
+    // RiichiState は match_flow.rs の親スコープに入っていない。明示して取り込む。
+    use crate::state::RiichiState;
     use super::discard_tests::WAY_PAST_ANY_DEADLINE_MS;
     use super::ending_tests::{make_tenpai, set_dealer_hand};
     use super::start_tests::start_at;
@@ -1049,6 +1051,7 @@ mod kan_tests {
         engine.drain_events();
 
         // 嶺上で引いた牌を 6s に差し替えて和了形にする。
+        // 234p / 567p / 678s / 22s ＋ 暗槓 1111m で4面子1雀頭になる。
         let hand = &mut engine.state_mut().seat_mut(Seat::new(0)).hand;
         let last = hand.len() - 1;
         hand[last] = parse_tile("6s").expect("正しい記法");
@@ -1274,11 +1277,15 @@ Expected: コンパイルエラー
 槍槓で和了した場合は `finish_with_ron` がそのまま使える。**`pending_kan` は
 `hand_context` が `chankan` を立てるのに要るので、和了の後に消す。**
 
+既存の `finish_with_ron` は末尾で `let scores = settlement_scores(&self.state, &settlement);`
+を作り、続けて `self.finish(...)` を呼ぶ。**その2行のあいだへ置く。**
+
 ```rust
-    fn finish_with_ron(&mut self, declared: Vec<Seat>) {
-        // ...既存の処理...
-        // 末尾、finish を呼ぶ前に
+        let scores = settlement_scores(&self.state, &settlement);
+        // 槍槓の1翻は hand_context が pending_kan を見て立てる。
+        // 採点が終わるまで消せない。
         self.state.pending_kan = None;
+        self.finish(
 ```
 
 槓を成立させる。
@@ -1428,10 +1435,18 @@ Expected: コンパイルエラー
 
 `accept_response` の `CallResponse::Kan` を弾く行を**外す。**
 
-インポートへ足すもの。
+**既存の `call_tests::a_minkan_is_not_accepted_yet` を削除する。**Wave 2c が
+「明槓はまだ受け付けない」ことを固定したテストであり、本タスクでその前提が
+変わる。残すと `Err(Reject::NotOffered)` を期待して落ちる。代わりになるのは
+本タスクの `a_minkan_is_called_from_a_discard` である。
+
+削除にともない `call_tests` は 8 → 7 テストになる。
+
+インポートへ足すもの。**`WindowKind` は既に取り込まれているので足さない。**
+`match_flow.rs` の先頭は `use crate::reaction::{Outcome, ReactionWindow, Rejection, WindowKind};`
+である。
 
 ```rust
-use crate::reaction::WindowKind;
 use crate::round::chankan_options;
 use protocol::command::KanCandidate;
 use protocol::tile::TileKind;
@@ -1445,7 +1460,7 @@ Expected: 16テスト PASS
 - [ ] **Step 5: 既存のテストを壊していないことを確認する**
 
 Run: `cargo test --workspace && cargo clippy --all-targets -- -D warnings && cargo fmt --check`
-Expected: engine 232テスト PASS、警告ゼロ
+Expected: engine 231テスト PASS、警告ゼロ
 
 - [ ] **Step 6: コミット**
 
@@ -1458,10 +1473,10 @@ git commit -m "feat(engine): 槓と槍槓を実装"
 
 ## Wave 2d 完了の判定
 
-- [ ] `cargo test --workspace` が通る（engine 232テスト）
+- [ ] `cargo test --workspace` が通る（engine 231テスト）
 - [ ] `cargo clippy --all-targets -- -D warnings` が通る
 - [ ] `cargo fmt --check` が通る
-- [ ] 既存の200件を1つも壊していない
+- [ ] 既存の200件のうち、削除したのは `a_minkan_is_not_accepted_yet` の1件だけである
 - [ ] リーチが宣言・成立の2段階で進み、宣言牌をロンされたら供託が出ない
 - [ ] 一発が鳴きと次の打牌で消える
 - [ ] 裏ドラがリーチ成立者にだけ渡る
