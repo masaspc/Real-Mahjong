@@ -989,6 +989,56 @@ mod discard_tests {
         assert_eq!(build(true), build(false));
     }
 
+    /// 反応の期限切れでも、tick を先に呼んでも apply に任せても同じになる。
+    #[test]
+    fn ticking_first_changes_nothing_for_reactions() {
+        let build = |explicit_tick: bool| {
+            let mut engine = start_at(0);
+            engine.drain_events();
+            let target = state_where_seat_one_can_pon(&mut engine, "5p");
+            engine.state_mut().seat_mut(Seat::new(0)).hand[0] = target;
+            engine
+                .apply(
+                    Seat::new(0),
+                    Command::Discard {
+                        tile: target,
+                        riichi: false,
+                    },
+                    1_000,
+                )
+                .expect("切れる");
+            let opened = engine.drain_events();
+            let Some(Event::RequestAction {
+                window_id,
+                deadline_ms,
+                ..
+            }) = opened
+                .iter()
+                .find(|e| matches!(e, Event::RequestAction { .. }))
+                .cloned()
+            else {
+                panic!("反応の要求が出ていない: {opened:?}");
+            };
+
+            let too_late = 1_000 + deadline_ms as u64 + 1;
+            if explicit_tick {
+                engine.tick(too_late);
+            }
+            let result = engine.apply(
+                Seat::new(1),
+                Command::CallResponse {
+                    window_id,
+                    response: CallResponse::Pon {
+                        tiles: [target, target],
+                    },
+                },
+                too_late,
+            );
+            (result, engine.drain_events())
+        };
+        assert_eq!(build(true), build(false));
+    }
+
     /// 幺九牌以外を切ると流し満貫の資格を失う。
     #[test]
     fn discarding_a_simple_ends_the_nagashi_claim() {
@@ -1481,7 +1531,7 @@ offered: [Vec<ActionOption>; 4],
 - [ ] **Step 4: テストが通ることを確認する**
 
 Run: `cargo test --package mahjong-engine discard_tests`
-Expected: 16テスト PASS
+Expected: 17テスト PASS
 
 - [ ] **Step 5: コミット**
 
@@ -2949,6 +2999,37 @@ mod ending_tests {
         );
     }
 
+    /// 牌の種類ごとの在庫。自然に進めた局では各種4枚のままである。
+    ///
+    /// `assert_tiles_conserved` は枚数の合計しか見ないので、局面を直接
+    /// 差し替えるテストでは在庫が崩れる。ここは配牌から一度も差し替えずに
+    /// 進めるので、種類まで検査できる。
+    fn assert_every_kind_has_four(state: &crate::state::RoundState) {
+        let mut held: Vec<Tile> = Vec::with_capacity(136);
+        for seat in Seat::ALL {
+            let s = state.seat(seat);
+            held.extend(s.hand.iter().copied());
+            for meld in &s.melds {
+                held.extend(meld.tiles.iter().copied());
+            }
+            held.extend(
+                s.river
+                    .iter()
+                    .filter(|d| d.called_by.is_none())
+                    .map(|d| d.tile),
+            );
+        }
+        held.extend(state.wall.tiles_in_wall());
+
+        let mut counts = [0u8; 34];
+        for tile in &held {
+            counts[tile.kind().index() as usize] += 1;
+        }
+        for (index, count) in counts.iter().enumerate() {
+            assert_eq!(*count, 4, "牌種 {index} が {count} 枚になっている");
+        }
+    }
+
     /// ツモ切りだけで局を最後まで回せる。
     #[test]
     fn a_round_of_tsumogiri_reaches_an_ending() {
@@ -2964,6 +3045,7 @@ mod ending_tests {
             engine.tick(now);
             engine.drain_events();
             crate::invariant::assert_tiles_conserved(engine.state());
+            assert_every_kind_has_four(engine.state());
             now += 100_000;
         }
         assert_eq!(*engine.phase(), Phase::Done, "局が終わらなかった");
@@ -3383,7 +3465,7 @@ git commit -m "feat(engine): 和了と荒牌平局を実装"
 - [ ] `cargo test --workspace` が通る
 - [ ] `cargo clippy --all-targets -- -D warnings` が通る
 - [ ] `cargo fmt --check` が通る
-- [ ] Task 1 の12テスト、Task 2 の16テスト、Task 3 の8テスト、Task 4 の23テストがすべて通る
+- [ ] Task 1 の12テスト、Task 2 の17テスト、Task 3 の8テスト、Task 4 の23テストがすべて通る
 - [ ] ツモ切りだけで局が最後まで回る
 - [ ] 同じシード・同じ時刻列から同じイベント列が出る
 - [ ] すべての局面で牌136枚が保たれる

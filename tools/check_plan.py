@@ -209,7 +209,7 @@ def check_unresolved_calls(text):
             m = re.search(r"const (\w+)\s*:", line)
             if m:
                 scope.add(m.group(1))
-            m = re.search(r"let (\w+) = \|", line)  # クロージャ
+            m = re.search(r"let (?:mut )?(\w+) = \|", line)  # クロージャ
             if m:
                 scope.add(m.group(1))
         # 属性とコメントは呼び出しではない。
