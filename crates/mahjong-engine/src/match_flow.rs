@@ -8,11 +8,12 @@ use crate::round::{chankan_options, discard_options, reaction_options, TurnStart
 use crate::state::{charge_bank, deadline_for, lead_in_of, remaining_for_event, RoundState};
 use crate::wall::Seed;
 use protocol::command::{ActionOption, CallResponse, Command, KanCandidate};
-use protocol::event::{DiscardManner, DrawSource, Event, RiichiStep};
+use protocol::event::{DiscardManner, DrawSource, Event, Liability, LiabilityMode, RiichiStep};
 use protocol::meld::{Meld, MeldKind};
 use protocol::ruleset::Ruleset;
 use protocol::seat::{Round, Seat};
 use protocol::tile::{Tile, TileKind};
+use protocol::yaku::YakuId;
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum Reject {
@@ -21,6 +22,788 @@ pub enum Reject {
     NoWindow,
     StaleWindow,
     Window(Rejection),
+}
+#[cfg(test)]
+mod abortive_tests {
+    use super::discard_tests::WAY_PAST_ANY_DEADLINE_MS;
+    use super::ending_tests::set_dealer_hand;
+    use super::start_tests::{rules, start_at};
+    use super::*;
+    use protocol::command::{CallResponse, Command};
+    use protocol::event::RyuukyokuKind;
+    use protocol::notation::{parse_hand, parse_tile};
+
+    /// 6p/9p 待ちのテンパイ形。13枚を13枚へ差し替えるので総数は変わらない。
+    fn set_tenpai(engine: &mut RoundEngine, seat: Seat) {
+        assert_eq!(engine.state().seat(seat).hand.len(), 13);
+        engine.state_mut().seat_mut(seat).hand =
+            parse_hand("234567m23478p22s").expect("正しい記法");
+    }
+
+    /// 指定の牌を全席から追い出す。鳴かれるとテストの意図が崩れるため。
+    fn evict_everywhere(engine: &mut RoundEngine, kind: protocol::tile::TileKind) {
+        let filler = parse_tile("9m").expect("正しい記法");
+        for seat in Seat::ALL {
+            for held in engine.state_mut().seat_mut(seat).hand.iter_mut() {
+                if held.kind() == kind {
+                    *held = filler;
+                }
+            }
+        }
+    }
+
+    /// 引いた牌を安全牌へ差し替えてからリーチ宣言する。
+    ///
+    /// **引いた牌をそのまま切ると、他家の待ちに刺さってロンで終わる。**
+    /// テンパイ形は数牌の待ちしか持たないので、字牌なら必ず安全である。
+    /// 手牌の枚数は変えないので牌の総数も変わらない。
+    fn declare_with_safe_tile(engine: &mut RoundEngine, seat: Seat, now_ms: u64) {
+        let safe = parse_tile("3z").expect("正しい記法");
+        let last = engine.state().seat(seat).hand.len() - 1;
+        engine.state_mut().seat_mut(seat).hand[last] = safe;
+        engine
+            .apply(
+                seat,
+                Command::Discard {
+                    tile: safe,
+                    riichi: true,
+                },
+                now_ms,
+            )
+            .expect("リーチできる");
+    }
+
+    fn ryuukyoku_of(events: &[Event]) -> (RyuukyokuKind, Option<Seat>) {
+        let Some(Event::Ryuukyoku {
+            kind, initiator, ..
+        }) = events
+            .iter()
+            .find(|e| matches!(e, Event::Ryuukyoku { .. }))
+            .cloned()
+        else {
+            panic!("Ryuukyoku が出ていない: {events:?}");
+        };
+        (kind, initiator)
+    }
+
+    // ---------- 九種九牌 ----------
+
+    /// 幺九牌が9種類以上あれば宣言できる。
+    #[test]
+    fn nine_terminals_can_be_declared() {
+        let mut engine = start_at(0);
+        engine.drain_events();
+        set_dealer_hand(&mut engine, "19m19p19s12345677z");
+        engine
+            .apply(Seat::new(0), Command::Kyuushu, 1_000)
+            .expect("九種九牌を宣言できる");
+
+        let events = engine.drain_events();
+        assert_eq!(
+            ryuukyoku_of(&events),
+            (RyuukyokuKind::NineTerminals, Some(Seat::new(0)))
+        );
+        assert_eq!(*engine.phase(), Phase::Done);
+    }
+
+    /// 宣言者の手だけを開く。何を宣言したかが牌譜から分かるようにする。
+    #[test]
+    fn nine_terminals_reveals_only_the_declarer() {
+        let mut engine = start_at(0);
+        engine.drain_events();
+        set_dealer_hand(&mut engine, "19m19p19s12345677z");
+        engine
+            .apply(Seat::new(0), Command::Kyuushu, 1_000)
+            .expect("九種九牌を宣言できる");
+
+        let events = engine.drain_events();
+        let Some(Event::Ryuukyoku { revealed_hands, .. }) = events
+            .iter()
+            .find(|e| matches!(e, Event::Ryuukyoku { .. }))
+            .cloned()
+        else {
+            panic!("Ryuukyoku が出ていない");
+        };
+        assert_eq!(revealed_hands.len(), 1);
+        assert_eq!(revealed_hands[0].0, Seat::new(0));
+    }
+
+    /// 8種類では宣言できない。
+    #[test]
+    fn eight_kinds_cannot_declare_nine_terminals() {
+        let mut engine = start_at(0);
+        engine.drain_events();
+        set_dealer_hand(&mut engine, "19m345556m19p19s12z");
+        assert_eq!(
+            engine.apply(Seat::new(0), Command::Kyuushu, 1_000),
+            Err(Reject::NotOffered)
+        );
+    }
+
+    /// 手番でない席は宣言できない。
+    #[test]
+    fn a_seat_out_of_turn_cannot_declare_nine_terminals() {
+        let mut engine = start_at(0);
+        engine.drain_events();
+        assert_eq!(
+            engine.apply(Seat::new(1), Command::Kyuushu, 1_000),
+            Err(Reject::NotYourTurn)
+        );
+    }
+
+    // ---------- 四風連打 ----------
+
+    /// 4人が最初の打牌で同じ風牌を切ると流局する。
+    #[test]
+    fn four_identical_winds_abort_the_round() {
+        let mut engine = start_at(0);
+        engine.drain_events();
+        let wind = parse_tile("1z").expect("正しい記法");
+        let mut now = 1_000u64;
+        for seat in Seat::ALL {
+            // **打つ直前に毎回追い出す。**一度だけだと、そのあと山から
+            // 同じ風牌を引いた席が2枚持ちになり、ポンできてしまう。
+            // 鳴きが入ると any_call_made が立って四風連打が消える。
+            evict_everywhere(&mut engine, wind.kind());
+            engine.state_mut().seat_mut(seat).hand[0] = wind;
+            engine
+                .apply(
+                    seat,
+                    Command::Discard {
+                        tile: wind,
+                        riichi: false,
+                    },
+                    now,
+                )
+                .expect("切れる");
+            now += WAY_PAST_ANY_DEADLINE_MS;
+            engine.tick(now);
+        }
+
+        let events = engine.drain_events();
+        assert_eq!(ryuukyoku_of(&events), (RyuukyokuKind::FourWinds, None));
+        assert_eq!(*engine.phase(), Phase::Done);
+    }
+
+    /// 風牌が揃わなければ流局しない。
+    #[test]
+    fn different_winds_do_not_abort() {
+        let mut engine = start_at(0);
+        engine.drain_events();
+        let winds = ["1z", "1z", "1z", "2z"];
+        let mut now = 1_000u64;
+        for (index, seat) in Seat::ALL.into_iter().enumerate() {
+            let wind = parse_tile(winds[index]).expect("正しい記法");
+            for name in ["1z", "2z"] {
+                evict_everywhere(&mut engine, parse_tile(name).expect("正しい記法").kind());
+            }
+            engine.state_mut().seat_mut(seat).hand[0] = wind;
+            engine
+                .apply(
+                    seat,
+                    Command::Discard {
+                        tile: wind,
+                        riichi: false,
+                    },
+                    now,
+                )
+                .expect("切れる");
+            now += WAY_PAST_ANY_DEADLINE_MS;
+            engine.tick(now);
+        }
+        engine.drain_events();
+        assert_ne!(*engine.phase(), Phase::Done);
+    }
+
+    /// 風牌でなければ数えない。
+    #[test]
+    fn a_non_wind_discard_breaks_the_four_winds_count() {
+        let mut engine = start_at(0);
+        engine.drain_events();
+        let wind = parse_tile("1z").expect("正しい記法");
+        evict_everywhere(&mut engine, wind.kind());
+        engine.state_mut().seat_mut(Seat::new(0)).hand[0] = wind;
+        engine
+            .apply(
+                Seat::new(0),
+                Command::Discard {
+                    tile: wind,
+                    riichi: false,
+                },
+                1_000,
+            )
+            .expect("切れる");
+        engine.tick(WAY_PAST_ANY_DEADLINE_MS);
+        engine.drain_events();
+        assert_eq!(engine.state().first_turn_winds.len(), 1);
+    }
+
+    // ---------- 四家立直 ----------
+
+    /// 4人目のリーチが成立した時点で流局する。
+    #[test]
+    fn four_riichi_abort_the_round() {
+        let mut engine = start_at(0);
+        engine.drain_events();
+        set_dealer_hand(&mut engine, "234567m23478p22s1z");
+        for seat in [Seat::new(1), Seat::new(2), Seat::new(3)] {
+            set_tenpai(&mut engine, seat);
+        }
+
+        // 親は 1z を切ってリーチ。他家はツモ牌を切ってリーチする。
+        let mut now = 1_000u64;
+        engine
+            .apply(
+                Seat::new(0),
+                Command::Discard {
+                    tile: parse_tile("1z").expect("正しい記法"),
+                    riichi: true,
+                },
+                now,
+            )
+            .expect("リーチできる");
+        for seat in [Seat::new(1), Seat::new(2), Seat::new(3)] {
+            now += WAY_PAST_ANY_DEADLINE_MS;
+            engine.tick(now);
+            now += 1_000;
+            declare_with_safe_tile(&mut engine, seat, now);
+        }
+        now += WAY_PAST_ANY_DEADLINE_MS;
+        engine.tick(now);
+
+        let events = engine.drain_events();
+        assert_eq!(ryuukyoku_of(&events), (RyuukyokuKind::FourRiichi, None));
+        assert_eq!(engine.state().riichi_sticks, 4, "4本とも供託に残る");
+        assert_eq!(
+            engine.state().scores.iter().sum::<i32>() + engine.state().riichi_sticks as i32 * 1_000,
+            100_000
+        );
+    }
+
+    /// 3人のリーチでは流局しない。
+    #[test]
+    fn three_riichi_do_not_abort() {
+        let mut engine = start_at(0);
+        engine.drain_events();
+        set_dealer_hand(&mut engine, "234567m23478p22s1z");
+        for seat in [Seat::new(1), Seat::new(2)] {
+            set_tenpai(&mut engine, seat);
+        }
+        let mut now = 1_000u64;
+        engine
+            .apply(
+                Seat::new(0),
+                Command::Discard {
+                    tile: parse_tile("1z").expect("正しい記法"),
+                    riichi: true,
+                },
+                now,
+            )
+            .expect("リーチできる");
+        for seat in [Seat::new(1), Seat::new(2)] {
+            now += WAY_PAST_ANY_DEADLINE_MS;
+            engine.tick(now);
+            now += 1_000;
+            declare_with_safe_tile(&mut engine, seat, now);
+        }
+        now += WAY_PAST_ANY_DEADLINE_MS;
+        engine.tick(now);
+        engine.drain_events();
+        assert_ne!(*engine.phase(), Phase::Done);
+        assert_eq!(engine.state().riichi_sticks, 3);
+    }
+
+    // ---------- 四開槓 ----------
+
+    /// 槓が4つで2人以上に分かれていれば流局する。
+    #[test]
+    fn four_kans_across_two_seats_abort_the_round() {
+        let mut engine = start_at(0);
+        engine.drain_events();
+        engine.state_mut().kan_count = [2, 2, 0, 0];
+        let tile = engine.state().seat(Seat::new(0)).hand[0];
+        engine
+            .apply(
+                Seat::new(0),
+                Command::Discard {
+                    tile,
+                    riichi: false,
+                },
+                1_000,
+            )
+            .expect("切れる");
+        engine.tick(WAY_PAST_ANY_DEADLINE_MS);
+
+        let events = engine.drain_events();
+        assert_eq!(ryuukyoku_of(&events), (RyuukyokuKind::FourKans, None));
+    }
+
+    /// 1人で4つなら四槓子が確定しているので続行する。
+    #[test]
+    fn four_kans_by_one_seat_keep_the_round_going() {
+        let mut engine = start_at(0);
+        engine.drain_events();
+        engine.state_mut().kan_count = [4, 0, 0, 0];
+        let tile = engine.state().seat(Seat::new(0)).hand[0];
+        engine
+            .apply(
+                Seat::new(0),
+                Command::Discard {
+                    tile,
+                    riichi: false,
+                },
+                1_000,
+            )
+            .expect("切れる");
+        engine.tick(WAY_PAST_ANY_DEADLINE_MS);
+        engine.drain_events();
+        assert_ne!(*engine.phase(), Phase::Done);
+    }
+
+    /// 槓が3つでは流局しない。
+    #[test]
+    fn three_kans_do_not_abort() {
+        let mut engine = start_at(0);
+        engine.drain_events();
+        engine.state_mut().kan_count = [2, 1, 0, 0];
+        let tile = engine.state().seat(Seat::new(0)).hand[0];
+        engine
+            .apply(
+                Seat::new(0),
+                Command::Discard {
+                    tile,
+                    riichi: false,
+                },
+                1_000,
+            )
+            .expect("切れる");
+        engine.tick(WAY_PAST_ANY_DEADLINE_MS);
+        engine.drain_events();
+        assert_ne!(*engine.phase(), Phase::Done);
+    }
+
+    // ---------- 三家和 ----------
+
+    /// 3人が同時にロンしたら流局する。
+    #[test]
+    fn three_rons_abort_the_round() {
+        let mut engine = start_at(0);
+        engine.drain_events();
+        for seat in [Seat::new(1), Seat::new(2), Seat::new(3)] {
+            set_tenpai(&mut engine, seat);
+        }
+        let winning = parse_tile("6p").expect("正しい記法");
+        engine.state_mut().seat_mut(Seat::new(0)).hand[0] = winning;
+        engine
+            .apply(
+                Seat::new(0),
+                Command::Discard {
+                    tile: winning,
+                    riichi: false,
+                },
+                1_000,
+            )
+            .expect("切れる");
+        engine.drain_events();
+
+        let window_id = engine.next_window_id() - 1;
+        for seat in [Seat::new(1), Seat::new(2), Seat::new(3)] {
+            engine
+                .apply(
+                    seat,
+                    Command::CallResponse {
+                        window_id,
+                        response: CallResponse::Ron,
+                    },
+                    1_400,
+                )
+                .expect("ロンできる");
+        }
+
+        let events = engine.drain_events();
+        assert_eq!(ryuukyoku_of(&events), (RyuukyokuKind::ThreeRons, None));
+        assert!(!events.iter().any(|e| matches!(e, Event::Agari { .. })));
+    }
+
+    // ---------- 共通 ----------
+
+    /// 途中流局では点棒が動かず、供託は持ち越す。
+    #[test]
+    fn an_abortive_draw_moves_no_points() {
+        let mut engine = start_at(0);
+        engine.drain_events();
+        set_dealer_hand(&mut engine, "19m19p19s12345677z");
+        engine
+            .apply(Seat::new(0), Command::Kyuushu, 1_000)
+            .expect("九種九牌を宣言できる");
+        engine.drain_events();
+
+        let outcome = engine.outcome().expect("終わっている");
+        assert_eq!(outcome.scores, [25_000; 4]);
+        assert_eq!(outcome.riichi_sticks, 0);
+    }
+
+    /// 途中流局は連荘になる。
+    #[test]
+    fn an_abortive_draw_repeats_the_dealership() {
+        let mut engine = start_at(0);
+        engine.drain_events();
+        set_dealer_hand(&mut engine, "19m19p19s12345677z");
+        engine
+            .apply(Seat::new(0), Command::Kyuushu, 1_000)
+            .expect("九種九牌を宣言できる");
+        engine.drain_events();
+
+        let outcome = engine.outcome().expect("終わっている");
+        assert!(outcome.dealer_repeats);
+        assert_eq!(outcome.reason, ContinuationReason::AbortiveDraw);
+    }
+
+    /// 途中流局でも牌の総数は変わらない。
+    #[test]
+    fn an_abortive_draw_conserves_every_tile() {
+        let mut engine = start_at(0);
+        engine.drain_events();
+        set_dealer_hand(&mut engine, "19m19p19s12345677z");
+        engine
+            .apply(Seat::new(0), Command::Kyuushu, 1_000)
+            .expect("九種九牌を宣言できる");
+        crate::invariant::assert_tiles_conserved(engine.state());
+    }
+
+    /// 流局したあとはコマンドを受け付けない。
+    #[test]
+    fn an_aborted_round_rejects_further_commands() {
+        let mut engine = start_at(0);
+        engine.drain_events();
+        set_dealer_hand(&mut engine, "19m19p19s12345677z");
+        engine
+            .apply(Seat::new(0), Command::Kyuushu, 1_000)
+            .expect("九種九牌を宣言できる");
+        assert_eq!(
+            engine.apply(Seat::new(0), Command::Kyuushu, 2_000),
+            Err(Reject::NotYourTurn)
+        );
+        let _ = rules();
+    }
+}
+
+#[cfg(test)]
+mod liability_tests {
+    use super::start_tests::start_at;
+    use super::*;
+    use protocol::command::{CallResponse, Command};
+    use protocol::event::LiabilityMode;
+    use protocol::notation::{parse_hand, parse_tile};
+    use protocol::yaku::YakuId;
+
+    /// 席1へ大三元の形を作る。三元牌のポン3つと、4枚の手牌。
+    /// 副露9枚 + 手牌4枚 = 13枚で、配牌と同じ枚数になる。
+    fn set_daisangen(engine: &mut RoundEngine, last_from: Seat) {
+        let seat = Seat::new(1);
+        engine.state_mut().seat_mut(seat).melds = vec![
+            pon("555z", Seat::new(0)),
+            pon("666z", Seat::new(2)),
+            pon("777z", last_from),
+        ];
+        engine.state_mut().seat_mut(seat).hand = parse_hand("23m11m").expect("正しい記法");
+        crate::invariant::assert_tiles_conserved(engine.state());
+    }
+
+    fn pon(notation: &str, from: Seat) -> Meld {
+        let tiles = parse_hand(notation).expect("正しい記法");
+        let called = tiles[0];
+        Meld {
+            kind: MeldKind::Pon,
+            tiles,
+            from: Some(from),
+            called_tile: Some(called),
+        }
+    }
+
+    /// 席0に 4m を切らせて席1がロンする。
+    ///
+    /// **席2と席3を必ずノーテンにする。**配牌のままだと 4m でロンしたり
+    /// ポンしたりしうる。ダブロンになると results の順序が変わり、
+    /// 責任払いの主張が別の和了者を指してしまう。
+    fn ron_on_four_man(engine: &mut RoundEngine) -> Vec<Event> {
+        for seat in [Seat::new(2), Seat::new(3)] {
+            engine.state_mut().seat_mut(seat).hand =
+                parse_hand("147m258p369s1234z").expect("正しい記法");
+        }
+        let winning = parse_tile("4m").expect("正しい記法");
+        engine.state_mut().seat_mut(Seat::new(0)).hand[0] = winning;
+        engine
+            .apply(
+                Seat::new(0),
+                Command::Discard {
+                    tile: winning,
+                    riichi: false,
+                },
+                1_000,
+            )
+            .expect("切れる");
+        engine.drain_events();
+        let window_id = engine.next_window_id() - 1;
+        engine
+            .apply(
+                Seat::new(1),
+                Command::CallResponse {
+                    window_id,
+                    response: CallResponse::Ron,
+                },
+                1_400,
+            )
+            .expect("ロンできる");
+        engine.drain_events()
+    }
+
+    fn agari_of(events: &[Event]) -> Vec<protocol::event::AgariResult> {
+        let Some(Event::Agari { results, .. }) = events
+            .iter()
+            .find(|e| matches!(e, Event::Agari { .. }))
+            .cloned()
+        else {
+            panic!("Agari が出ていない: {events:?}");
+        };
+        results
+    }
+
+    /// 三元牌の副露が3つ揃うと、最後に鳴かせた席が責任を負う。
+    #[test]
+    fn the_seat_that_fed_the_third_dragon_is_liable() {
+        let mut engine = start_at(0);
+        engine.drain_events();
+        set_daisangen(&mut engine, Seat::new(3));
+        let events = ron_on_four_man(&mut engine);
+
+        let results = agari_of(&events);
+        let liability = results[0].liability.expect("責任払いが成立する");
+        assert_eq!(liability.seat, Seat::new(3));
+        assert_eq!(liability.yaku, YakuId::Daisangen);
+        assert_eq!(liability.mode, LiabilityMode::Split, "ロンは折半");
+    }
+
+    /// 責任者が変われば結果も変わる。副露の順序を見ている証拠になる。
+    #[test]
+    fn a_different_last_pon_moves_the_liability() {
+        let mut engine = start_at(0);
+        engine.drain_events();
+        set_daisangen(&mut engine, Seat::new(2));
+        let events = ron_on_four_man(&mut engine);
+        assert_eq!(
+            agari_of(&events)[0]
+                .liability
+                .expect("責任払いが成立する")
+                .seat,
+            Seat::new(2)
+        );
+    }
+
+    /// 手の内の暗刻が混じると責任払いは発生しない。
+    #[test]
+    fn a_concealed_dragon_cancels_the_liability() {
+        let mut engine = start_at(0);
+        engine.drain_events();
+        let seat = Seat::new(1);
+        // 三元牌の副露は2つだけ。残り1つは手の内に持つ。
+        engine.state_mut().seat_mut(seat).melds =
+            vec![pon("555z", Seat::new(0)), pon("666z", Seat::new(2))];
+        engine.state_mut().seat_mut(seat).hand = parse_hand("777z23m11m").expect("正しい記法");
+        crate::invariant::assert_tiles_conserved(engine.state());
+        let events = ron_on_four_man(&mut engine);
+
+        let results = agari_of(&events);
+        assert_eq!(results[0].liability, None);
+    }
+
+    /// 暗槓が対象の途中にあっても責任払いは発生しない。
+    ///
+    /// 最後の副露だけを見ると、暗槓のあとに明副露が続いたときに
+    /// 責任者がいるように見えてしまう。
+    #[test]
+    fn a_concealed_kan_in_the_middle_cancels_the_liability() {
+        let mut engine = start_at(0);
+        engine.drain_events();
+        let seat = Seat::new(1);
+        // 暗槓 → ポン → ポン の順に積む。暗槓は4枚だが1面子である。
+        engine.state_mut().seat_mut(seat).melds = vec![
+            Meld {
+                kind: MeldKind::Ankan,
+                tiles: parse_hand("5555z").expect("正しい記法"),
+                from: None,
+                called_tile: None,
+            },
+            pon("666z", Seat::new(2)),
+            pon("777z", Seat::new(3)),
+        ];
+        // 暗槓4枚 + ポン6枚 + 手牌4枚 = 14枚。元の13枚と入れ替えると
+        // 卓全体が137枚になる。**暗槓だけは物理4枚で1面子を数えるため、
+        // 他の副露と違って1枚増える。**山から1枚抜いて相殺する。
+        engine.state_mut().seat_mut(seat).hand = parse_hand("23m11m").expect("正しい記法");
+        engine.state_mut().wall.draw().expect("山に残っている");
+        crate::invariant::assert_tiles_conserved(engine.state());
+        let events = ron_on_four_man(&mut engine);
+        assert_eq!(agari_of(&events)[0].liability, None);
+    }
+
+    /// ツモの責任払いは責任者が全額を負担する。
+    #[test]
+    fn a_tsumo_makes_the_liable_seat_pay_everything() {
+        let mut engine = start_at(0);
+        engine.drain_events();
+        set_daisangen(&mut engine, Seat::new(3));
+        engine.force_draw_turn(Seat::new(1), parse_tile("4m").expect("正しい記法"));
+        engine
+            .apply(Seat::new(1), Command::Tsumo, 2_000)
+            .expect("ツモ和了できる");
+
+        let events = engine.drain_events();
+        let liability = agari_of(&events)[0].liability.expect("責任払いが成立する");
+        assert_eq!(liability.seat, Seat::new(3));
+        assert_eq!(liability.mode, LiabilityMode::Full, "ツモは全額");
+
+        let Some(Event::Agari { settlement, .. }) = events
+            .iter()
+            .find(|e| matches!(e, Event::Agari { .. }))
+            .cloned()
+        else {
+            panic!("Agari が出ていない");
+        };
+        assert_eq!(settlement.delta[0], 0, "責任者以外は払わない");
+        assert_eq!(settlement.delta[2], 0);
+        assert!(settlement.delta[3] < 0);
+        assert!(settlement.is_balanced());
+    }
+
+    /// 三元牌が2つでは責任払いにならない。
+    #[test]
+    fn two_dragons_are_not_enough() {
+        let mut engine = start_at(0);
+        engine.drain_events();
+        let seat = Seat::new(1);
+        engine.state_mut().seat_mut(seat).melds =
+            vec![pon("555z", Seat::new(0)), pon("666z", Seat::new(2))];
+        engine.state_mut().seat_mut(seat).hand = parse_hand("23m567m11m").expect("正しい記法");
+        crate::invariant::assert_tiles_conserved(engine.state());
+        let events = ron_on_four_man(&mut engine);
+        assert_eq!(agari_of(&events)[0].liability, None);
+    }
+
+    /// 風牌の副露が4つ揃えば大四喜の責任払いになる。
+    #[test]
+    fn the_seat_that_fed_the_fourth_wind_is_liable() {
+        let mut engine = start_at(0);
+        engine.drain_events();
+        let seat = Seat::new(1);
+        engine.state_mut().seat_mut(seat).melds = vec![
+            pon("111z", Seat::new(0)),
+            pon("222z", Seat::new(2)),
+            pon("333z", Seat::new(3)),
+            pon("444z", Seat::new(0)),
+        ];
+        // 副露12枚 + 手牌1枚 = 13枚。5z の単騎で和了る。
+        engine.state_mut().seat_mut(seat).hand = parse_hand("5z").expect("正しい記法");
+        crate::invariant::assert_tiles_conserved(engine.state());
+
+        // 席2と席3をノーテンにしてから切らせる。理由は ron_on_four_man と同じ。
+        for other in [Seat::new(2), Seat::new(3)] {
+            engine.state_mut().seat_mut(other).hand =
+                parse_hand("147m258p369s1234z").expect("正しい記法");
+        }
+        let winning = parse_tile("5z").expect("正しい記法");
+        engine.state_mut().seat_mut(Seat::new(0)).hand[0] = winning;
+        engine
+            .apply(
+                Seat::new(0),
+                Command::Discard {
+                    tile: winning,
+                    riichi: false,
+                },
+                1_000,
+            )
+            .expect("切れる");
+        engine.drain_events();
+        let window_id = engine.next_window_id() - 1;
+        engine
+            .apply(
+                Seat::new(1),
+                Command::CallResponse {
+                    window_id,
+                    response: CallResponse::Ron,
+                },
+                1_400,
+            )
+            .expect("ロンできる");
+
+        let events = engine.drain_events();
+        let liability = agari_of(&events)[0].liability.expect("責任払いが成立する");
+        assert_eq!(liability.seat, Seat::new(0), "4つ目の風牌を鳴かせた席");
+        assert_eq!(liability.yaku, YakuId::Daisuushii);
+    }
+
+    /// ルールで切っていれば責任払いを付けない。
+    #[test]
+    fn a_ruleset_without_liability_never_assigns_it() {
+        let mut engine = RoundEngine::start(
+            Ruleset {
+                liability: false,
+                ..Ruleset::kin_no_ma(protocol::ruleset::MatchLength::Hanchan)
+            },
+            Round {
+                wind: protocol::seat::Wind::East,
+                number: 1,
+            },
+            Seat::new(0),
+            0,
+            0,
+            [25_000; 4],
+            &super::start_tests::seed(),
+            1,
+            0,
+        );
+        engine.drain_events();
+        set_daisangen(&mut engine, Seat::new(3));
+        let events = ron_on_four_man(&mut engine);
+        assert_eq!(agari_of(&events)[0].liability, None);
+    }
+
+    /// 責任払いがあっても点棒の合計は変わらない。
+    #[test]
+    fn a_liable_settlement_still_balances() {
+        let mut engine = start_at(0);
+        engine.drain_events();
+        set_daisangen(&mut engine, Seat::new(3));
+        let events = ron_on_four_man(&mut engine);
+        let Some(Event::Agari { settlement, .. }) = events
+            .iter()
+            .find(|e| matches!(e, Event::Agari { .. }))
+            .cloned()
+        else {
+            panic!("Agari が出ていない");
+        };
+        assert!(settlement.is_balanced());
+        assert_eq!(engine.state().scores.iter().sum::<i32>(), 100_000);
+    }
+
+    /// 責任者と放銃者で折半する。
+    #[test]
+    fn a_ron_splits_the_payment_with_the_liable_seat() {
+        let mut engine = start_at(0);
+        engine.drain_events();
+        set_daisangen(&mut engine, Seat::new(3));
+        let events = ron_on_four_man(&mut engine);
+        let Some(Event::Agari { settlement, .. }) = events
+            .iter()
+            .find(|e| matches!(e, Event::Agari { .. }))
+            .cloned()
+        else {
+            panic!("Agari が出ていない");
+        };
+        // 放銃は席0、責任は席3。どちらも同額を払う。
+        assert_eq!(settlement.delta[0], settlement.delta[3]);
+        assert!(settlement.delta[0] < 0);
+    }
 }
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
@@ -131,6 +914,7 @@ impl RoundEngine {
         match command {
             Command::Discard { tile, riichi } => self.apply_discard(seat, tile, riichi, now_ms),
             Command::Tsumo => self.apply_tsumo(seat, now_ms),
+            Command::Kyuushu => self.apply_kyuushu(seat, now_ms),
             Command::Ankan { kind } => self.apply_ankan(seat, kind, now_ms),
             Command::Kakan { tile } => self.apply_kakan(seat, tile, now_ms),
             Command::CallResponse {
@@ -141,7 +925,6 @@ impl RoundEngine {
                 self.resolve_window(now_ms);
                 accepted
             }
-            _ => Err(Reject::NotOffered),
         }
     }
 
@@ -318,6 +1101,14 @@ impl RoundEngine {
                 called_by: None,
                 riichi_declaration,
             });
+        // 四風連打の材料。最初のツモで、誰も鳴いておらず、風牌のときだけ数える。
+        // 数えない打牌が1つでもあれば4つに届かないので、それで判定になる。
+        if self.state.draw_count[seat.index()] == 1
+            && !self.state.any_call_made
+            && is_wind(tile.kind())
+        {
+            self.state.first_turn_winds.push(tile.kind());
+        }
         if !tile.kind().is_terminal_or_honor() {
             self.state.seat_mut(seat).nagashi_alive = false;
         }
@@ -440,7 +1231,9 @@ impl RoundEngine {
             }
             Outcome::Call { seat, response } => self.apply_call(seat, response, now_ms),
             Outcome::Ron(winners) if winners.len() == 3 => {
-                unimplemented!("三家和は Wave 2e で実装する")
+                self.window = None;
+                self.record_passes(&winners);
+                self.finish_abortive(RyuukyokuKind::ThreeRons, None, Vec::new());
             }
             Outcome::Ron(winners) => self.finish_with_ron(winners),
         }
@@ -491,6 +1284,9 @@ impl RoundEngine {
     fn advance_after_pass(&mut self, from: Seat, now_ms: u64) {
         // 誰も和了しなかったので、宣言していたリーチが成立する。
         self.accept_riichi_of(from);
+        if self.check_abortive() {
+            return;
+        }
         if self.state.wall.live_remaining() == 0 {
             self.finish_exhaustive();
             return;
@@ -498,6 +1294,62 @@ impl RoundEngine {
         let next = Seat::new(((from.index() + 1) % 4) as u8);
         self.draw_for(next, DrawSource::Wall);
         self.request_turn(now_ms);
+    }
+
+    fn apply_kyuushu(&mut self, seat: Seat, now_ms: u64) -> Result<(), Reject> {
+        let Phase::Turn { seat: turn, start } = self.phase.clone() else {
+            return Err(Reject::NotYourTurn);
+        };
+        if turn != seat {
+            return Err(Reject::NotYourTurn);
+        }
+        if !discard_options(&self.state, seat, start)
+            .iter()
+            .any(|o| matches!(o, ActionOption::Kyuushu))
+        {
+            return Err(Reject::NotOffered);
+        }
+        self.charge(seat, now_ms);
+        let revealed = vec![(seat, self.state.seat(seat).hand.clone())];
+        self.finish_abortive(RyuukyokuKind::NineTerminals, Some(seat), revealed);
+        Ok(())
+    }
+
+    /// 打牌への反応が解決した時点で見る途中流局。
+    fn check_abortive(&mut self) -> bool {
+        if self.four_winds_reached() {
+            self.finish_abortive(RyuukyokuKind::FourWinds, None, Vec::new());
+            return true;
+        }
+        if self.four_riichi_reached() {
+            self.finish_abortive(RyuukyokuKind::FourRiichi, None, Vec::new());
+            return true;
+        }
+        if self.four_kans_reached() {
+            self.finish_abortive(RyuukyokuKind::FourKans, None, Vec::new());
+            return true;
+        }
+        false
+    }
+
+    fn four_winds_reached(&self) -> bool {
+        let winds = &self.state.first_turn_winds;
+        winds.len() == 4 && winds.iter().all(|k| *k == winds[0])
+    }
+
+    fn four_riichi_reached(&self) -> bool {
+        Seat::ALL.iter().all(|s| {
+            matches!(
+                &self.state.seat(*s).riichi,
+                Some(r) if r.step == RiichiStep::Accepted
+            )
+        })
+    }
+
+    fn four_kans_reached(&self) -> bool {
+        let total: u32 = self.state.kan_count.iter().map(|c| u32::from(*c)).sum();
+        let seats = self.state.kan_count.iter().filter(|c| **c > 0).count();
+        total >= 4 && seats >= 2
     }
 
     fn charge(&mut self, seat: Seat, now_ms: u64) {
@@ -833,6 +1685,16 @@ impl RoundEngine {
         self.next_window_id += 1;
         id
     }
+}
+
+/// 風牌は 1z..4z。
+fn is_wind(kind: TileKind) -> bool {
+    (27..=30).contains(&kind.index())
+}
+
+/// 三元牌は 5z..7z。
+fn is_dragon(kind: TileKind) -> bool {
+    (31..=33).contains(&kind.index())
 }
 
 #[cfg(test)]
@@ -2901,6 +3763,7 @@ impl RoundEngine {
         let mut inputs = Vec::new();
         let mut results = Vec::new();
         for seat in &winners {
+            let liability = self.liability_for(*seat, WinType::Ron);
             let context = self.state.hand_context(*seat, WinType::Ron);
             let hand = self.state.seat(*seat).hand.clone();
             let melds = self.state.seat(*seat).melds.clone();
@@ -2910,7 +3773,7 @@ impl RoundEngine {
                 seat: *seat,
                 from: Some(from),
                 payment: result.payment,
-                liability: None, // 責任払いは Wave 2d で結線する
+                liability,
             });
             results.push(AgariResult {
                 seat: *seat,
@@ -2922,7 +3785,7 @@ impl RoundEngine {
                 fu: result.fu,
                 han: result.han,
                 score: payment_total(&result.payment),
-                liability: None,
+                liability,
                 // リーチ和了のみ Some。空配列との使い分けに頼らない設計である。
                 ura_indicators: self.ura_for(*seat),
             });
@@ -2984,11 +3847,12 @@ impl RoundEngine {
 
         let result = score(&hand, &melds, win_tile, &context, &self.state.rules)
             .expect("ツモを提示した以上、役がある");
+        let liability = self.liability_for(seat, WinType::Tsumo);
         let input = AgariInput {
             seat,
             from: None,
             payment: result.payment,
-            liability: None,
+            liability,
         };
         let settlement = settle_agari(
             &[input],
@@ -3006,7 +3870,7 @@ impl RoundEngine {
             fu: result.fu,
             han: result.han,
             score: payment_total(&result.payment),
-            liability: None,
+            liability,
             ura_indicators: self.ura_for(seat),
         }];
         self.emit(Event::Agari {
@@ -3035,6 +3899,50 @@ impl RoundEngine {
             Some(r) if r.step == RiichiStep::Accepted
         )
         .then(|| self.state.wall.ura_indicators().to_vec())
+    }
+
+    /// 責任払いを副露列から導く。
+    fn liability_for(&self, seat: Seat, win_type: WinType) -> Option<Liability> {
+        if !self.state.rules.liability {
+            return None;
+        }
+        let melds = &self.state.seat(seat).melds;
+        let mode = match win_type {
+            WinType::Tsumo => LiabilityMode::Full,
+            WinType::Ron => LiabilityMode::Split,
+        };
+
+        for (yaku, needed, matches_kind) in [
+            (YakuId::Daisangen, 3usize, is_dragon as fn(TileKind) -> bool),
+            (YakuId::Daisuushii, 4, is_wind as fn(TileKind) -> bool),
+        ] {
+            let mut last_from = None;
+            let mut count = 0usize;
+            let mut has_concealed = false;
+            for meld in melds {
+                let Some(kind) = meld.tiles.first().map(|t| t.kind()) else {
+                    continue;
+                };
+                if !matches_kind(kind) {
+                    continue;
+                }
+                count += 1;
+                match meld.from {
+                    Some(from) => last_from = Some(from),
+                    None => has_concealed = true,
+                }
+            }
+            if count == needed && !has_concealed {
+                if let Some(from) = last_from {
+                    return Some(Liability {
+                        seat: from,
+                        yaku,
+                        mode,
+                    });
+                }
+            }
+        }
+        None
     }
 
     /// 荒牌平局。流し満貫が成立していればテンパイ料は発生しない。
@@ -3089,6 +3997,30 @@ impl RoundEngine {
             ContinuationReason::DealerLoss
         };
         self.finish(scores, self.state.riichi_sticks, dealer_repeats, reason);
+    }
+
+    /// 途中流局で局を閉じる。点棒は動かず、供託は持ち越す。
+    fn finish_abortive(
+        &mut self,
+        kind: RyuukyokuKind,
+        initiator: Option<Seat>,
+        revealed_hands: Vec<(Seat, Vec<Tile>)>,
+    ) {
+        let settlement = protocol::event::Settlement {
+            delta: [0; 4],
+            entries: Vec::new(),
+        };
+        self.emit(Event::Ryuukyoku {
+            kind,
+            initiator,
+            tenpai: [false; 4],
+            revealed_hands,
+            nagashi_winners: Vec::new(),
+            settlement,
+        });
+        let scores = self.state.scores;
+        let sticks = self.state.riichi_sticks;
+        self.finish(scores, sticks, true, ContinuationReason::AbortiveDraw);
     }
 
     /// 局を閉じる。
@@ -3167,17 +4099,18 @@ impl RoundEngine {
 }
 
 impl RoundEngine {
-    /// 指定した席のツモ番を直接作る。手牌が13枚であることを前提にする。
+    /// 指定した席のツモ番を直接作る。
     /// 自然な進行では狙った牌をツモらせられないので、テストだけが使う。
     ///
     /// **手へ1枚足す分、山から1枚抜く。**そうしないと総数が137になり、
     /// `assert_tiles_conserved` が落ちる。
     #[cfg(test)]
     pub(crate) fn force_draw_turn(&mut self, seat: Seat, tile: Tile) {
+        let expected = 13 - 3 * self.state.seat(seat).melds.len();
         assert_eq!(
             self.state.seat(seat).hand.len(),
-            13,
-            "13枚の手へ1枚足して14枚にする"
+            expected,
+            "副露1つにつき手牌は3枚短い"
         );
         self.state.wall.draw().expect("山に残っている");
         self.state.seat_mut(seat).hand.push(tile);
