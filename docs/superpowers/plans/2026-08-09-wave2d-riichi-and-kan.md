@@ -1104,6 +1104,122 @@ mod kan_tests {
         assert!(!riichi.ippatsu);
     }
 
+    /// ポンしか提示されていない席は明槓できない。
+    ///
+    /// `ReactionWindow` は優先度しか見ず、`Pon` と `Kan` は同順位である。
+    /// 進行側で候補そのものと照合しないと、3枚目を探して落ちる。
+    #[test]
+    fn a_seat_offered_only_a_pon_cannot_call_a_kan() {
+        let mut engine = start_at(0);
+        engine.drain_events();
+        // 手には2枚しかない。明槓の候補は出ない。
+        let target = state_where_seat_one_can_pon(&mut engine, "5p");
+        engine.state_mut().seat_mut(Seat::new(0)).hand[0] = target;
+        engine
+            .apply(
+                Seat::new(0),
+                Command::Discard {
+                    tile: target,
+                    riichi: false,
+                },
+                1_000,
+            )
+            .expect("切れる");
+        engine.drain_events();
+
+        let window_id = engine.next_window_id() - 1;
+        assert_eq!(
+            engine.apply(
+                Seat::new(1),
+                Command::CallResponse {
+                    window_id,
+                    response: CallResponse::Kan,
+                },
+                1_400
+            ),
+            Err(Reject::NotOffered)
+        );
+    }
+
+    /// 提示していない牌の組み合わせでは鳴けない。
+    #[test]
+    fn a_call_with_tiles_that_were_not_offered_is_rejected() {
+        let mut engine = start_at(0);
+        engine.drain_events();
+        let target = state_where_seat_one_can_pon(&mut engine, "5p");
+        engine.state_mut().seat_mut(Seat::new(0)).hand[0] = target;
+        engine
+            .apply(
+                Seat::new(0),
+                Command::Discard {
+                    tile: target,
+                    riichi: false,
+                },
+                1_000,
+            )
+            .expect("切れる");
+        engine.drain_events();
+
+        let window_id = engine.next_window_id() - 1;
+        let bogus = parse_tile("9m").expect("正しい記法");
+        assert_eq!(
+            engine.apply(
+                Seat::new(1),
+                Command::CallResponse {
+                    window_id,
+                    response: CallResponse::Pon {
+                        tiles: [bogus, bogus],
+                    },
+                },
+                1_400
+            ),
+            Err(Reject::NotOffered)
+        );
+    }
+
+    /// 別の牌種で先に加槓していても、鳴いた相手を取り違えない。
+    #[test]
+    fn a_second_kakan_reports_its_own_pon_partner() {
+        let mut engine = start_at(0);
+        engine.drain_events();
+        let first = parse_tile("4p").expect("正しい記法");
+        let second = parse_tile("6p").expect("正しい記法");
+        // 副露は 4p の加槓（4枚・席1から）と 6p のポン（3枚・席3から）。
+        // 合わせて7枚。手牌は 14 - 7 = 7枚にする。
+        engine.state_mut().seat_mut(Seat::new(0)).melds = vec![
+            Meld {
+                kind: MeldKind::Kakan,
+                tiles: parse_hand("4444p").expect("正しい記法"),
+                from: Some(Seat::new(1)),
+                called_tile: Some(first),
+            },
+            Meld {
+                kind: MeldKind::Pon,
+                tiles: parse_hand("666p").expect("正しい記法"),
+                from: Some(Seat::new(3)),
+                called_tile: Some(second),
+            },
+        ];
+        engine.state_mut().seat_mut(Seat::new(0)).hand =
+            parse_hand("234m567m6p").expect("正しい記法");
+
+        engine
+            .apply(Seat::new(0), Command::Kakan { tile: second }, 1_000)
+            .expect("加槓できる");
+        engine.tick(WAY_PAST_ANY_DEADLINE_MS);
+
+        let events = engine.drain_events();
+        let Some(Event::Call { from, kind, .. }) = events
+            .iter()
+            .find(|e| matches!(e, Event::Call { .. }))
+            .cloned()
+        else {
+            panic!("Call が出ていない: {events:?}");
+        };
+        assert_eq!(kind, MeldKind::Kakan);
+        assert_eq!(from, Seat::new(3), "6p のポンは席3から鳴いている");
+    }
+
     /// 手番でない席は槓を宣言できない。
     #[test]
     fn a_seat_out_of_turn_cannot_declare_a_kan() {
@@ -1297,7 +1413,7 @@ Expected: コンパイルエラー
         let seat = pending.seat;
         let kind = pending.kind;
 
-        let tiles = match kind {
+        let (tiles, from) = match kind {
             MeldKind::Ankan => {
                 // 手から同じ種類を4枚抜く。
                 let mut taken = Vec::with_capacity(4);
@@ -1317,7 +1433,9 @@ Expected: コンパイルエラー
                     from: None,
                     called_tile: None,
                 });
-                taken
+                // 暗槓に鳴いた相手はいないが、`Event::Call.from` は Option
+                // ではない。自分自身を入れる。`Meld.from` は None のままである。
+                (taken, seat)
             }
             MeldKind::Kakan => {
                 let position = self
@@ -1340,23 +1458,12 @@ Expected: コンパイルエラー
                     .expect("元になるポンがある");
                 meld.kind = MeldKind::Kakan;
                 meld.tiles.push(fourth);
-                meld.tiles.clone()
+                // **いま育てた副露から取る。**副露を後から走査して最初の
+                // Kakan を選ぶと、別の牌種で先に加槓していた副露の相手が
+                // 入ってしまう。
+                (meld.tiles.clone(), meld.from.unwrap_or(seat))
             }
             _ => unreachable!("宣言できるのは暗槓と加槓だけである"),
-        };
-
-        // 暗槓に鳴いた相手はいないが、Event::Call.from は Option ではない。
-        // 自分自身を入れる。Meld.from は None のままである。
-        let from = match kind {
-            MeldKind::Ankan => seat,
-            _ => self
-                .state
-                .seat(seat)
-                .melds
-                .iter()
-                .find(|m| m.kind == MeldKind::Kakan)
-                .and_then(|m| m.from)
-                .unwrap_or(seat),
         };
         self.emit(Event::Call {
             seat,
@@ -1433,7 +1540,49 @@ Expected: コンパイルエラー
     }
 ```
 
-`accept_response` の `CallResponse::Kan` を弾く行を**外す。**
+`accept_response` の `CallResponse::Kan` を弾く行を**外し、代わりに応答と候補を
+照合する。**
+
+**外すだけでは穴が開く。**`ReactionWindow::respond` は応答と候補を優先度でしか
+比べず、`Pon` と `Kan` はどちらも `Priority::Pon` である（`reaction.rs`）。
+同じ牌を2枚しか持たない席が `CallResponse::Kan` を送ると素通りし、
+`apply_minkan` が3枚目を探して落ちる。
+
+牌の照合も同じ理由で要る。`ReactionWindow` はチーとポンの牌を見ないので、
+持っていない牌の組み合わせで鳴けてしまう。**Wave 2b の計画で「Wave 2c が
+自分で検査する」と書いたまま結線していなかった。**ここで入れる。
+
+`accept_response` の `window.respond(...)` を呼ぶ直前へ置く。
+
+```rust
+        if !self.response_is_offered(seat, &response) {
+            return Err(Reject::NotOffered);
+        }
+```
+
+```rust
+    /// 応答が、その席へ実際に提示した候補と一致するか。
+    ///
+    /// `ReactionWindow::respond` は優先度しか見ない。種別と牌の照合は
+    /// 進行側の責務である。`offered` はウィンドウを閉じるまで残っている。
+    fn response_is_offered(&self, seat: Seat, response: &CallResponse) -> bool {
+        let offered = &self.offered[seat.index()];
+        match response {
+            // パスは候補を持つ席なら常に許す。
+            CallResponse::Pass => true,
+            CallResponse::Ron => offered.iter().any(|o| matches!(o, ActionOption::Ron)),
+            CallResponse::Kan => offered
+                .iter()
+                .any(|o| matches!(o, ActionOption::Kan { .. })),
+            CallResponse::Chi { tiles } => offered.iter().any(
+                |o| matches!(o, ActionOption::Chi { candidates } if candidates.contains(tiles)),
+            ),
+            CallResponse::Pon { tiles } => offered.iter().any(
+                |o| matches!(o, ActionOption::Pon { candidates } if candidates.contains(tiles)),
+            ),
+        }
+    }
+```
 
 **既存の `call_tests::a_minkan_is_not_accepted_yet` を削除する。**Wave 2c が
 「明槓はまだ受け付けない」ことを固定したテストであり、本タスクでその前提が
@@ -1455,12 +1604,12 @@ use protocol::tile::TileKind;
 - [ ] **Step 4: テストが通ることを確認する**
 
 Run: `cargo test --package mahjong-engine kan_tests`
-Expected: 16テスト PASS
+Expected: 19テスト PASS
 
 - [ ] **Step 5: 既存のテストを壊していないことを確認する**
 
 Run: `cargo test --workspace && cargo clippy --all-targets -- -D warnings && cargo fmt --check`
-Expected: engine 231テスト PASS、警告ゼロ
+Expected: engine 234テスト PASS、警告ゼロ
 
 - [ ] **Step 6: コミット**
 
@@ -1473,7 +1622,7 @@ git commit -m "feat(engine): 槓と槍槓を実装"
 
 ## Wave 2d 完了の判定
 
-- [ ] `cargo test --workspace` が通る（engine 231テスト）
+- [ ] `cargo test --workspace` が通る（engine 234テスト）
 - [ ] `cargo clippy --all-targets -- -D warnings` が通る
 - [ ] `cargo fmt --check` が通る
 - [ ] 既存の200件のうち、削除したのは `a_minkan_is_not_accepted_yet` の1件だけである

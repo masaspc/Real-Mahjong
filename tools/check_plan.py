@@ -373,8 +373,10 @@ def check_hands(text):
         over = [k for k, v in counts.items() if v > 4]
         if over:
             problems.append(f"{notation}: 同一牌が5枚以上 {over}")
-        if len(tiles) not in (2, 3, 4, 10, 11, 13, 14):
-            problems.append(f"{notation}: 枚数が {len(tiles)} で不自然")
+        # 副露があると手牌は 14 未満のいろいろな枚数になる。槓なら副露が
+        # 4枚を占めるので、7枚のような値も正しい。上限だけを見る。
+        if not 1 <= len(tiles) <= 14:
+            problems.append(f"{notation}: 枚数が {len(tiles)} で範囲外")
     return problems
 
 
