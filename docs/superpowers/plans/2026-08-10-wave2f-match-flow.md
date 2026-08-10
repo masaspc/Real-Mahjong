@@ -72,7 +72,7 @@ while !game.is_over() {
 | 西入 | 最終局を終えて誰も `return_score`（30000）に届いていなければ、次の風へ延長する。半荘なら西場、東風戦なら南場 |
 | 延長の打ち切り | 延長した風の4局を終えたら、誰も届いていなくても終局する。無限に伸ばさない |
 | アガリ止め | 最終局で親が和了し、かつ親がトップなら続行しない |
-| テンパイ止め | 最終局の荒牌平局で親がテンパイし、かつ親がトップなら続行しない |
+| テンパイ止め | 最終局の荒牌平局で親がテンパイし、かつ親がトップなら続行しない。**流し満貫も荒牌平局の一種なので含める** |
 | 飛び | `Ruleset.busted_ends_match` が真で、誰かの持ち点が0未満になったら即終局 |
 | `MatchEnd.final_scores` | **素点をそのまま入れる。**ウマとオカはポイントの計算であって点棒ではない。段位とレートの計算は Wave 3 が `placements` から行う |
 | 順位 | 持ち点の多い順。同点は席順（起家に近いほう）が上位 |
@@ -120,7 +120,6 @@ while !game.is_over() {
 ```rust
 #[cfg(test)]
 mod match_tests {
-    use super::discard_tests::WAY_PAST_ANY_DEADLINE_MS;
     use super::ending_tests::{make_tenpai, set_dealer_hand};
     use super::*;
     use protocol::command::Command;
@@ -513,15 +512,63 @@ impl MatchEngine {
     pub(super) fn drain_the_wall(state: &mut RoundState)
 ```
 
-`sink()` を使う `make_tenpai` と `drain_the_wall` は、`crate::state::Discarded`
-を積む先が `state.seat_mut(sink())` に変わるだけである。
+**あわせて2つの前提を外す。**どちらも「親は席0」「捨て台は席3」と決め打ちした
+ものであり、局が進んで親が移ると成り立たない。
 
-インポートへ足すもの。
+`make_tenpai` は捨て台を席3に固定し、`assert_ne!(seat, sink())` で席3を
+拒んでいる。半荘では東4局の親が席3になるので、そのままでは落ちる。
+**対象の席から見た下家を捨て台にする。**
+
+```rust
+/// 牌の退避先。対象の席とは必ず別になる。
+fn sink_for(seat: Seat) -> Seat {
+    Seat::new(((seat.index() + 1) % 4) as u8)
+}
+
+pub(super) fn make_tenpai(state: &mut RoundState, seat: Seat) {
+    let target = parse_hand("234567m23478p22s").expect("正しい記法");
+    let old = std::mem::replace(&mut state.seat_mut(seat).hand, target);
+    for tile in old.into_iter().skip(13) {
+        state
+            .seat_mut(sink_for(seat))
+            .river
+            .push(crate::state::Discarded {
+                tile,
+                manner: DiscardManner::Tsumogiri,
+                called_by: None,
+                riichi_declaration: false,
+            });
+    }
+    crate::invariant::assert_tiles_conserved(state);
+}
+```
+
+`set_dealer_hand` は席0を決め打ちしている。**`state.dealer` を見る。**
+既存の呼び出しはすべて親が席0の局なので、挙動は変わらない。
+
+```rust
+pub(super) fn set_dealer_hand(state: &mut RoundState, notation: &str) {
+    let hand = parse_hand(notation).expect("正しい記法");
+    assert_eq!(hand.len(), 14, "親の手は14枚である");
+    let dealer = state.dealer;
+    assert_eq!(state.seat(dealer).hand.len(), 14);
+    state.seat_mut(dealer).hand = hand;
+}
+```
+
+`drain_the_wall` の捨て台は席3のままでよい。手牌を触らないので、
+どの席の河へ積んでも他のテストに響かない。
+
+インポートへ足すもの。`Ruleset` は既にあるので `MatchLength` を並べる。
 
 ```rust
 use protocol::event::{NextRound, PlayerId};
+use protocol::ruleset::{MatchLength, Ruleset};   // Ruleset は既存。MatchLength を足す
 use protocol::seat::Wind;
 ```
+
+`MatchLength` は Task 3 の `last_wind` / `extension_wind` が使う。
+**Task 1 の時点では使わないので、そこで入れると未使用になる。Task 3 で足す。**
 
 - [ ] **Step 4: テストが通ることを確認する**
 
@@ -753,14 +800,16 @@ mod progression_tests {
         next_of(&mut game);
         let first_end = game.current_window_id();
 
-        begin(&mut game, 2);
+        // **`begin` は使わない。**開始イベントを捨ててしまうと、
+        // このテストが読みたい `RequestAction` が消える。
+        game.begin_round(&seed_of(2), 0);
         let events = game.drain_events();
         let Some(Event::RequestAction { window_id, .. }) = events
             .iter()
             .find(|e| matches!(e, Event::RequestAction { .. }))
             .cloned()
         else {
-            panic!("要求が出ていない");
+            panic!("要求が出ていない: {events:?}");
         };
         assert_eq!(window_id, first_end, "採番が続いている");
     }
@@ -920,14 +969,13 @@ git commit -m "feat(engine): 連荘と本場と局の進み方を実装"
 #[cfg(test)]
 mod ending_match_tests {
     use super::discard_tests::WAY_PAST_ANY_DEADLINE_MS;
-    use super::ending_tests::{clear_nagashi, drain_the_wall, make_tenpai, set_dealer_hand};
+    use super::ending_tests::{clear_nagashi, drain_the_wall, set_dealer_hand};
     use super::match_tests::{
         finish_with_a_child_tsumo, finish_with_a_dealer_tsumo, players, seed_of,
     };
     use super::*;
     use protocol::command::Command;
     use protocol::notation::parse_tile;
-    use protocol::ruleset::MatchLength;
     use protocol::seat::Wind;
 
     /// 東風戦。4局で終わるので終局まで回しやすい。
@@ -1091,7 +1139,7 @@ mod ending_match_tests {
         game.drain_events();
         // 席1を大きく減らしてから親に和了らせる。
         // 親のツモは子から1300点ずつ取る。席1は500点しかないので飛ぶ。
-        game.force_scores([25_000, 500, 25_000, 25_000]);
+        game.force_scores([25_000, 500, 25_000, 49_500]);
         finish_with_a_dealer_tsumo(&mut game);
         let events = game.drain_events();
 
@@ -1114,7 +1162,7 @@ mod ending_match_tests {
         game.drain_events();
         game.begin_round(&seed_of(1), 0);
         game.drain_events();
-        game.force_scores([25_000, 500, 25_000, 25_000]);
+        game.force_scores([25_000, 500, 25_000, 49_500]);
         finish_with_a_dealer_tsumo(&mut game);
         game.drain_events();
         assert!(!game.is_over());
@@ -1159,6 +1207,82 @@ mod ending_match_tests {
             index += 1;
         }
         assert_eq!(game.round().wind, Wind::South, "南場で打ち切る");
+    }
+
+    /// 最終局で親がテンパイの荒牌平局なら、親がトップのとき終局する。
+    #[test]
+    fn a_tenpai_dealer_on_top_stops_the_match() {
+        let mut game = tonpuu();
+        game.drain_events();
+        for index in 1..=3u8 {
+            game.begin_round(&seed_of(index), 0);
+            game.drain_events();
+            game.force_scores([25_000; 4]);
+            finish_with_a_child_tsumo(&mut game);
+            game.drain_events();
+        }
+        game.begin_round(&seed_of(4), 0);
+        game.drain_events();
+        // 東4局の親は席3。テンパイにしてトップへ置く。
+        set_dealer_hand(game.round_state_mut(), "234567m23478p22s1z");
+        game.force_scores([20_000, 20_000, 20_000, 40_000]);
+        clear_nagashi(game.round_state_mut());
+        drain_the_wall(game.round_state_mut());
+        game.apply(
+            Seat::new(3),
+            Command::Discard {
+                tile: parse_tile("1z").expect("正しい記法"),
+                riichi: false,
+            },
+            1_000,
+        )
+        .expect("切れる");
+        game.tick(WAY_PAST_ANY_DEADLINE_MS);
+        game.drain_events();
+        assert!(game.is_over(), "テンパイ止め");
+    }
+
+    /// 途中流局では止まらない。親が続いてもアガリ止めではない。
+    #[test]
+    fn an_abortive_draw_never_stops_the_match() {
+        let mut game = tonpuu();
+        game.drain_events();
+        for index in 1..=3u8 {
+            game.begin_round(&seed_of(index), 0);
+            game.drain_events();
+            game.force_scores([25_000; 4]);
+            finish_with_a_child_tsumo(&mut game);
+            game.drain_events();
+        }
+        game.begin_round(&seed_of(4), 0);
+        game.drain_events();
+        set_dealer_hand(game.round_state_mut(), "19m19p19s12345677z");
+        game.force_scores([20_000, 20_000, 20_000, 40_000]);
+        game.apply(Seat::new(3), Command::Kyuushu, 1_000)
+            .expect("九種九牌を宣言できる");
+        game.drain_events();
+        assert!(!game.is_over(), "途中流局は止めない");
+    }
+
+    /// 最終局で親が流れれば、その時点で終局する。
+    #[test]
+    fn the_dealership_moving_on_the_last_round_ends_the_match() {
+        let mut game = tonpuu();
+        game.drain_events();
+        for index in 1..=3u8 {
+            game.begin_round(&seed_of(index), 0);
+            game.drain_events();
+            game.force_scores([25_000; 4]);
+            finish_with_a_child_tsumo(&mut game);
+            game.drain_events();
+        }
+        game.begin_round(&seed_of(4), 0);
+        game.drain_events();
+        // 誰かが返し点に届いている状態で親を流す。
+        game.force_scores([40_000, 20_000, 20_000, 20_000]);
+        finish_with_a_child_tsumo(&mut game);
+        game.drain_events();
+        assert!(game.is_over(), "最終局で親が流れたら終わり");
     }
 
     /// 東1局から終局まで、ツモ切りだけで通せる。
@@ -1306,9 +1430,13 @@ Expected: コンパイルエラー（`is_over` などが未定義）
             // 親が続く場合に止められるのは、親の和了と親テンパイの荒牌平局だけ。
             // **途中流局は止めない。**dealer_repeats は真だが、
             // アガリ止めでもテンパイ止めでもない。
+            // 流し満貫は荒牌平局の一種なので、テンパイ止めの対象に含める。
+            // 途中流局（AbortiveDraw）だけを除く。
             let can_stop = matches!(
                 outcome.reason,
-                ContinuationReason::DealerWin | ContinuationReason::DealerTenpai
+                ContinuationReason::DealerWin
+                    | ContinuationReason::DealerTenpai
+                    | ContinuationReason::NagashiMangan
             );
             // **同点は席順で決まる。**最高点と並んでいても、席順で下なら
             // トップではない。
@@ -1376,12 +1504,12 @@ fn placements_of(scores: &[i32; 4]) -> [u8; 4] {
 - [ ] **Step 4: テストが通ることを確認する**
 
 Run: `cargo test --package mahjong-engine ending_match_tests`
-Expected: 10テスト PASS
+Expected: 13テスト PASS
 
 - [ ] **Step 5: 既存のテストを壊していないことを確認する**
 
 Run: `cargo test --workspace && cargo clippy --all-targets -- -D warnings && cargo fmt --check`
-Expected: engine 291テスト PASS、警告ゼロ
+Expected: engine 294テスト PASS、警告ゼロ
 
 - [ ] **Step 6: コミット**
 
@@ -1394,7 +1522,7 @@ git commit -m "feat(engine): 終局と順位を実装"
 
 ## Wave 2f 完了の判定
 
-- [ ] `cargo test --workspace` が通る（engine 291テスト）
+- [ ] `cargo test --workspace` が通る（engine 294テスト）
 - [ ] `cargo clippy --all-targets -- -D warnings` が通る
 - [ ] `cargo fmt --check` が通る
 - [ ] 既存の262件を1つも壊していない
