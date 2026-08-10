@@ -72,8 +72,9 @@ while !game.is_over() {
 | 西入 | 最終局を終えて誰も `return_score`（30000）に届いていなければ、次の風へ延長する。半荘なら西場、東風戦なら南場 |
 | 延長中の終局 | 誰かが返し点へ届いた局の終わりで終局する |
 | 延長の打ち切り | 延長した風の4局を終えたら、誰も届いていなくても終局する。**連荘でも打ち切る。**無限に伸ばさない |
-| アガリ止め | 最終局で親が和了し、かつ親がトップなら続行しない |
-| テンパイ止め | 最終局の荒牌平局で親がテンパイし、かつ親がトップなら続行しない。**流し満貫も荒牌平局の一種なので含める** |
+| アガリ止め | **終局条件を満たしている最終局**で親が和了し、かつ親がトップなら続行しない |
+| テンパイ止め | 同じ条件の荒牌平局で親がテンパイし、かつ親がトップなら続行しない。**流し満貫も荒牌平局の一種なので含める** |
+| 止めが効かない場合 | 誰も返し点へ届いていなければ延長する。**そもそも半荘が終わらないので、止める場面ではない。**親がトップでも延長する |
 | 飛び | `Ruleset.busted_ends_match` が真で、誰かの持ち点が0未満になったら即終局 |
 | `MatchEnd.final_scores` | **素点をそのまま入れる。**ウマとオカはポイントの計算であって点棒ではない。段位とレートの計算は Wave 3 が `placements` から行う |
 | 順位 | 持ち点の多い順。同点は席順（起家に近いほう）が上位 |
@@ -218,6 +219,8 @@ mod match_tests {
         .expect("切れる");
         let events = game.drain_events();
         assert!(events.iter().any(|e| matches!(e, Event::Discard { .. })));
+        // 打牌のあとは反応の待ちに入るので、局はまだ終わっていない。
+        assert!(!game.needs_seed());
     }
 
     /// 局が始まっていなければコマンドは受け付けない。
@@ -978,6 +981,7 @@ mod ending_match_tests {
     use super::*;
     use protocol::command::Command;
     use protocol::notation::parse_tile;
+    use protocol::ruleset::MatchLength;
     use protocol::seat::Wind;
 
     /// 東風戦。4局で終わるので終局まで回しやすい。
@@ -1291,6 +1295,94 @@ mod ending_match_tests {
         assert!(game.is_over(), "最終局で親が流れたら終わり");
     }
 
+    /// 誰も返し点へ届いていなければ、親がトップで和了っても延長する。
+    ///
+    /// アガリ止めは「半荘が終わる場面で親が連荘を選ばない」規則である。
+    /// 延長するなら終わらないので、止める場面ではない。
+    #[test]
+    fn a_top_dealer_below_the_return_score_still_extends() {
+        let mut game = tonpuu();
+        game.drain_events();
+        for index in 1..=3u8 {
+            game.begin_round(&seed_of(index), 0);
+            game.drain_events();
+            game.force_scores([25_000; 4]);
+            finish_with_a_child_tsumo(&mut game);
+            game.drain_events();
+        }
+        game.begin_round(&seed_of(4), 0);
+        game.drain_events();
+        // 東4局の親（席3）を単独トップにする。ただし誰も30000点に届かない。
+        game.force_scores([24_000, 24_000, 24_000, 28_000]);
+        finish_with_a_dealer_tsumo(&mut game);
+        game.drain_events();
+
+        assert!(!game.is_over(), "誰も返し点へ届いていないので延長する");
+        assert_eq!(game.round().wind, Wind::South, "南入した");
+    }
+
+    /// 延長の途中でも、誰かが返し点へ届けばその局で終わる。
+    #[test]
+    fn reaching_the_return_score_ends_the_extension_early() {
+        let mut game = tonpuu();
+        game.drain_events();
+        for index in 1..=4u8 {
+            game.begin_round(&seed_of(index), 0);
+            game.drain_events();
+            game.force_scores([25_000; 4]);
+            finish_with_a_child_tsumo(&mut game);
+            game.drain_events();
+        }
+        assert_eq!(
+            game.round(),
+            Round {
+                wind: Wind::South,
+                number: 1
+            },
+            "南入している"
+        );
+
+        game.begin_round(&seed_of(5), 0);
+        game.drain_events();
+        game.force_scores([40_000, 20_000, 20_000, 20_000]);
+        finish_with_a_child_tsumo(&mut game);
+        game.drain_events();
+        assert!(game.is_over(), "南1局でも返し点に届いていれば終わる");
+    }
+
+    /// 半荘でも同じ条件で終局する。最終局の場風が違うだけである。
+    #[test]
+    fn a_hanchan_ends_on_its_own_last_round() {
+        let mut game = MatchEngine::start(
+            Ruleset::kin_no_ma(MatchLength::Hanchan),
+            players(),
+            0,
+        );
+        game.drain_events();
+        // 7局進めると南4局になる。
+        for index in 1..=7u8 {
+            game.begin_round(&seed_of(index), 0);
+            game.drain_events();
+            game.force_scores([25_000; 4]);
+            finish_with_a_child_tsumo(&mut game);
+            game.drain_events();
+        }
+        assert_eq!(
+            game.round(),
+            Round {
+                wind: Wind::South,
+                number: 4
+            }
+        );
+
+        game.begin_round(&seed_of(8), 0);
+        game.drain_events();
+        game.force_scores([40_000, 20_000, 20_000, 20_000]);
+        finish_with_a_child_tsumo(&mut game);
+        game.drain_events();
+        assert!(game.is_over(), "南4局で誰かが届いていれば終わる");
+    }
+
     /// 延長した風の4局目は、親が連荘しても打ち切る。
     ///
     /// **返し点に届いた者がいる場合の枝を通す。**打ち切りを返し点の枝の
@@ -1552,12 +1644,12 @@ fn placements_of(scores: &[i32; 4]) -> [u8; 4] {
 - [ ] **Step 4: テストが通ることを確認する**
 
 Run: `cargo test --package mahjong-engine ending_match_tests`
-Expected: 14テスト PASS
+Expected: 17テスト PASS
 
 - [ ] **Step 5: 既存のテストを壊していないことを確認する**
 
 Run: `cargo test --workspace && cargo clippy --all-targets -- -D warnings && cargo fmt --check`
-Expected: engine 295テスト PASS、警告ゼロ
+Expected: engine 298テスト PASS、警告ゼロ
 
 - [ ] **Step 6: コミット**
 
@@ -1570,7 +1662,7 @@ git commit -m "feat(engine): 終局と順位を実装"
 
 ## Wave 2f 完了の判定
 
-- [ ] `cargo test --workspace` が通る（engine 295テスト）
+- [ ] `cargo test --workspace` が通る（engine 298テスト）
 - [ ] `cargo clippy --all-targets -- -D warnings` が通る
 - [ ] `cargo fmt --check` が通る
 - [ ] 既存の262件を1つも壊していない
