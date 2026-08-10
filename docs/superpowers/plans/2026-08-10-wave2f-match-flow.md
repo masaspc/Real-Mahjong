@@ -301,11 +301,27 @@ mod match_tests {
         assert!(game.last_outcome().expect("終わっている").was_draw);
     }
 
-    /// 親のツモ和了で局を終わらせる。
+    /// いまの親にツモ和了させて局を終わらせる。
+    ///
+    /// **席0を決め打ちしない。**局が進むと親は移る。
+    /// イベントは drain しない。呼び出し側が `RoundEnd` を読むためである。
     pub(super) fn finish_with_a_dealer_tsumo(game: &mut MatchEngine) {
-        make_tenpai(game.round_state_mut(), Seat::new(0));
-        game.force_draw_turn(Seat::new(0), parse_tile("6p").expect("正しい記法"));
-        game.apply(Seat::new(0), Command::Tsumo, 2_000)
+        let dealer = game.round_state().dealer;
+        make_tenpai(game.round_state_mut(), dealer);
+        game.force_draw_turn(dealer, parse_tile("6p").expect("正しい記法"));
+        game.apply(dealer, Command::Tsumo, 2_000)
+            .expect("ツモ和了できる");
+    }
+
+    /// いまの親の下家にツモ和了させる。親が流れる。
+    ///
+    /// こちらもイベントは drain しない。
+    pub(super) fn finish_with_a_child_tsumo(game: &mut MatchEngine) {
+        let dealer = game.round_state().dealer;
+        let child = Seat::new(((dealer.index() + 1) % 4) as u8);
+        make_tenpai(game.round_state_mut(), child);
+        game.force_draw_turn(child, parse_tile("6p").expect("正しい記法"));
+        game.apply(child, Command::Tsumo, 2_000)
             .expect("ツモ和了できる");
     }
 }
@@ -543,7 +559,9 @@ git commit -m "feat(engine): 半荘の骨格と局への委譲を実装"
 mod progression_tests {
     use super::discard_tests::WAY_PAST_ANY_DEADLINE_MS;
     use super::ending_tests::{clear_nagashi, drain_the_wall, set_dealer_hand};
-    use super::match_tests::{finish_with_a_dealer_tsumo, hanchan, seed_of};
+    use super::match_tests::{
+        finish_with_a_child_tsumo, finish_with_a_dealer_tsumo, hanchan, seed_of,
+    };
     use super::*;
     use protocol::command::Command;
     use protocol::notation::parse_tile;
@@ -552,17 +570,6 @@ mod progression_tests {
     /// 局を1つ始める。
     fn begin(game: &mut MatchEngine, index: u8) {
         game.begin_round(&seed_of(index), 0);
-        game.drain_events();
-    }
-
-    /// 子のツモ和了で終わらせる。親が流れる。
-    fn finish_with_a_child_tsumo(game: &mut MatchEngine) {
-        let seat = game.round_state().dealer;
-        let child = Seat::new(((seat.index() + 1) % 4) as u8);
-        super::ending_tests::make_tenpai(game.round_state_mut(), child);
-        game.force_draw_turn(child, parse_tile("6p").expect("正しい記法"));
-        game.apply(child, Command::Tsumo, 2_000)
-            .expect("ツモ和了できる");
         game.drain_events();
     }
 
@@ -797,10 +804,7 @@ Expected: テストの失敗（`next` が `MatchOver` のまま）
             0
         };
 
-        if !outcome.dealer_repeats {
-            self.dealer = Seat::new(((self.dealer.index() + 1) % 4) as u8);
-            self.advance_round();
-        }
+        self.advance_seat_and_round(&outcome);
 
         let next = NextRound::Next {
             round: self.round,
@@ -817,10 +821,16 @@ Expected: テストの失敗（`next` が `MatchOver` のまま）
         let _ = now_ms;
     }
 
-    /// 局を1つ進める。4局を超えたら次の風の1局へ移る。
+    /// 親と局を次へ進める。
     ///
-    /// 西入するかどうかはここでは決めない。最終局を越えたことだけを扱う。
-    fn advance_round(&mut self) {
+    /// **切り出しておく。**Task 3 が終局を判定する位置は、これを呼ぶ前で
+    /// なければならない。先に進めると、東4局の子和了を南1局として
+    /// 判定してしまう。
+    fn advance_seat_and_round(&mut self, outcome: &RoundOutcome) {
+        if outcome.dealer_repeats {
+            return;
+        }
+        self.dealer = Seat::new(((self.dealer.index() + 1) % 4) as u8);
         if self.round.number < 4 {
             self.round.number += 1;
             return;
@@ -850,6 +860,17 @@ fn next_wind(wind: Wind) -> Wind {
     #[cfg(test)]
     pub(crate) fn round_dealer(&self) -> Seat {
         self.dealer
+    }
+
+    /// テストが持ち点を直接置くための入口。半荘側と局側の両方へ書く。
+    #[cfg(test)]
+    pub(crate) fn force_scores(&mut self, scores: [i32; 4]) {
+        self.scores = scores;
+        self.engine
+            .as_mut()
+            .expect("局が動いている")
+            .state_mut()
+            .scores = scores;
     }
 
     /// フィールドと同じ名前にすると、どちらを指しているか読めなくなる。
@@ -900,7 +921,9 @@ git commit -m "feat(engine): 連荘と本場と局の進み方を実装"
 mod ending_match_tests {
     use super::discard_tests::WAY_PAST_ANY_DEADLINE_MS;
     use super::ending_tests::{clear_nagashi, drain_the_wall, make_tenpai, set_dealer_hand};
-    use super::match_tests::{finish_with_a_dealer_tsumo, players, seed_of};
+    use super::match_tests::{
+        finish_with_a_child_tsumo, finish_with_a_dealer_tsumo, players, seed_of,
+    };
     use super::*;
     use protocol::command::Command;
     use protocol::notation::parse_tile;
@@ -914,16 +937,6 @@ mod ending_match_tests {
             players(),
             0,
         )
-    }
-
-    fn finish_with_a_child_tsumo(game: &mut MatchEngine) {
-        let dealer = game.round_state().dealer;
-        let child = Seat::new(((dealer.index() + 1) % 4) as u8);
-        make_tenpai(game.round_state_mut(), child);
-        game.force_draw_turn(child, parse_tile("6p").expect("正しい記法"));
-        game.apply(child, Command::Tsumo, 2_000)
-            .expect("ツモ和了できる");
-        game.drain_events();
     }
 
     fn match_end_of(events: &[Event]) -> ([i32; 4], [u8; 4]) {
@@ -940,21 +953,32 @@ mod ending_match_tests {
         (final_scores, placements)
     }
 
-    /// 東4局が終わり、誰かが返し点に届いていれば終局する。
+    /// 東4局まで進め、親をトップにしてから親に和了らせる。
+    ///
+    /// **持ち点を毎局そろえる。**配牌任せにすると、途中で誰かが返し点へ
+    /// 届いて予定より早く終局し、テストがシードに依存する。
+    fn run_to_the_end(game: &mut MatchEngine) {
+        for index in 1..=3u8 {
+            game.begin_round(&seed_of(index), 0);
+            game.drain_events();
+            game.force_scores([25_000; 4]);
+            finish_with_a_child_tsumo(game);
+            game.drain_events();
+        }
+        game.begin_round(&seed_of(4), 0);
+        game.drain_events();
+        // 3回親が流れたので、東4局の親は席3。トップにしてアガリ止めを起こす。
+        assert_eq!(game.round_dealer(), Seat::new(3));
+        game.force_scores([20_000, 20_000, 20_000, 40_000]);
+        finish_with_a_dealer_tsumo(game);
+    }
+
+    /// 東4局で親がトップのまま和了れば終局する。
     #[test]
     fn the_match_ends_after_its_last_round() {
         let mut game = tonpuu();
         game.drain_events();
-        // 親を3回流したあと、4局目の親に大きく和了らせる。
-        for index in 1..=3u8 {
-            game.begin_round(&seed_of(index), 0);
-            game.drain_events();
-            finish_with_a_child_tsumo(&mut game);
-        }
-        game.begin_round(&seed_of(4), 0);
-        game.drain_events();
-        // 東4局。親が和了ればアガリ止めで終局する。
-        finish_with_a_dealer_tsumo(&mut game);
+        run_to_the_end(&mut game);
         let events = game.drain_events();
 
         assert!(game.is_over());
@@ -974,10 +998,13 @@ mod ending_match_tests {
                 !events.iter().any(|e| matches!(e, Event::SeedReveal { .. })),
                 "局の途中で開示してはならない"
             );
+            game.force_scores([25_000; 4]);
             finish_with_a_child_tsumo(&mut game);
+            game.drain_events();
         }
         game.begin_round(&seed_of(4), 0);
         game.drain_events();
+        game.force_scores([20_000, 20_000, 20_000, 40_000]);
         finish_with_a_dealer_tsumo(&mut game);
 
         let events = game.drain_events();
@@ -997,14 +1024,7 @@ mod ending_match_tests {
     fn a_finished_match_takes_nothing_more() {
         let mut game = tonpuu();
         game.drain_events();
-        for index in 1..=3u8 {
-            game.begin_round(&seed_of(index), 0);
-            game.drain_events();
-            finish_with_a_child_tsumo(&mut game);
-        }
-        game.begin_round(&seed_of(4), 0);
-        game.drain_events();
-        finish_with_a_dealer_tsumo(&mut game);
+        run_to_the_end(&mut game);
         game.drain_events();
 
         assert!(!game.needs_seed(), "終局したのでシードは要らない");
@@ -1019,22 +1039,13 @@ mod ending_match_tests {
     fn placements_follow_the_scores() {
         let mut game = tonpuu();
         game.drain_events();
-        for index in 1..=3u8 {
-            game.begin_round(&seed_of(index), 0);
-            game.drain_events();
-            finish_with_a_child_tsumo(&mut game);
-        }
-        game.begin_round(&seed_of(4), 0);
-        game.drain_events();
-        finish_with_a_dealer_tsumo(&mut game);
+        run_to_the_end(&mut game);
         let events = game.drain_events();
 
         let (scores, placements) = match_end_of(&events);
-        // 順位は1から4まで1つずつ。
         let mut sorted = placements;
         sorted.sort_unstable();
-        assert_eq!(sorted, [1, 2, 3, 4]);
-        // 持ち点が多いほど順位が上。
+        assert_eq!(sorted, [1, 2, 3, 4], "順位は1から4まで1つずつ");
         for a in 0..4 {
             for b in 0..4 {
                 if scores[a] > scores[b] {
@@ -1052,20 +1063,23 @@ mod ending_match_tests {
         for index in 1..=3u8 {
             game.begin_round(&seed_of(index), 0);
             game.drain_events();
+            game.force_scores([25_000; 4]);
             finish_with_a_child_tsumo(&mut game);
+            game.drain_events();
         }
         game.begin_round(&seed_of(4), 0);
         game.drain_events();
-        // 持ち点を全員同じにしてから終わらせる。
+        // 東4局の親は席3。全員同点から親だけが和了る。
         game.force_scores([25_000; 4]);
         finish_with_a_dealer_tsumo(&mut game);
         let events = game.drain_events();
 
         let (_, placements) = match_end_of(&events);
-        // 和了した親だけが増えるので、残り3人が同点になる。
-        assert_eq!(placements[0], 1);
-        assert!(placements[1] < placements[2]);
-        assert!(placements[2] < placements[3]);
+        assert_eq!(placements[3], 1, "和了した親が単独トップ");
+        // 残りは同点なので席順。
+        assert_eq!(placements[0], 2);
+        assert_eq!(placements[1], 3);
+        assert_eq!(placements[2], 4);
     }
 
     /// 誰かが0点未満になったら即終局する。
@@ -1076,6 +1090,7 @@ mod ending_match_tests {
         game.begin_round(&seed_of(1), 0);
         game.drain_events();
         // 席1を大きく減らしてから親に和了らせる。
+        // 親のツモは子から1300点ずつ取る。席1は500点しかないので飛ぶ。
         game.force_scores([25_000, 500, 25_000, 25_000]);
         finish_with_a_dealer_tsumo(&mut game);
         let events = game.drain_events();
@@ -1113,11 +1128,13 @@ mod ending_match_tests {
         for index in 1..=3u8 {
             game.begin_round(&seed_of(index), 0);
             game.drain_events();
+            game.force_scores([25_000; 4]);
             finish_with_a_child_tsumo(&mut game);
+            game.drain_events();
         }
         game.begin_round(&seed_of(4), 0);
         game.drain_events();
-        // 親を最下位にしてから和了らせる。小さな手ではトップに届かない。
+        // 親（席3）を最下位にしてから和了らせる。小さな手ではトップに届かない。
         game.force_scores([1_000, 50_000, 25_000, 24_000]);
         finish_with_a_dealer_tsumo(&mut game);
         game.drain_events();
@@ -1151,7 +1168,9 @@ mod ending_match_tests {
         game.drain_events();
         let mut now = 1_000u64;
         let mut seed_index = 1u8;
-        for _ in 0..400 {
+        // 1局は最大で 70 ツモ前後あり、`tick` は打牌と反応を別々に進める。
+        // 東風戦が延長まで伸びると8局になるので、余裕をもって上限を置く。
+        for _ in 0..5_000 {
             if game.is_over() {
                 break;
             }
@@ -1228,58 +1247,83 @@ Expected: コンパイルエラー（`is_over` などが未定義）
     }
 ```
 
-`close_round` の末尾で終局を判定する。
+**`close_round` を書き換える。**判定は**終わった局の `round` と `dealer` で
+行い、`advance_seat_and_round` を呼ぶ前**に置く。先に進めると、東4局の
+子和了が南1局として判定され、最終局を見失う。
 
 ```rust
-        if let Some(reason) = self.ending_reason(&outcome) {
-            let _ = reason;
+    fn close_round(&mut self, outcome: RoundOutcome, now_ms: u64) {
+        self.scores = outcome.scores;
+        self.riichi_sticks = outcome.riichi_sticks;
+        self.honba = if outcome.was_draw || outcome.dealer_repeats {
+            self.honba + 1
+        } else {
+            0
+        };
+        self.last_reason = outcome.reason;
+
+        // **ここで判定する。**round と dealer はまだ終わった局のものである。
+        if self.should_end(&outcome) {
             self.finish_match();
             self.last_outcome = Some(outcome);
+            let _ = now_ms;
             return;
         }
-```
 
-**`RoundEnd` を出すより前に判定する。**終局なら `next` は `MatchOver` に
-なるためである。順序は「持ち点の取り込み → 終局判定 → RoundEnd → MatchEnd」。
-
-```rust
-    /// 終局する理由。続くなら None。
-    ///
-    /// 判定の順は決めておく。同時に立ちうるので、固定しないと同じ入力から
-    /// 違う結果が出る。
-    fn ending_reason(&self, outcome: &RoundOutcome) -> Option<&'static str> {
-        // 飛び。持ち点が0未満になったら即終局する。
-        if self.rules.busted_ends_match && self.scores.iter().any(|s| *s < 0) {
-            return Some("飛び");
-        }
-        if !self.is_last_round() {
-            return None;
-        }
-        // 最終局。誰かが返し点に届いていれば終わる。
-        if self.scores.iter().any(|s| *s >= self.rules.return_score) {
-            // アガリ止め・テンパイ止め。親がトップなら続けない。
-            // 親が流れるなら、そもそも次の局は無い。
-            if !outcome.dealer_repeats || self.dealer_is_leading() {
-                return Some("最終局の終了");
-            }
-            return None;
-        }
-        // 誰も届いていない。延長した風の4局まで来ていたら打ち切る。
-        if self.round.wind == extension_wind(self.rules.length) {
-            return Some("延長の打ち切り");
-        }
-        None
+        self.advance_seat_and_round(&outcome);
+        self.pending.push(Event::RoundEnd {
+            scores: self.scores,
+            next: NextRound::Next {
+                round: self.round,
+                dealer: self.dealer,
+                honba: self.honba,
+                riichi_sticks: self.riichi_sticks,
+            },
+            reason: outcome.reason,
+        });
+        self.last_outcome = Some(outcome);
+        let _ = now_ms;
     }
 
+    /// 終局するか。
+    ///
+    /// 判定の順を固定する。同時に立ちうるので、決めておかないと同じ入力から
+    /// 違う結果が出る。
+    fn should_end(&self, outcome: &RoundOutcome) -> bool {
+        // 飛び。最優先で、局の途中でも終わる。
+        if self.rules.busted_ends_match && self.scores.iter().any(|s| *s < 0) {
+            return true;
+        }
+        if !self.is_last_round() {
+            return false;
+        }
+
+        if self.scores.iter().any(|s| *s >= self.rules.return_score) {
+            // 親が流れるなら、この風の4局目なのでもう局は無い。
+            if !outcome.dealer_repeats {
+                return true;
+            }
+            // 親が続く場合に止められるのは、親の和了と親テンパイの荒牌平局だけ。
+            // **途中流局は止めない。**dealer_repeats は真だが、
+            // アガリ止めでもテンパイ止めでもない。
+            let can_stop = matches!(
+                outcome.reason,
+                ContinuationReason::DealerWin | ContinuationReason::DealerTenpai
+            );
+            // **同点は席順で決まる。**最高点と並んでいても、席順で下なら
+            // トップではない。
+            return can_stop && placements_of(&self.scores)[self.dealer.index()] == 1;
+        }
+
+        // 誰も返し点に届いていない。延長した風まで来ていたら打ち切る。
+        self.round.wind == extension_wind(self.rules.length)
+    }
+
+    /// その風の4局目で、かつ最終局か延長局であること。
     fn is_last_round(&self) -> bool {
         self.round.number == 4
             && (self.round.wind == last_wind(self.rules.length)
                 || self.round.wind == extension_wind(self.rules.length))
-    }
-
-    fn dealer_is_leading(&self) -> bool {
-        let top = self.scores.iter().copied().max().unwrap_or(0);
-        self.scores[self.dealer.index()] == top
     }
 
     /// 半荘を閉じる。

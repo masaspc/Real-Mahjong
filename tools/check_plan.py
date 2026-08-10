@@ -175,6 +175,7 @@ def target_files(text, base):
 
 def scope_of_source(source):
     """ソースが親モジュールへ持ち込む名前。"""
+    source = join_multiline_uses(source)
     names = set()
     inside_test = False
     for line in source.split("\n"):
@@ -194,6 +195,20 @@ def test_modules(text):
     """`mod xxx_tests { ... }` の範囲を (開始オフセット, 名前, 中身) で返す。"""
     for m in re.finditer(r"^mod (\w+) \{\n(.*?)^\}", text, re.S | re.M):
         yield m.start(), m.group(1), m.group(2)
+
+
+def join_multiline_uses(text):
+    """複数行にまたがる `use a::{\n b,\n c,\n};` を1行へ畳む。
+
+    行ごとに読む検査が、折り返した use を見落として本物の import を
+    「解決できない」と誤判定するのを防ぐ。
+    """
+    return re.sub(
+        r"use\s+[\w:]+::\{[^}]*\};",
+        lambda m: " ".join(m.group(0).split()),
+        text,
+        flags=re.S,
+    )
 
 
 def names_from_use(line):
@@ -218,6 +233,7 @@ def check_unresolved_calls(text, base="."):
     `use super::*;` は親の私有 use も取り込むので、親の import も許す。
     兄弟モジュールの項目は取り込まれないため、明示 use が無ければ落ちる。
     """
+    text = join_multiline_uses(text)
     module_spans = [(start, start + len(body)) for start, _, body in test_modules(text)]
 
     def in_module(offset):
@@ -272,6 +288,7 @@ def check_unresolved_types(text, base="."):
     識別子だけを見て、モジュール自身の use・親の use・親の定義・標準の型の
     いずれにも無いものを報告する。
     """
+    text = join_multiline_uses(text)
     module_spans = [(start, start + len(body)) for start, _, body in test_modules(text)]
 
     def in_module(offset):
