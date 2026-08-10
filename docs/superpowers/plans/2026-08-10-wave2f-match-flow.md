@@ -980,7 +980,7 @@ mod ending_match_tests {
     };
     use super::*;
     use protocol::command::Command;
-    use protocol::notation::parse_tile;
+    use protocol::notation::{parse_hand, parse_tile};
     use protocol::ruleset::MatchLength;
     use protocol::seat::Wind;
 
@@ -991,6 +991,38 @@ mod ending_match_tests {
             players(),
             0,
         )
+    }
+
+    /// 全員ノーテンの荒牌平局で局を終える。
+    ///
+    /// **和了で局を送ると点棒が動く。**その額はドラ次第で変わるので、
+    /// 「誰も返し点へ届かないまま何局も進める」テストが配牌に依存する。
+    /// 全員ノーテンの流局なら点棒はまったく動かない。
+    fn finish_with_a_noten_draw(game: &mut MatchEngine) {
+        let dealer = game.round_state().dealer;
+        // 親は14枚、子は13枚。どちらも対子も塔子も無い散らばった形にする。
+        game.round_state_mut().seat_mut(dealer).hand =
+            parse_hand("147m258p369s12345z").expect("正しい記法");
+        for seat in Seat::ALL {
+            if seat == dealer {
+                continue;
+            }
+            game.round_state_mut().seat_mut(seat).hand =
+                parse_hand("147m258p369s1234z").expect("正しい記法");
+        }
+        clear_nagashi(game.round_state_mut());
+        drain_the_wall(game.round_state_mut());
+        game.apply(
+            dealer,
+            Command::Discard {
+                tile: parse_tile("5z").expect("正しい記法"),
+                riichi: false,
+            },
+            1_000,
+        )
+        .expect("切れる");
+        game.tick(WAY_PAST_ANY_DEADLINE_MS);
+        game.drain_events();
     }
 
     fn match_end_of(events: &[Event]) -> ([i32; 4], [u8; 4]) {
@@ -1015,9 +1047,7 @@ mod ending_match_tests {
         for index in 1..=3u8 {
             game.begin_round(&seed_of(index), 0);
             game.drain_events();
-            game.force_scores([25_000; 4]);
-            finish_with_a_child_tsumo(game);
-            game.drain_events();
+            finish_with_a_noten_draw(game);
         }
         game.begin_round(&seed_of(4), 0);
         game.drain_events();
@@ -1052,11 +1082,10 @@ mod ending_match_tests {
                 !events.iter().any(|e| matches!(e, Event::SeedReveal { .. })),
                 "局の途中で開示してはならない"
             );
-            game.force_scores([25_000; 4]);
-            finish_with_a_child_tsumo(&mut game);
+            finish_with_a_noten_draw(&mut game);
             let ended = game.drain_events();
             assert!(
-                !ended.iter().any(|e| matches!(e, Event::SeedReveal { .. })),
+                ended.is_empty() || !ended.iter().any(|e| matches!(e, Event::SeedReveal { .. })),
                 "局の終わりにも開示してはならない"
             );
         }
@@ -1114,27 +1143,22 @@ mod ending_match_tests {
     }
 
     /// 同点は席順で決まる。起家に近いほうが上位。
+    ///
+    /// `run_to_the_end` は親を40,000点にしてから和了らせるので、
+    /// 和了額がドラで変わっても親は単独トップのまま終局する。
+    /// 子3人は同じ20,000点から同じ額を払うので同点になる。
     #[test]
     fn a_tie_is_broken_by_seat_order() {
         let mut game = tonpuu();
         game.drain_events();
-        for index in 1..=3u8 {
-            game.begin_round(&seed_of(index), 0);
-            game.drain_events();
-            game.force_scores([25_000; 4]);
-            finish_with_a_child_tsumo(&mut game);
-            game.drain_events();
-        }
-        game.begin_round(&seed_of(4), 0);
-        game.drain_events();
-        // 東4局の親は席3。全員同点から親だけが和了る。
-        game.force_scores([25_000; 4]);
-        finish_with_a_dealer_tsumo(&mut game);
+        run_to_the_end(&mut game);
         let events = game.drain_events();
 
-        let (_, placements) = match_end_of(&events);
+        let (scores, placements) = match_end_of(&events);
         assert_eq!(placements[3], 1, "和了した親が単独トップ");
-        // 残りは同点なので席順。
+        assert_eq!(scores[0], scores[1], "子は同点");
+        assert_eq!(scores[1], scores[2]);
+        // 同点なので席順。
         assert_eq!(placements[0], 2);
         assert_eq!(placements[1], 3);
         assert_eq!(placements[2], 4);
@@ -1183,15 +1207,7 @@ mod ending_match_tests {
     fn a_dealer_win_without_the_lead_keeps_the_match_going() {
         let mut game = tonpuu();
         game.drain_events();
-        for index in 1..=3u8 {
-            game.begin_round(&seed_of(index), 0);
-            game.drain_events();
-            game.force_scores([25_000; 4]);
-            finish_with_a_child_tsumo(&mut game);
-            game.drain_events();
-        }
-        game.begin_round(&seed_of(4), 0);
-        game.drain_events();
+        run_to_the_last_round(&mut game, 4);
         // 親（席3）を最下位にしてから和了らせる。小さな手ではトップに届かない。
         game.force_scores([1_000, 50_000, 25_000, 24_000]);
         finish_with_a_dealer_tsumo(&mut game);
@@ -1199,24 +1215,38 @@ mod ending_match_tests {
         assert!(!game.is_over(), "アガリ止めはトップのときだけ");
     }
 
-    /// 延長した風の4局を終えたら、誰も届いていなくても終局する。
+    /// 延長は無限に伸びない。
+    ///
+    /// 点棒を動かさない流局だけで送るので、誰も返し点へ届かない。
+    /// それでも東風戦は南4局で打ち切られる。
     #[test]
     fn the_extension_does_not_go_on_forever() {
         let mut game = tonpuu();
         game.drain_events();
-        // 東4局まで進めても誰も返し点に届かなければ南入し、
-        // 南4局を終えたところで打ち切る。
-        let mut index = 1u8;
+        let mut rounds = 0u32;
         while !game.is_over() {
-            assert!(index < 40, "終局しない");
-            game.begin_round(&seed_of(index % 200), 0);
+            rounds += 1;
+            assert!(rounds < 40, "終局しない");
+            game.begin_round(&seed_of((rounds % 200) as u8), 0);
             game.drain_events();
-            game.force_scores([25_000; 4]);
-            finish_with_a_child_tsumo(&mut game);
-            game.drain_events();
-            index += 1;
+            finish_with_a_noten_draw(&mut game);
         }
-        assert_eq!(game.round().wind, Wind::South, "南場で打ち切る");
+        assert_eq!(rounds, 8, "東4局＋南4局で打ち切る");
+        assert_eq!(game.round().wind, Wind::South);
+        assert_eq!(game.scores(), [25_000; 4], "点棒は動いていない");
+    }
+
+    /// 3局を点棒の動かない流局で送り、東4局へ入る。親は席3になる。
+    fn run_to_the_last_round(game: &mut MatchEngine, seed_index: u8) {
+        for index in 1..=3u8 {
+            game.begin_round(&seed_of(index), 0);
+            game.drain_events();
+            finish_with_a_noten_draw(game);
+        }
+        game.begin_round(&seed_of(seed_index), 0);
+        game.drain_events();
+        assert_eq!(game.round_dealer(), Seat::new(3));
+        assert_eq!(game.round().number, 4);
     }
 
     /// 最終局で親がテンパイの荒牌平局なら、親がトップのとき終局する。
@@ -1224,17 +1254,13 @@ mod ending_match_tests {
     fn a_tenpai_dealer_on_top_stops_the_match() {
         let mut game = tonpuu();
         game.drain_events();
-        for index in 1..=3u8 {
-            game.begin_round(&seed_of(index), 0);
-            game.drain_events();
-            game.force_scores([25_000; 4]);
-            finish_with_a_child_tsumo(&mut game);
-            game.drain_events();
-        }
-        game.begin_round(&seed_of(4), 0);
-        game.drain_events();
-        // 東4局の親は席3。テンパイにしてトップへ置く。
+        run_to_the_last_round(&mut game, 4);
+
         set_dealer_hand(game.round_state_mut(), "234567m23478p22s1z");
+        for child in [Seat::new(0), Seat::new(1), Seat::new(2)] {
+            game.round_state_mut().seat_mut(child).hand =
+                parse_hand("147m258p369s1234z").expect("正しい記法");
+        }
         game.force_scores([20_000, 20_000, 20_000, 40_000]);
         clear_nagashi(game.round_state_mut());
         drain_the_wall(game.round_state_mut());
@@ -1252,20 +1278,52 @@ mod ending_match_tests {
         assert!(game.is_over(), "テンパイ止め");
     }
 
+    /// 誰も返し点へ届いていなければ、親がトップでも延長する。
+    ///
+    /// アガリ止めは「半荘が終わる場面で親が連荘を選ばない」規則である。
+    /// 延長するなら終わらないので、止める場面ではない。
+    ///
+    /// **和了ではなく荒牌平局で作る。**和了の点数はドラ次第で変わるので、
+    /// 「30000点に届かない」という境界を置けない。テンパイ料なら
+    /// 親 +3000 / 子 各 -1000 と決まる。
+    #[test]
+    fn a_top_dealer_below_the_return_score_still_extends() {
+        let mut game = tonpuu();
+        game.drain_events();
+        run_to_the_last_round(&mut game, 4);
+
+        set_dealer_hand(game.round_state_mut(), "234567m23478p22s1z");
+        for child in [Seat::new(0), Seat::new(1), Seat::new(2)] {
+            game.round_state_mut().seat_mut(child).hand =
+                parse_hand("147m258p369s1234z").expect("正しい記法");
+        }
+        game.force_scores([25_000; 4]);
+        clear_nagashi(game.round_state_mut());
+        drain_the_wall(game.round_state_mut());
+        game.apply(
+            Seat::new(3),
+            Command::Discard {
+                tile: parse_tile("1z").expect("正しい記法"),
+                riichi: false,
+            },
+            1_000,
+        )
+        .expect("切れる");
+        game.tick(WAY_PAST_ANY_DEADLINE_MS);
+        game.drain_events();
+
+        assert_eq!(game.scores(), [24_000, 24_000, 24_000, 28_000]);
+        assert!(!game.is_over(), "誰も返し点へ届いていないので延長する");
+        assert_eq!(game.round().wind, Wind::South, "南入した");
+    }
+
     /// 途中流局では止まらない。親が続いてもアガリ止めではない。
     #[test]
     fn an_abortive_draw_never_stops_the_match() {
         let mut game = tonpuu();
         game.drain_events();
-        for index in 1..=3u8 {
-            game.begin_round(&seed_of(index), 0);
-            game.drain_events();
-            game.force_scores([25_000; 4]);
-            finish_with_a_child_tsumo(&mut game);
-            game.drain_events();
-        }
-        game.begin_round(&seed_of(4), 0);
-        game.drain_events();
+        run_to_the_last_round(&mut game, 4);
+
         set_dealer_hand(game.round_state_mut(), "19m19p19s12345677z");
         game.force_scores([20_000, 20_000, 20_000, 40_000]);
         game.apply(Seat::new(3), Command::Kyuushu, 1_000)
@@ -1279,46 +1337,12 @@ mod ending_match_tests {
     fn the_dealership_moving_on_the_last_round_ends_the_match() {
         let mut game = tonpuu();
         game.drain_events();
-        for index in 1..=3u8 {
-            game.begin_round(&seed_of(index), 0);
-            game.drain_events();
-            game.force_scores([25_000; 4]);
-            finish_with_a_child_tsumo(&mut game);
-            game.drain_events();
-        }
-        game.begin_round(&seed_of(4), 0);
-        game.drain_events();
-        // 誰かが返し点に届いている状態で親を流す。
+        run_to_the_last_round(&mut game, 4);
+
         game.force_scores([40_000, 20_000, 20_000, 20_000]);
         finish_with_a_child_tsumo(&mut game);
         game.drain_events();
         assert!(game.is_over(), "最終局で親が流れたら終わり");
-    }
-
-    /// 誰も返し点へ届いていなければ、親がトップで和了っても延長する。
-    ///
-    /// アガリ止めは「半荘が終わる場面で親が連荘を選ばない」規則である。
-    /// 延長するなら終わらないので、止める場面ではない。
-    #[test]
-    fn a_top_dealer_below_the_return_score_still_extends() {
-        let mut game = tonpuu();
-        game.drain_events();
-        for index in 1..=3u8 {
-            game.begin_round(&seed_of(index), 0);
-            game.drain_events();
-            game.force_scores([25_000; 4]);
-            finish_with_a_child_tsumo(&mut game);
-            game.drain_events();
-        }
-        game.begin_round(&seed_of(4), 0);
-        game.drain_events();
-        // 東4局の親（席3）を単独トップにする。ただし誰も30000点に届かない。
-        game.force_scores([24_000, 24_000, 24_000, 28_000]);
-        finish_with_a_dealer_tsumo(&mut game);
-        game.drain_events();
-
-        assert!(!game.is_over(), "誰も返し点へ届いていないので延長する");
-        assert_eq!(game.round().wind, Wind::South, "南入した");
     }
 
     /// 延長の途中でも、誰かが返し点へ届けばその局で終わる。
@@ -1329,9 +1353,7 @@ mod ending_match_tests {
         for index in 1..=4u8 {
             game.begin_round(&seed_of(index), 0);
             game.drain_events();
-            game.force_scores([25_000; 4]);
-            finish_with_a_child_tsumo(&mut game);
-            game.drain_events();
+            finish_with_a_noten_draw(&mut game);
         }
         assert_eq!(
             game.round(),
@@ -1350,54 +1372,15 @@ mod ending_match_tests {
         assert!(game.is_over(), "南1局でも返し点に届いていれば終わる");
     }
 
-    /// 半荘でも同じ条件で終局する。最終局の場風が違うだけである。
-    #[test]
-    fn a_hanchan_ends_on_its_own_last_round() {
-        let mut game = MatchEngine::start(
-            Ruleset::kin_no_ma(MatchLength::Hanchan),
-            players(),
-            0,
-        );
-        game.drain_events();
-        // 7局進めると南4局になる。
-        for index in 1..=7u8 {
-            game.begin_round(&seed_of(index), 0);
-            game.drain_events();
-            game.force_scores([25_000; 4]);
-            finish_with_a_child_tsumo(&mut game);
-            game.drain_events();
-        }
-        assert_eq!(
-            game.round(),
-            Round {
-                wind: Wind::South,
-                number: 4
-            }
-        );
-
-        game.begin_round(&seed_of(8), 0);
-        game.drain_events();
-        game.force_scores([40_000, 20_000, 20_000, 20_000]);
-        finish_with_a_child_tsumo(&mut game);
-        game.drain_events();
-        assert!(game.is_over(), "南4局で誰かが届いていれば終わる");
-    }
-
     /// 延長した風の4局目は、親が連荘しても打ち切る。
-    ///
-    /// **返し点に届いた者がいる場合の枝を通す。**打ち切りを返し点の枝の
-    /// 中に置くと、この経路で終局せず同じ局を繰り返し続ける。
     #[test]
     fn the_extension_stops_even_on_a_dealer_repeat() {
         let mut game = tonpuu();
         game.drain_events();
-        // 7局進めると南4局・親は席3になる（東4局＋南3局ぶん親が流れる）。
         for index in 1..=7u8 {
             game.begin_round(&seed_of(index), 0);
             game.drain_events();
-            game.force_scores([25_000; 4]);
-            finish_with_a_child_tsumo(&mut game);
-            game.drain_events();
+            finish_with_a_noten_draw(&mut game);
         }
         assert_eq!(
             game.round(),
@@ -1416,6 +1399,36 @@ mod ending_match_tests {
         finish_with_a_dealer_tsumo(&mut game);
         game.drain_events();
         assert!(game.is_over(), "延長の4局目は連荘でも打ち切る");
+    }
+
+    /// 半荘でも同じ条件で終局する。最終局の場風が違うだけである。
+    #[test]
+    fn a_hanchan_ends_on_its_own_last_round() {
+        let mut game = MatchEngine::start(
+            Ruleset::kin_no_ma(MatchLength::Hanchan),
+            players(),
+            0,
+        );
+        game.drain_events();
+        for index in 1..=7u8 {
+            game.begin_round(&seed_of(index), 0);
+            game.drain_events();
+            finish_with_a_noten_draw(&mut game);
+        }
+        assert_eq!(
+            game.round(),
+            Round {
+                wind: Wind::South,
+                number: 4
+            }
+        );
+
+        game.begin_round(&seed_of(8), 0);
+        game.drain_events();
+        game.force_scores([40_000, 20_000, 20_000, 20_000]);
+        finish_with_a_child_tsumo(&mut game);
+        game.drain_events();
+        assert!(game.is_over(), "南4局で誰かが届いていれば終わる");
     }
 
     /// 東1局から終局まで、ツモ切りだけで通せる。
