@@ -70,7 +70,8 @@ while !game.is_over() {
 | 局数 | 親が流れたら `round.number += 1`。4 を超えたら次の風の1局へ |
 | 最終局 | 半荘は南4局、東風戦は東4局 |
 | 西入 | 最終局を終えて誰も `return_score`（30000）に届いていなければ、次の風へ延長する。半荘なら西場、東風戦なら南場 |
-| 延長の打ち切り | 延長した風の4局を終えたら、誰も届いていなくても終局する。無限に伸ばさない |
+| 延長中の終局 | 誰かが返し点へ届いた局の終わりで終局する |
+| 延長の打ち切り | 延長した風の4局を終えたら、誰も届いていなくても終局する。**連荘でも打ち切る。**無限に伸ばさない |
 | アガリ止め | 最終局で親が和了し、かつ親がトップなら続行しない |
 | テンパイ止め | 最終局の荒牌平局で親がテンパイし、かつ親がトップなら続行しない。**流し満貫も荒牌平局の一種なので含める** |
 | 飛び | `Ruleset.busted_ends_match` が真で、誰かの持ち点が0未満になったら即終局 |
@@ -819,7 +820,8 @@ mod progression_tests {
     fn nobody_reaching_the_return_score_forces_an_extension() {
         let mut game = hanchan();
         game.drain_events();
-        // 8局ぶん親を流し、南4局まで進める。持ち点は動かさない。
+        // 8局ぶん親を流して南4局まで進める。子ツモで持ち点は動くが、
+        // 4席が順に和了るので一周ごとに25,000点へ戻る。
         for index in 1..=8u8 {
             begin(&mut game, index);
             finish_with_a_child_tsumo(&mut game);
@@ -1048,7 +1050,11 @@ mod ending_match_tests {
             );
             game.force_scores([25_000; 4]);
             finish_with_a_child_tsumo(&mut game);
-            game.drain_events();
+            let ended = game.drain_events();
+            assert!(
+                !ended.iter().any(|e| matches!(e, Event::SeedReveal { .. })),
+                "局の終わりにも開示してはならない"
+            );
         }
         game.begin_round(&seed_of(4), 0);
         game.drain_events();
@@ -1285,6 +1291,41 @@ mod ending_match_tests {
         assert!(game.is_over(), "最終局で親が流れたら終わり");
     }
 
+    /// 延長した風の4局目は、親が連荘しても打ち切る。
+    ///
+    /// **返し点に届いた者がいる場合の枝を通す。**打ち切りを返し点の枝の
+    /// 中に置くと、この経路で終局せず同じ局を繰り返し続ける。
+    #[test]
+    fn the_extension_stops_even_on_a_dealer_repeat() {
+        let mut game = tonpuu();
+        game.drain_events();
+        // 7局進めると南4局・親は席3になる（東4局＋南3局ぶん親が流れる）。
+        for index in 1..=7u8 {
+            game.begin_round(&seed_of(index), 0);
+            game.drain_events();
+            game.force_scores([25_000; 4]);
+            finish_with_a_child_tsumo(&mut game);
+            game.drain_events();
+        }
+        assert_eq!(
+            game.round(),
+            Round {
+                wind: Wind::South,
+                number: 4
+            }
+        );
+        assert_eq!(game.round_dealer(), Seat::new(3));
+
+        game.begin_round(&seed_of(8), 0);
+        game.drain_events();
+        // 親をトップにしない。アガリ止めの条件は満たさないが、
+        // 延長の4局目なので打ち切られる。
+        game.force_scores([40_000, 20_000, 20_000, 20_000]);
+        finish_with_a_dealer_tsumo(&mut game);
+        game.drain_events();
+        assert!(game.is_over(), "延長の4局目は連荘でも打ち切る");
+    }
+
     /// 東1局から終局まで、ツモ切りだけで通せる。
     #[test]
     fn a_whole_match_runs_on_tsumogiri() {
@@ -1414,44 +1455,51 @@ Expected: コンパイルエラー（`is_over` などが未定義）
     /// 判定の順を固定する。同時に立ちうるので、決めておかないと同じ入力から
     /// 違う結果が出る。
     fn should_end(&self, outcome: &RoundOutcome) -> bool {
-        // 飛び。最優先で、局の途中でも終わる。
+        // 飛び。最優先で、どの局でも終わる。
         if self.rules.busted_ends_match && self.scores.iter().any(|s| *s < 0) {
             return true;
         }
+
+        // **延長した風は、返し点の有無より先に見る。**
+        // 誰かが届いた局で終わり、4局目なら届いていなくても終わる。
+        // ここを返し点の枝の中に置くと、届いた者がいて親が連荘した場合に
+        // 打ち切りへ到達せず、同じ4局目を繰り返し続ける。
+        if self.round.wind == extension_wind(self.rules.length) {
+            return self.round.number == 4 || self.reached_return_score();
+        }
+
+        // ここからは本来の最終局だけの話。
         if !self.is_last_round() {
             return false;
         }
-
-        if self.scores.iter().any(|s| *s >= self.rules.return_score) {
-            // 親が流れるなら、この風の4局目なのでもう局は無い。
-            if !outcome.dealer_repeats {
-                return true;
-            }
-            // 親が続く場合に止められるのは、親の和了と親テンパイの荒牌平局だけ。
-            // **途中流局は止めない。**dealer_repeats は真だが、
-            // アガリ止めでもテンパイ止めでもない。
-            // 流し満貫は荒牌平局の一種なので、テンパイ止めの対象に含める。
-            // 途中流局（AbortiveDraw）だけを除く。
-            let can_stop = matches!(
-                outcome.reason,
-                ContinuationReason::DealerWin
-                    | ContinuationReason::DealerTenpai
-                    | ContinuationReason::NagashiMangan
-            );
-            // **同点は席順で決まる。**最高点と並んでいても、席順で下なら
-            // トップではない。
-            return can_stop && placements_of(&self.scores)[self.dealer.index()] == 1;
+        if !self.reached_return_score() {
+            // 誰も届いていない。次の風へ延長する。
+            return false;
         }
-
-        // 誰も返し点に届いていない。延長した風まで来ていたら打ち切る。
-        self.round.wind == extension_wind(self.rules.length)
+        // 親が流れるなら、この風の4局目なのでもう局は無い。
+        if !outcome.dealer_repeats {
+            return true;
+        }
+        // 親が続く場合に止められるのは、親の和了と、親テンパイの荒牌平局だけ。
+        // 流し満貫も荒牌平局の一種なので含める。**途中流局は止めない。**
+        let can_stop = matches!(
+            outcome.reason,
+            ContinuationReason::DealerWin
+                | ContinuationReason::DealerTenpai
+                | ContinuationReason::NagashiMangan
+        );
+        // **同点は席順で決まる。**最高点と並んでいても、席順で下なら
+        // トップではない。
+        can_stop && placements_of(&self.scores)[self.dealer.index()] == 1
     }
 
-    /// その風の4局目で、かつ最終局か延長局であること。
+    fn reached_return_score(&self) -> bool {
+        self.scores.iter().any(|s| *s >= self.rules.return_score)
+    }
+
+    /// 本来の最終局。半荘なら南4局、東風戦なら東4局。
     fn is_last_round(&self) -> bool {
-        self.round.number == 4
-            && (self.round.wind == last_wind(self.rules.length)
-                || self.round.wind == extension_wind(self.rules.length))
+        self.round.number == 4 && self.round.wind == last_wind(self.rules.length)
     }
 
     /// 半荘を閉じる。
@@ -1504,12 +1552,12 @@ fn placements_of(scores: &[i32; 4]) -> [u8; 4] {
 - [ ] **Step 4: テストが通ることを確認する**
 
 Run: `cargo test --package mahjong-engine ending_match_tests`
-Expected: 13テスト PASS
+Expected: 14テスト PASS
 
 - [ ] **Step 5: 既存のテストを壊していないことを確認する**
 
 Run: `cargo test --workspace && cargo clippy --all-targets -- -D warnings && cargo fmt --check`
-Expected: engine 294テスト PASS、警告ゼロ
+Expected: engine 295テスト PASS、警告ゼロ
 
 - [ ] **Step 6: コミット**
 
@@ -1522,7 +1570,7 @@ git commit -m "feat(engine): 終局と順位を実装"
 
 ## Wave 2f 完了の判定
 
-- [ ] `cargo test --workspace` が通る（engine 294テスト）
+- [ ] `cargo test --workspace` が通る（engine 295テスト）
 - [ ] `cargo clippy --all-targets -- -D warnings` が通る
 - [ ] `cargo fmt --check` が通る
 - [ ] 既存の262件を1つも壊していない
