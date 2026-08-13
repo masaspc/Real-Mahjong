@@ -355,11 +355,29 @@ def check_test_counts(text):
         # TypeScript の計画では `it(...)` と `test(...)` が1件にあたる。
         actual = len(re.findall(r"^[ \t]*#\[(?:tokio::)?test[\](]", section, re.M))
         actual += len(re.findall(r"^[ \t]*(?:it|test)\(", section, re.M))
-        claimed = (re.search(r"Expected: (\d+)テスト PASS", section)
-                   or re.search(r"Expected: (\d+) passed$", section, re.M))
-        if claimed and int(claimed.group(1)) != actual:
-            problems.append(f"Task {index + 1}: 実数 {actual} / 記述 {claimed.group(1)}")
+        # **タスク内のどれか1つが実数と合っていればよい。**タスクごとの件数と
+        # crate 全体の累計を両方書くことがあるため、最初の1つだけを見ると
+        # 食い違う。ループの Checker は `Expected:` を読むので、
+        # 書き手に `期待:` へ逃げさせない。
+        claims = [int(m.group(1)) for m in re.finditer(r"Expected: (\d+)テスト PASS", section)]
+        claims += [int(m.group(1)) for m in re.finditer(r"Expected: (\d+) passed", section)]
+        if claims and actual not in claims:
+            problems.append(f"Task {index + 1}: 実数 {actual} / 記述 {claims}")
     return problems
+
+
+def check_add_all(text):
+    """`git add -A` を禁じる。
+
+    ループのワーカーは並列で動くことがあり、丸ごと足すと担当外の変更まで
+    巻き込む。**触ってよいファイルは Files: に書き、その対象だけを足す。**
+    """
+    bad = []
+    for number, line in enumerate(text.splitlines(), 1):
+        stripped = line.strip()
+        if stripped.startswith("git add -A") or stripped == "git add .":
+            bad.append(f"{number}行目: {stripped}")
+    return bad
 
 
 def check_placeholders(text):
@@ -422,6 +440,7 @@ def main(path):
         ("解決できない型名", check_unresolved_types(text, base)),
         ("文字の混入", check_characters(text)),
         ("テスト数の不一致", check_test_counts(text)),
+        ("git add -A の使用", check_add_all(text)),
         ("プレースホルダ", check_placeholders(text)),
         ("手牌の記法と枚数", check_hands(text)),
     ]

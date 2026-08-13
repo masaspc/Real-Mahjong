@@ -305,7 +305,7 @@ Expected: 5 passed
 - [ ] **Step 6: crate 全体を測る**
 
 Run: `cargo test --package server`
-期待: 71 件（既存 66 + matchmaking 5）
+Expected: 71 passed
 
 - [ ] **Step 7: 検査してコミット**
 
@@ -638,7 +638,7 @@ Expected: 2 passed
 そのうえでモジュール全体を測る。
 
 Run: `cargo test --package server matchmaking`
-期待: 7 件
+Expected: 7 passed
 
 - [ ] **Step 3: workspace 全体を測る**
 

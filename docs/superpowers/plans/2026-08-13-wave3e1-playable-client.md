@@ -968,7 +968,7 @@ export function apply(
 - [ ] **Step 4: 通ることを確かめる**
 
 Run: `pnpm --dir apps/web test state`
-期待: 26 件
+Expected: 26 passed
 
 - [ ] **Step 5: 本物の半荘で畳んで確かめる**
 
@@ -1052,7 +1052,7 @@ describe.each(["match-seed1.jsonl", "match-seed3.jsonl"])("実際の半荘 %s �
 ```
 
 Run: `pnpm --dir apps/web test replay`
-期待: 4 件（牌譜2つ × 2項目）
+Expected: 4 passed
 
 そのうえで Task 2 の全体を測る。
 

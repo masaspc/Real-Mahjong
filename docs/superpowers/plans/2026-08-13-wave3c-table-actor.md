@@ -347,7 +347,7 @@ Expected: 7 passed
 - [ ] **Step 7: crate 全体を測る**
 
 Run: `cargo test --package server`
-期待: 35 件（table 28 + session_time 7）
+Expected: 35 passed
 
 - [ ] **Step 8: 検査してコミット**
 
@@ -1092,7 +1092,7 @@ Expected: 10 passed
 - [ ] **Step 6: crate 全体を測る**
 
 Run: `cargo test --package server`
-期待: 45 件（table 28 + session_time 7 + session 10）
+Expected: 45 passed
 
 - [ ] **Step 7: 検査してコミット**
 
@@ -1723,7 +1723,7 @@ Expected: 17 passed
 - [ ] **Step 5: crate 全体を測る**
 
 Run: `cargo test --package server`
-期待: 62 件（table 28 + session_time 7 + session 10 + reconnect 17）
+Expected: 62 passed
 
 - [ ] **Step 6: コミット**
 
