@@ -28,6 +28,9 @@
 - サーバは `ws://127.0.0.1:8080/ws?table=<id>&last_seq=<n>` で待つ。下りは `ClientEventEnvelope` の JSON、上りは `Command` の JSON。
 - `RequestAction { window_id, options, deadline_ms }` の `deadline_ms` は**受け取った時点からの残りミリ秒**。再接続で送り直されるときはサーバが引き直してくれる。
 - `ActionOption` は `discard{allowed, riichi_allowed}` / `chi{candidates}` / `pon{candidates}` / `kan{candidates}` / `ron` / `tsumo` / `kyuushu` / `pass`。
+- `MeldKind` は `"chi" | "pon" | "ankan" | "minkan" | "kakan"`、`DiscardManner` は `"tedashi" | "tsumogiri"`、`RiichiStep` は `"declare" | "accepted"`、`DrawSource` は `"wall" | "dead_wall"`。
+- **`tsconfig.json` は `strict` と `noUncheckedIndexedAccess` を有効にしている。**配列の添字は `T | undefined` になるので、席や牌を取り出すたびに扱いを決めること。`pnpm typecheck` は容赦なく落ちる。
+- **`Event::Call` の `tiles` は副露の全部であって、手牌から出た分ではない。**暗槓は `from` が自分自身で河を触らない。加槓は元のポンに4枚目を足した形で出るので、河を触らず、手牌から出るのは1枚だけで、元のポンを置き換える。
 
 ---
 
@@ -156,10 +159,12 @@ export function kindOf(tile: Tile): number {
 /** 人が読む表記。赤ドラは 0m / 0p / 0s。 */
 export function tileLabel(tile: Tile): string {
   const kind = kindOf(tile);
+  // **`noUncheckedIndexedAccess` が効いているので、添字は undefined を含む。**
+  // `kindOf` が範囲を検めているため実際には外れないが、型は素直に扱う。
   if (kind >= 27) {
-    return HONORS[kind - 27];
+    return HONORS[kind - 27] ?? "?";
   }
-  const suit = "mps"[Math.floor(kind / 9)];
+  const suit = "mps"[Math.floor(kind / 9)] ?? "?";
   const digit = isRed(tile) ? 0 : (kind % 9) + 1;
   return `${digit}${suit}`;
 }
@@ -225,7 +230,7 @@ function fold(events: ClientEvent[], nowMs = 0) {
 
 const roundStart: ClientEvent = {
   type: "round_start",
-  round: { wind: "east", number: 1 },
+  round: { wind: "East", number: 1 },
   dealer: 0,
   honba: 0,
   riichi_sticks: 0,
@@ -266,7 +271,7 @@ describe("盤面の組み立て", () => {
       { type: "draw", seat: 1, tile: null, source: "wall", wall_remaining: 69 },
     ]);
     expect(state.drawn).toBeNull();
-    expect(state.seats[1].handSize).toBe(14);
+    expect(state.seats[1]?.handSize).toBe(14);
   });
 
   it("自分の打牌でツモ牌が消え、河へ積まれる", () => {
@@ -278,7 +283,7 @@ describe("盤面の組み立て", () => {
     ]);
     expect(state.drawn).toBeNull();
     expect(state.hand).toHaveLength(13);
-    expect(state.seats[0].river.map((d) => d.tile)).toEqual([33]);
+    expect(state.seats[0]?.river.map((d) => d.tile)).toEqual([33]);
   });
 
   it("手牌から切ると、ツモ牌が手牌へ入る", () => {
@@ -286,7 +291,7 @@ describe("盤面の組み立て", () => {
       roundStart,
       deal,
       { type: "draw", seat: 0, tile: 33, source: "wall", wall_remaining: 69 },
-      { type: "discard", seat: 0, tile: 0, manner: "hand" },
+      { type: "discard", seat: 0, tile: 0, manner: "tedashi" },
     ]);
     expect(state.drawn).toBeNull();
     expect(state.hand).toHaveLength(13);
@@ -299,12 +304,119 @@ describe("盤面の組み立て", () => {
       roundStart,
       deal,
       { type: "draw", seat: 1, tile: null, source: "wall", wall_remaining: 69 },
-      { type: "discard", seat: 1, tile: 5, manner: "hand" },
-      { type: "call", seat: 2, from: 1, kind: "pon", tiles: [5, 5] },
+      { type: "discard", seat: 1, tile: 5, manner: "tedashi" },
+      // **`tiles` は副露の全部。**ポンなら手牌からの2枚＋鳴いた1枚。
+      { type: "call", seat: 2, from: 1, kind: "pon", tiles: [5, 5, 5] },
     ]);
-    expect(state.seats[1].river).toHaveLength(0);
-    expect(state.seats[2].melds).toHaveLength(1);
-    expect(state.seats[2].melds[0].tiles).toEqual([5, 5]);
+    expect(state.seats[1]?.river).toHaveLength(0);
+    expect(state.seats[2]?.melds).toHaveLength(1);
+    expect(state.seats[2]?.melds[0]?.tiles).toEqual([5, 5, 5]);
+  });
+
+  it("リーチが成立すると1000点が出て供託が増える", () => {
+    // **イベントは金額を運ばない。**こちらで同じことをしないと、
+    // 局が終わるまで画面の点数がずれ続ける。
+    const state = fold([
+      roundStart,
+      deal,
+      { type: "riichi", seat: 2, step: "declare" },
+      { type: "riichi", seat: 2, step: "accepted" },
+    ]);
+    expect(state.scores[2]).toBe(24000);
+    expect(state.sticks).toBe(1);
+  });
+
+  it("同じ牌を手にも持っているとき、ツモ切りを取り違えない", () => {
+    // 5m を手に持ったまま 5m をツモり、手出しで別の牌を切る。
+    const withFive: ClientEvent = {
+      type: "deal",
+      your_hand: [4, 0, 1, 2, 9, 10, 11, 18, 19, 20, 27, 30, 31],
+      hand_sizes: [13, 13, 13, 13],
+      dora_indicator: 8,
+    };
+    const state = fold([
+      withFive,
+      { type: "draw", seat: 0, tile: 4, source: "wall", wall_remaining: 69 },
+      { type: "discard", seat: 0, tile: 31, manner: "tedashi" },
+    ]);
+    expect(state.drawn).toBeNull();
+    expect(state.hand).toHaveLength(13);
+    expect(state.hand.filter((t) => t === 4)).toHaveLength(2);
+    expect(state.hand).not.toContain(31);
+  });
+
+  it("ポンで手牌から出るのは2枚だけ", () => {
+    // **同じ牌をもう1枚持っていても、減るのは2枚。**
+    // `tiles` を丸ごと引くと1枚多く消える。
+    const withThree: ClientEvent = {
+      type: "deal",
+      your_hand: [5, 5, 5, 0, 1, 2, 9, 10, 11, 18, 19, 27, 30],
+      hand_sizes: [13, 13, 13, 13],
+      dora_indicator: 8,
+    };
+    const state = fold([
+      roundStart,
+      withThree,
+      { type: "draw", seat: 1, tile: null, source: "wall", wall_remaining: 69 },
+      { type: "discard", seat: 1, tile: 5, manner: "tedashi" },
+      { type: "call", seat: 0, from: 1, kind: "pon", tiles: [5, 5, 5] },
+    ]);
+    expect(state.hand).toHaveLength(11);
+    expect(state.hand.filter((t) => t === 5)).toHaveLength(1);
+    expect(state.seats[1]?.river).toHaveLength(0);
+  });
+
+  it("他家のポンで減る枚数は2枚", () => {
+    const state = fold([
+      roundStart,
+      deal,
+      { type: "draw", seat: 1, tile: null, source: "wall", wall_remaining: 69 },
+      { type: "discard", seat: 1, tile: 5, manner: "tedashi" },
+      { type: "call", seat: 2, from: 1, kind: "pon", tiles: [5, 5, 5] },
+    ]);
+    expect(state.seats[2]?.handSize).toBe(11);
+  });
+
+  it("暗槓は河を触らず、手牌から4枚出る", () => {
+    // **暗槓は from が自分自身。**河を消すと無関係な牌が消える。
+    const withFour: ClientEvent = {
+      type: "deal",
+      your_hand: [5, 5, 5, 5, 0, 1, 2, 9, 10, 11, 18, 19, 27],
+      hand_sizes: [13, 13, 13, 13],
+      dora_indicator: 8,
+    };
+    const state = fold([
+      roundStart,
+      withFour,
+      { type: "draw", seat: 0, tile: 33, source: "wall", wall_remaining: 69 },
+      { type: "discard", seat: 0, tile: 33, manner: "tsumogiri" },
+      { type: "call", seat: 0, from: 0, kind: "ankan", tiles: [5, 5, 5, 5] },
+    ]);
+    expect(state.hand.filter((t) => t === 5)).toHaveLength(0);
+    expect(state.hand).toHaveLength(9);
+    expect(state.seats[0]?.river).toHaveLength(1);
+    expect(state.seats[0]?.melds[0]?.kind).toBe("ankan");
+  });
+
+  it("加槓は元のポンを置き換え、手牌から1枚だけ出る", () => {
+    const withPonAndFourth: ClientEvent = {
+      type: "deal",
+      your_hand: [5, 5, 5, 0, 1, 2, 9, 10, 11, 18, 19, 27, 30],
+      hand_sizes: [13, 13, 13, 13],
+      dora_indicator: 8,
+    };
+    const state = fold([
+      roundStart,
+      withPonAndFourth,
+      { type: "draw", seat: 1, tile: null, source: "wall", wall_remaining: 69 },
+      { type: "discard", seat: 1, tile: 5, manner: "tedashi" },
+      { type: "call", seat: 0, from: 1, kind: "pon", tiles: [5, 5, 5] },
+      { type: "call", seat: 0, from: 1, kind: "kakan", tiles: [5, 5, 5, 5] },
+    ]);
+    expect(state.seats[0]?.melds).toHaveLength(1);
+    expect(state.seats[0]?.melds[0]?.kind).toBe("kakan");
+    expect(state.hand).toHaveLength(10);
+    expect(state.seats[1]?.river).toHaveLength(0);
   });
 
   it("リーチ宣言牌に印が付く", () => {
@@ -313,9 +425,9 @@ describe("盤面の組み立て", () => {
       deal,
       { type: "riichi", seat: 2, step: "declare" },
       { type: "draw", seat: 2, tile: null, source: "wall", wall_remaining: 69 },
-      { type: "discard", seat: 2, tile: 9, manner: "hand" },
+      { type: "discard", seat: 2, tile: 9, manner: "tedashi" },
     ]);
-    expect(state.seats[2].river[0].riichi).toBe(true);
+    expect(state.seats[2]?.river[0]?.riichi).toBe(true);
   });
 
   it("リーチが成立すると席に印が付く", () => {
@@ -325,7 +437,7 @@ describe("盤面の組み立て", () => {
       { type: "riichi", seat: 2, step: "declare" },
       { type: "riichi", seat: 2, step: "accepted" },
     ]);
-    expect(state.seats[2].riichi).toBe(true);
+    expect(state.seats[2]?.riichi).toBe(true);
   });
 
   it("要求は締切の絶対時刻を持つ", () => {
@@ -356,7 +468,7 @@ describe("盤面の組み立て", () => {
         options: [{ type: "discard", allowed: [0], riichi_allowed: [] }],
         deadline_ms: 5000,
       },
-      { type: "discard", seat: 0, tile: 0, manner: "hand" },
+      { type: "discard", seat: 0, tile: 0, manner: "tedashi" },
     ]);
     expect(state.pending).toBeNull();
   });
@@ -374,7 +486,7 @@ describe("盤面の組み立て", () => {
       { type: "discard", seat: 0, tile: 33, manner: "tsumogiri" },
       roundStart,
     ]);
-    expect(state.seats[0].river).toHaveLength(0);
+    expect(state.seats[0]?.river).toHaveLength(0);
     expect(state.hand).toHaveLength(0);
     expect(state.doraIndicators).toEqual([]);
   });
@@ -413,7 +525,10 @@ import type { MeldKind } from "../protocol/MeldKind";
 import type { Round } from "../protocol/Round";
 import type { Seat } from "../protocol/Seat";
 import type { Tile } from "../protocol/Tile";
-import { sortTiles } from "./tiles";
+import { kindOf, sortTiles } from "./tiles";
+
+/** リーチ棒。**成立の時点で宣言者から出る。** */
+const RIICHI_STICK = 1_000;
 
 /** 河に積まれた1枚。 */
 export type Discarded = {
@@ -466,6 +581,20 @@ export type GameState = {
   notice: string | null;
   finalScores: number[] | null;
 };
+
+/**
+ * 席を取り出す。
+ *
+ * **`noUncheckedIndexedAccess` が効いているので添字は undefined を含む。**
+ * 席は必ず4つあるので実際には外れないが、型を黙らせるために一箇所へ寄せる。
+ */
+function seatOf(state: GameState, seat: Seat): SeatView {
+  const found = state.seats[seat];
+  if (!found) {
+    throw new Error(`席が範囲外: ${seat}`);
+  }
+  return found;
+}
 
 function emptySeat(): SeatView {
   return { handSize: 0, river: [], melds: [], riichi: false, declaring: false };
@@ -539,7 +668,7 @@ export function apply(
       state.hand = sortTiles(event.your_hand);
       state.doraIndicators = [event.dora_indicator];
       for (let i = 0; i < 4; i += 1) {
-        state.seats[i].handSize = event.hand_sizes[i];
+        seatOf(state, i as Seat).handSize = event.hand_sizes[i] ?? 13;
       }
       break;
 
@@ -548,17 +677,18 @@ export function apply(
       if (event.seat === state.you && event.tile !== null) {
         state.drawn = event.tile;
       } else {
-        state.seats[event.seat].handSize += 1;
+        seatOf(state, event.seat).handSize += 1;
       }
       break;
 
     case "discard": {
-      const seat = state.seats[event.seat];
+      const seat = seatOf(state, event.seat);
       seat.river.push({ tile: event.tile, riichi: seat.declaring });
       seat.declaring = false;
       if (event.seat === state.you) {
-        // ツモ牌を切ったなら手牌はそのまま。手牌から切ったならツモ牌が入る。
-        if (state.drawn !== null && state.drawn === event.tile) {
+        // **ツモ切りかどうかはイベントが持っている。**牌の一致で当てると、
+        // 同じ牌を手にも持っているときに取り違える。
+        if (event.manner === "tsumogiri") {
           state.drawn = null;
         } else {
           const at = state.hand.indexOf(event.tile);
@@ -580,20 +710,63 @@ export function apply(
 
     case "riichi":
       if (event.step === "declare") {
-        state.seats[event.seat].declaring = true;
+        seatOf(state, event.seat).declaring = true;
       } else {
-        state.seats[event.seat].riichi = true;
+        seatOf(state, event.seat).riichi = true;
+        // **成立の時点で棒が出る。**エンジンはここで 1000 点を引き、
+        // 供託を1本増やす。イベントは金額を運ばないので、こちらで
+        // 同じことをしないと局が終わるまで画面の点数がずれ続ける。
+        state.scores[event.seat] = (state.scores[event.seat] ?? 0) - RIICHI_STICK;
+        state.sticks += 1;
       }
       break;
 
     case "call": {
-      // 鳴かれた牌は打った席の河から消える。
-      const source = state.seats[event.from];
-      source.river.pop();
-      const caller = state.seats[event.seat];
-      caller.melds.push({ kind: event.kind, tiles: event.tiles, from: event.from });
+      const caller = seatOf(state, event.seat);
+      // **`tiles` は副露の全部であって、手牌から出た分ではない。**
+      // 取り違えると手牌の枚数が狂う。
+      let fromHand: Tile[] = [...event.tiles];
+
+      if (event.kind === "ankan") {
+        // 暗槓は `from` が自分自身。**河を触ってはならない。**
+        // 4枚とも手牌から出る。
+      } else if (event.kind === "kakan") {
+        // 加槓は元のポンに4枚目を足したもの。鳴いた牌はポンの時点で
+        // 河から消えている。**ここで消すと無関係な牌が消える。**
+        // 手牌から出るのは足した1枚だけ。
+        fromHand = event.tiles.slice(-1);
+      } else {
+        // チー・ポン・大明槓。鳴かれた牌は打った席の河から消える。
+        const source = seatOf(state, event.from);
+        const called = source.river.pop()?.tile;
+        const at = called === undefined ? -1 : fromHand.indexOf(called);
+        if (at >= 0) {
+          fromHand.splice(at, 1);
+        }
+      }
+
+      if (event.kind === "kakan") {
+        // **元のポンを置き換える。**足すと、ポンと加槓が二重に並ぶ。
+        const fourth = event.tiles[0];
+        const at =
+          fourth === undefined
+            ? -1
+            : caller.melds.findIndex((meld) => {
+                const head = meld.tiles[0];
+                return meld.kind === "pon" && head !== undefined && kindOf(head) === kindOf(fourth);
+              });
+        const upgraded = { kind: event.kind, tiles: event.tiles, from: event.from };
+        if (at >= 0) {
+          caller.melds[at] = upgraded;
+        } else {
+          caller.melds.push(upgraded);
+        }
+      } else {
+        caller.melds.push({ kind: event.kind, tiles: event.tiles, from: event.from });
+      }
+
       if (event.seat === state.you) {
-        for (const tile of event.tiles) {
+        for (const tile of fromHand) {
           const at = state.hand.indexOf(tile);
           if (at >= 0) {
             state.hand.splice(at, 1);
@@ -601,7 +774,7 @@ export function apply(
         }
         state.pending = null;
       } else {
-        caller.handSize -= event.tiles.length;
+        caller.handSize -= fromHand.length;
       }
       break;
     }
@@ -659,7 +832,7 @@ export function apply(
 - [ ] **Step 4: 通ることを確かめる**
 
 Run: `pnpm --dir apps/web test state`
-Expected: 14 passed
+Expected: 20 passed
 
 - [ ] **Step 5: コミット**
 
