@@ -8,6 +8,11 @@ license.workspace = true
 protocol = { path = "../protocol" }
 mahjong-engine = { path = "../mahjong-engine" }
 mahjong-ai = { path = "../mahjong-ai" }
+tokio = { version = "1.53.1", features = ["rt", "macros", "sync", "time"] }
+rand = "0.9.5"
+
+[dev-dependencies]
+tokio = { version = "1.53.1", features = ["rt", "macros", "sync", "time", "test-util"] }
 
 [lints]
 workspace = true
