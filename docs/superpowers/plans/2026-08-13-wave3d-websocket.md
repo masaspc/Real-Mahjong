@@ -70,6 +70,14 @@ ws://127.0.0.1:8080/ws?table=<id>&last_seq=<n>
 
 `TableHandle::is_closed()` が真になった卓は台帳から外す。**外さないと、遊ぶたびに卓が積み上がる。**接続のたびに掃除する。
 
+### 置き換えられた接続からコマンドを通さない
+
+同じ席に新しい接続が来ると、卓はこちらの送り口を捨てる。ところが**古いハンドラのループはまだ生きている。**`select!` が公平に選ぶと、受け口が閉じたことを知る前に、古い画面から遅れて届いた枠を読んでしまう。
+
+**`Discard` は `window_id` を持たない。**古い画面の打牌が、いまの打牌要求に偶然かなってしまい、意図しない牌が切られる。
+
+そこで `biased;` を置き、**受け口を先に見る。**送り口が捨てられていれば `inbox.recv()` が `None` を返すので、必ず先に気づいて抜けられる。枠を読むのは「送るものが無く、かつ受け口が開いている」ときだけになる。
+
 ### 時刻は枠を読んだ直後に測る
 
 `handle.now_ms()` を**`recv()` が返った直後**に呼び、それを `command` へ渡す。Wave 3c で決めた契約であり、ここが唯一の到着点である。後ろで測ると、他席の混雑が自分の締切を削る。
@@ -380,6 +388,18 @@ async fn play(mut socket: WebSocket, tables: Tables, id: TableId, last_seq: Opti
 
     loop {
         tokio::select! {
+            // **順序を固定する。**受け口を先に見る。
+            //
+            // 同じ席に新しい接続が来ると、卓はこちらの送り口を捨てる。
+            // そのとき `inbox.recv()` は `None` を返す。公平に選ぶと、
+            // それを知る前に古い画面から遅れて届いた枠を拾ってしまう。
+            // **`Discard` は `window_id` を持たないので、いまの要求に
+            // 偶然かなってしまい、意図しない牌を捨てる。**
+            //
+            // 受け口を先に見れば、閉じたことに必ず先に気づいて抜ける。
+            // 送るものが無く、かつ開いている間だけ枠を読む。
+            biased;
+
             outgoing = inbox.recv() => {
                 let Some(envelope) = outgoing else { break };
                 let Ok(text) = serde_json::to_string(&envelope) else { break };
@@ -400,6 +420,8 @@ async fn play(mut socket: WebSocket, tables: Tables, id: TableId, last_seq: Opti
                             break;
                         }
                     }
+                    // Close は明示的に抜ける。`detach` の時点がはっきりする。
+                    Some(Ok(Message::Close(_))) => break,
                     Some(Ok(_)) => {}
                     _ => break,
                 }
@@ -507,6 +529,40 @@ protocol に既にあり、TypeScript 型の生成も付いているので、新
 `matchmaking.rs` のテストモジュールへ足す。
 
 ```rust
+    /// **置き換えられた接続の受け口は閉じる。**
+    ///
+    /// WS のループで「受け口を先に見る」修正は、この性質に乗っている。
+    /// ここが崩れると、古い画面から遅れて届いた打牌が通ってしまう。
+    #[tokio::test(start_paused = true)]
+    async fn a_superseded_connection_sees_its_inbox_close() {
+        use protocol::seat::Seat;
+        use tokio::sync::mpsc::error::TryRecvError;
+
+        let tables = Tables::new();
+        let handle = tables.get_or_create(&TableId("supersede".to_owned()));
+        let (_, mut old) = handle
+            .attach(Seat::new(0), None)
+            .await
+            .expect("卓は生きている");
+        while old.try_recv().is_ok() {}
+
+        // 同じ席へ2本目を繋ぐ。卓は1本目の送り口を捨てる。
+        let (_, _new) = handle
+            .attach(Seat::new(0), None)
+            .await
+            .expect("卓は生きている");
+        tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+
+        let closed = loop {
+            match old.try_recv() {
+                Ok(_) => {}
+                Err(TryRecvError::Empty) => break false,
+                Err(TryRecvError::Disconnected) => break true,
+            }
+        };
+        assert!(closed, "置き換えられた受け口が閉じていない");
+    }
+
     /// **繋ぎ直しても同じ卓に戻る。**ブラウザを再読み込みしても
     /// 対局が最初からにならないことが、評価のしやすさに直結する。
     #[tokio::test(start_paused = true)]
@@ -576,18 +632,18 @@ protocol に既にあり、TypeScript 型の生成も付いているので、新
 
 - [ ] **Step 2: 通ることを確かめる**
 
-Run: `cargo test --package server the_same_id_resumes_the_same_match`
-Expected: 1 passed
+Run: `cargo test --package server matchmaking::tests::a_superseded_connection_sees_its_inbox_close matchmaking::tests::the_same_id_resumes_the_same_match`
+Expected: 2 passed
 
 そのうえでモジュール全体を測る。
 
 Run: `cargo test --package server matchmaking`
-期待: 6 件
+期待: 7 件
 
 - [ ] **Step 3: workspace 全体を測る**
 
 ```bash
-cargo test --package server     # 72 件（既存 66 + matchmaking 6）
+cargo test --package server     # 73 件（既存 66 + matchmaking 7）
 cargo test --workspace
 cargo clippy --all-targets -- -D warnings
 cargo fmt --check
@@ -626,6 +682,7 @@ git commit -m "test(server): 繋ぎ直しても同じ卓に戻る
 - **認証が無い。**卓の id を知っていれば誰でもその席に座れる。ローカル評価用と割り切る。
 - **`JoinHandle` を台帳が持たない。**Wave 3c では「持つ」と決めたが、持たせるには終了理由を扱う設計が要る。卓が panic しても記録は残らない。
 - **人は席0に固定。**
+- **台帳の掃除は接続のたびだけ。**最後の接続より後に終わった卓は、サーバを止めるまで台帳に残る。ローカルで遊ぶあいだは問題にならないが、長く立ち上げ続ける段階になったら定期的な掃除が要る。
 - **仕様 8.2 の CPU 代打ち切り替えは未実装。**切断中の席は自動打牌で進む。Wave 3c の引き継ぎに書いたとおり、`table.rs` にメソッドを足す必要があり、それは次のウェーブで行う。
 
 **型の整合:** `TableId` / `Tables` は Task 1 で定義し、Task 2・3 は新しい型を足さない。`Command` と `ClientEventEnvelope` は `protocol` のものをそのまま使う。
