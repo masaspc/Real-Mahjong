@@ -99,6 +99,16 @@ Wave 3b の `Table` には `drain_for`（取り出したら消える）と `sinc
 
 だから検めるのは「その席の可視列にその連番が実在するか」でなければならない。
 
+### 出口は有界にし、溢れたら切る
+
+出口（Actor → 接続）で待つと、1人の遅い接続が Actor ごと止め、他の3人まで巻き添えになる。かといって無制限にすると、遅い接続の数だけ memory が伸びる。
+
+そこで**有界にしたうえで、Actor は決して待たない。**`try_send` で押し込み、溢れたらその接続を切る。切られた側は `attach(seat, last_seq)` で追いつける。**遅い接続への対処は、既に持っている再接続の経路そのものである。**新しい仕組みを足す必要がない。
+
+容量は半荘1回ぶんの可視イベントより大きくとる。`attach(seat, None)` は最初から全部送り直すので、ここが足りないと正当な再接続が溢れてしまう。実測で1席あたり 1,304 件だったので 4,096 とする。
+
+入口（接続 → Actor）も bounded にして、壊れたクライアントが Actor を溺れさせないようにする。
+
 ### シードは1本のマスターから繰り出す
 
 局ごとに OS 乱数を引くのではなく、卓ごとに1本のマスターシードを持ち、そこから `StdRng` で局のシードを繰り出す。**卓ぜんぶが1本の 32 バイトから再現できる。**Wave 3d の牌譜再生がこれに乗る。
@@ -665,12 +675,20 @@ const POLL_MS: u64 = 100;
 /// 途切れないかぎり `tick` が永久に来ない。
 const INBOX: usize = 32;
 
+/// 1接続ぶんの出口の容量。
+///
+/// **半荘1回ぶんの可視イベントより大きくとる。**`attach(seat, None)` は
+/// 最初から全部送り直すので、ここが足りないと正当な再接続が溢れる。
+/// 実測では1席あたり 1,304 件だったので、3倍ほどの余裕をみる。
+const OUTBOX: usize = 4_096;
+
 /// 接続へイベントを押し出す口。
 ///
-/// **unbounded。**ここが詰まると Actor ごと止まり、他の3人まで巻き添えに
-/// なる。半荘のイベントは千数百件しかないので memory は問題にならない。
-pub type Outbound = mpsc::UnboundedSender<ClientEventEnvelope>;
-pub type Inbound = mpsc::UnboundedReceiver<ClientEventEnvelope>;
+/// **有界だが、Actor は決して待たない。**`try_send` で押し込み、溢れたら
+/// その接続を切る。切られた側は `attach(seat, last_seq)` で追いつける。
+/// **遅い接続への対処は、既に持っている再接続の経路そのものである。**
+pub type Outbound = mpsc::Sender<ClientEventEnvelope>;
+pub type Inbound = mpsc::Receiver<ClientEventEnvelope>;
 
 /// 卓が既に畳まれている。
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
@@ -744,7 +762,7 @@ impl TableHandle {
         seat: Seat,
         last_seq: Option<u32>,
     ) -> Result<(ConnectionId, Inbound), Gone> {
-        let (out, inbox) = mpsc::unbounded_channel();
+        let (out, inbox) = mpsc::channel(OUTBOX);
         let (ack, done) = oneshot::channel();
         self.tx
             .send(TableMsg::Attach {
@@ -840,7 +858,8 @@ impl Sinks {
             let mut alive = true;
             for envelope in batch {
                 let seq = envelope.seq;
-                if out.send(envelope).is_err() {
+                // **待たない。**溢れた接続は切り、再接続で追いつかせる。
+                if out.try_send(envelope).is_err() {
                     alive = false;
                     break;
                 }
@@ -920,10 +939,13 @@ async fn run(
         }
 
         tokio::select! {
-            message = rx.recv() => match message {
-                None => break,
-                Some(message) => handle(&mut table, &mut sinks, message),
-            },
+            // **順序を固定する。**既定の `select!` は ready な枝から無作為に
+            // 選ぶので、コマンドが絶え間なく来ると時計が進む時刻に上限が無い。
+            // ticker を先に置けば、100ms が経った時点で必ず時計が進む。
+            // `interval` は撃ったあと次の 100ms までは ready にならないので、
+            // 逆にコマンドが飢えることもない。
+            biased;
+
             _ = ticker.tick() => {
                 // **時計を進める前に、既に着いている分を片づける。**
                 // 刻印だけでは足りない。tick が締切を越えて自動打牌したあとでは、
@@ -941,6 +963,10 @@ async fn run(
                 }
                 table.tick(clock.now_ms());
             }
+            message = rx.recv() => match message {
+                None => break,
+                Some(message) => handle(&mut table, &mut sinks, message),
+            },
         }
     }
 
@@ -1416,6 +1442,10 @@ mod reaction_tests {
         })
     }
 
+    fn all_cpu() -> [Occupant; 4] {
+        std::array::from_fn(|index| Occupant::Cpu(PlayerId(format!("cpu{index}"))))
+    }
+
     /// その席へ最初に届く「鳴きの要求」まで進める。
     /// 打牌の要求（自分の番）は読み飛ばす。
     async fn advance_to_a_call_window(inbox: &mut Inbound) -> (u32, Vec<ActionOption>) {
@@ -1506,6 +1536,51 @@ mod reaction_tests {
         );
     }
 
+    /// **誰も鳴けない打牌でも一律に待つ。**（仕様 6.4）
+    ///
+    /// 鳴ける者がいないときだけ次のツモが速いと、待ち時間の長短から
+    /// 「誰も鳴けなかった」が読めてしまう。一律に待つのは情報を漏らさない
+    /// ためであり、その待機を越えさせるのも Actor の `tick` である。
+    ///
+    /// 実測では、4人 CPU の対局で打牌から次のツモまでが**30回すべて
+    /// ちょうど 400ms**（最低待機 350ms の直後のポーリング）だった。
+    #[tokio::test(start_paused = true)]
+    async fn even_an_uncalled_discard_waits_out_the_minimum() {
+        let handle = spawn(rules(), all_cpu(), SeedSource::from_master([1u8; 32]));
+        let clock = Clock::start();
+        let (_, mut inbox) = handle
+            .attach(Seat::new(0), None)
+            .await
+            .expect("卓は生きている");
+
+        let mut discarded_at: Option<u64> = None;
+        let mut gaps: Vec<u64> = Vec::new();
+        while gaps.len() < 20 {
+            let next = tokio::time::timeout(Duration::from_millis(600_000), inbox.recv())
+                .await
+                .expect("仮想10分のうちに届く");
+            let Some(envelope) = next else { break };
+            match &envelope.event {
+                ClientEvent::Discard { .. } => discarded_at = Some(clock.now_ms()),
+                ClientEvent::Draw { .. } => {
+                    if let Some(at) = discarded_at.take() {
+                        gaps.push(clock.now_ms() - at);
+                    }
+                }
+                _ => {}
+            }
+        }
+
+        assert_eq!(gaps.len(), 20, "測れた間隔が足りない");
+        for gap in &gaps {
+            assert!(
+                *gap >= 350,
+                "誰も鳴かなかった打牌の直後に次のツモが来た: {gap}ms"
+            );
+            assert!(*gap <= 450, "ポーリング1周を超えて遅れた: {gap}ms");
+        }
+    }
+
     /// `window_id` は再送や遅れた応答を別のウィンドウへ当てないための鍵。
     #[tokio::test(start_paused = true)]
     async fn a_response_to_an_unknown_window_is_refused() {
@@ -1572,7 +1647,7 @@ Expected: いくつか落ちる。Task 2 の実装が正しければ全部通る
 - [ ] **Step 3: 通ることを確かめる**
 
 Run: `cargo test --package server reaction_tests`
-Expected: 2 passed
+Expected: 3 passed
 
 `the_actor_carries_a_call_across_the_minimum_wait` が「鳴きの要求に到達しなかった」で落ちるなら、`SeedSource` の繰り出し方が計画と違っている。`+350ms` の下限で落ちるなら、Actor が `tick` を呼んでいないか `POLL_MS` が違う。**期待値を書き換える前にそちらを疑う。**
 
@@ -1581,7 +1656,7 @@ Expected: 2 passed
 - [ ] **Step 4: workspace 全体を測る**
 
 ```bash
-cargo test --package server     # 58 件（table 28 + session_time 7 + session 10 + reconnect 11 + reaction 2）
+cargo test --package server     # 59 件（table 28 + session_time 7 + session 10 + reconnect 11 + reaction 3）
 cargo test --workspace
 cargo clippy --all-targets -- -D warnings
 cargo fmt --check
