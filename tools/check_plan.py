@@ -150,6 +150,7 @@ RUST_KEYWORDS = {
 BUILTIN_NAMES = {
     "Some", "None", "Ok", "Err", "String", "Vec", "Box", "Default",
     "from_fn", "take", "replace", "min", "max", "swap", "usize", "u8", "u32", "u64", "i32",
+    "drop", "matches", "assert", "assert_eq", "assert_ne", "format", "panic", "vec",
 }
 
 # 標準ライブラリと prelude の型。use を書かなくても使える。
@@ -334,7 +335,7 @@ def check_unresolved_types(text, base="."):
 def check_characters(text):
     bad = set()
     for ch in text:
-        if ord(ch) < 128 or ch in "、。「」『』（）ー・…—→×〜":
+        if ord(ch) < 128 or ch in "、。「」『』（）ー・…—→×〜§":
             continue
         name = unicodedata.name(ch, "")
         if name.startswith(("CJK UNIFIED", "HIRAGANA", "KATAKANA", "FULLWIDTH",
@@ -349,8 +350,10 @@ def check_test_counts(text):
     problems = []
     for index in range(len(bounds) - 1):
         section = text[bounds[index]:bounds[index + 1]]
-        actual = len(re.findall(r"#\[test\]", section))
-        claimed = re.search(r"Expected: (\d+)テスト PASS", section)
+        # 行頭のものだけを数える。散文中の `#[test]` という言及は宣言ではない。
+        actual = len(re.findall(r"^[ \t]*#\[(?:tokio::)?test[\](]", section, re.M))
+        claimed = (re.search(r"Expected: (\d+)テスト PASS", section)
+                   or re.search(r"Expected: (\d+) passed$", section, re.M))
         if claimed and int(claimed.group(1)) != actual:
             problems.append(f"Task {index + 1}: 実数 {actual} / 記述 {claimed.group(1)}")
     return problems
@@ -403,6 +406,12 @@ def main(path):
     text = open(path).read()
     # 計画のパスから見たリポジトリの根。docs/superpowers/plans/ の3つ上。
     base = os.path.abspath(os.path.join(os.path.dirname(path), "..", "..", ".."))
+    if not re.search(r"^### Task ", text, re.M):
+        print("[NG] 計画の形式")
+        print("     '### Task N:' の見出しが1つも無い。タスクを分けた検査が"
+              "すべて空振りするため、ここで止める。")
+        return 1
+
     sections = [
         ("タスク境界をまたぐ前方参照", check_forward_references(text)),
         ("宣言したタスクで読まれないフィールド", check_unread_fields(text)),
