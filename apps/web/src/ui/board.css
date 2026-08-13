@@ -10,21 +10,35 @@ button { font: inherit; }
 .seat { flex: 1 1 280px; min-width: 0; padding: 10px; border: 1px solid #8db09b; background: #1c513b; }
 .seat h2, .my-hand h2 { margin: 0 0 8px; font-size: 1rem; }
 .concealed { margin: 4px 0; }
-.river { display: grid; grid-template-columns: repeat(6, 2.2rem); gap: 4px; min-height: 2.8rem; margin-top: 8px; }
-.tile { display: inline-grid; place-items: center; min-width: 2.2rem; min-height: 2.8rem; padding: 3px; color: #171717; background: #fff9df; border: 1px solid #c9b989; border-radius: 3px; }
-.tiles { display: inline-flex; gap: 2px; }
+.river { display: grid; grid-template-columns: repeat(6, 34px); gap: 4px 3px; min-height: 46px; margin-top: 8px; }
+/* 牌。面は SVG なので、ここでは大きさと厚みだけを作る。 */
+.tile { display: inline-block; width: 34px; padding: 0; border: 0; background: none; line-height: 0; }
+.tile-face { display: block; width: 100%; height: auto; border-radius: 5px; box-shadow: 0 2px 0 #b0a074, 0 3px 4px rgba(0, 0, 0, .35); }
+.tile.back .tile-face { box-shadow: 0 2px 0 #17402c, 0 3px 4px rgba(0, 0, 0, .35); }
+.tiles { display: inline-flex; gap: 2px; vertical-align: middle; }
 .meld { display: inline-flex; align-items: end; gap: 3px; }
 .meld small { color: #d8e6dc; }
-.riichi-discard { transform: rotate(90deg); margin: 0 4px; }
+/* リーチ宣言牌は横に倒す。 */
+.riichi-discard { transform: rotate(90deg); }
 .my-hand { padding: 12px; background: #102a20; }
-.hand-row { flex-wrap: nowrap; overflow-x: auto; padding: 5px 0; }
-.hand-tile { cursor: pointer; font-weight: 700; }
-.hand-tile:disabled { cursor: default; opacity: .45; }
-.drawn { margin-left: 12px; }
+.hand-row { flex-wrap: nowrap; overflow-x: auto; padding: 10px 0 6px; gap: 3px; }
+/* 押せる牌は浮かせる。押せない牌は沈める。 */
+.hand-tile { width: 42px; cursor: pointer; transition: transform .08s ease; }
+.hand-tile:not(:disabled):hover { transform: translateY(-6px); }
+.hand-tile:disabled { cursor: default; filter: grayscale(.5) brightness(.82); }
+.drawn { margin-left: 14px; }
+.concealed { margin: 4px 0; }
+.concealed .tile { width: 22px; }
 .actions { min-height: 44px; margin-top: 8px; }
 .action { padding: 7px 12px; border: 1px solid #d5c45d; border-radius: 4px; color: #fff; background: #674d13; cursor: pointer; }
 .action.selected { outline: 3px solid #ffdf33; }
 .timer { height: 8px; overflow: hidden; background: #0a2118; }
 .timer-fill { display: block; height: 100%; background: #f0d34f; transition: width .1s linear; }
 .notice, .ranking { padding: 12px; text-align: center; font-weight: 700; background: #7a2d24; }
-@media (max-width: 700px) { .board { padding: 8px; } .opponents { display: grid; } .river { grid-template-columns: repeat(9, 2.2rem); } }
+@media (max-width: 700px) {
+  .board { padding: 8px; }
+  .opponents { display: grid; }
+  .river { grid-template-columns: repeat(9, 26px); }
+  .tile { width: 26px; }
+  .hand-tile { width: 32px; }
+}

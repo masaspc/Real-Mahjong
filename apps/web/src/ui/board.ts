@@ -3,6 +3,7 @@ import type { Tile } from "../protocol/Tile";
 import type { GameState, MeldView, SeatView } from "../game/state";
 import { sortTiles, tileLabel } from "../game/tiles";
 import { actionsFor, canDeclareRiichi, discardChoices } from "./actions";
+import { tileBackSvg, tileFaceSvg } from "./tile-face";
 
 let riichiReady = false;
 let pendingWindow: number | null = null;
@@ -18,9 +19,36 @@ function node<K extends keyof HTMLElementTagNameMap>(
   return element;
 }
 
+/**
+ * 牌1枚。**面は SVG で描く。**中身は自分で組み立てた静的な文字列で、
+ * 利用者の入力は混ざらない。読み上げ用にラベルを持たせる。
+ */
+function tileNode<K extends keyof HTMLElementTagNameMap>(
+  tag: K,
+  className: string,
+  tile: Tile,
+): HTMLElementTagNameMap[K] {
+  const element = node(tag, className);
+  element.innerHTML = tileFaceSvg(tile);
+  element.setAttribute("aria-label", tileLabel(tile));
+  element.title = tileLabel(tile);
+  return element;
+}
+
 function tiles(values: Tile[], className = "tiles"): HTMLElement {
   const row = node("span", className);
-  for (const tile of values) row.append(node("span", "tile", tileLabel(tile)));
+  for (const tile of values) row.append(tileNode("span", "tile", tile));
+  return row;
+}
+
+/** 伏せた牌を並べる。他家の手牌に使う。 */
+function backs(count: number): HTMLElement {
+  const row = node("span", "tiles");
+  for (let i = 0; i < count; i += 1) {
+    const back = node("span", "tile back");
+    back.innerHTML = tileBackSvg();
+    row.append(back);
+  }
   return row;
 }
 
@@ -36,13 +64,19 @@ function seatPanel(seatNumber: number, seat: SeatView, state: GameState): HTMLEl
     .filter(Boolean)
     .join("・");
   panel.append(node("h2", undefined, `席${seatNumber} ${marks} ${(state.scores[seatNumber] ?? 0).toLocaleString()}点`));
-  if (seatNumber !== state.you) panel.append(node("p", "concealed", `手牌 ${seat.handSize}枚`));
+  if (seatNumber !== state.you) {
+    const concealed = node("div", "concealed");
+    concealed.append(backs(seat.handSize));
+    panel.append(concealed);
+  }
   const melds = node("div", "melds");
   for (const value of seat.melds) melds.append(meld(value));
   panel.append(melds);
   const river = node("div", "river");
   for (const discarded of seat.river) {
-    river.append(node("span", `tile${discarded.riichi ? " riichi-discard" : ""}`, tileLabel(discarded.tile)));
+    river.append(
+      tileNode("span", `tile${discarded.riichi ? " riichi-discard" : ""}`, discarded.tile),
+    );
   }
   panel.append(river);
   return panel;
@@ -126,7 +160,7 @@ export function renderBoard(root: HTMLElement, state: GameState, send: (command:
   const discards = discardChoices(state, riichiReady);
   const handRow = node("div", "hand-row");
   for (const tile of sortTiles(state.hand)) {
-    const button = node("button", "tile hand-tile", tileLabel(tile));
+    const button = tileNode("button", "tile hand-tile", tile);
     const command = discards.get(tile);
     button.disabled = command === undefined;
     button.addEventListener("click", () => {
@@ -135,7 +169,7 @@ export function renderBoard(root: HTMLElement, state: GameState, send: (command:
     handRow.append(button);
   }
   if (state.drawn !== null) {
-    const button = node("button", "tile hand-tile drawn", tileLabel(state.drawn));
+    const button = tileNode("button", "tile hand-tile drawn", state.drawn);
     const command = discards.get(state.drawn);
     button.disabled = command === undefined;
     button.addEventListener("click", () => {
