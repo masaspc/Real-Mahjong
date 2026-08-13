@@ -967,7 +967,7 @@ export function apply(
 - [ ] **Step 4: 通ることを確かめる**
 
 Run: `pnpm --dir apps/web test state`
-Expected: 26 passed
+期待: 26 件
 
 - [ ] **Step 5: 本物の半荘で畳んで確かめる**
 
