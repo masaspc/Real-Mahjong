@@ -68,11 +68,13 @@
 |---|---|
 | 連番 | 卓が発行する。**局をまたいでも半荘をまたいでもリセットしない。**0 から始める |
 | 席ごとの配布 | `project_envelope` を通す。`None` が返る席へは何も送らない |
-| CPU の代打ち | `RequestAction` がその席へ出たら、その場で決めて `apply` する。時間を待たない |
+| CPU の代打ち | `RequestAction` がその席へ出たら、その場で決めて `apply` する。CPU は時間を消費しないので、要求が出た時刻をそのまま使う |
+| **卓は時間を作らない** | 反応ウィンドウは最低待機（350ms）を越えるまで確定しない（`reaction.rs`）。CPU が即答しても、越えるのは呼び出し側の `tick` である。**卓が勝手に時計を進めると、人の席の締切まで縮んでしまう** |
+| 応答待ちの管理 | 卓が `outstanding: [Option<PendingRequest>; 4]` で持つ。**ログを走査して探さない。**`Command` はログに残らず、`ActionPassed` も最低待機中は出ないので、ログからは「まだ答えていない」を判別できない |
 | CPU の決定 | 打牌は `mahjong_ai::discard::choose`、反応は `mahjong_ai::call::respond` |
 | 人の席 | 卓は何もしない。`apply` が外から来るのを待つ |
 | シード | 外から受け取る。卓は乱数を持たない |
-| 再接続 | **`seq` からの再送だけにする。**スナップショットは作らない。`protocol` が凍結済みでスナップショット型を足せないうえ、半荘1回のイベントは数百件なので全件再送でも実用上困らない |
+| 再接続 | **`seq` からの再送だけにする。**スナップショットは作らない。**仕様 8.1 をこの判断に合わせて改訂済みである**（`protocol` が凍結済みでスナップショット型を足せないこと、半荘1回のイベントが数百件で全件再送でも足りることが理由） |
 | 卓の終わり | `MatchEngine::is_over()` が真になったら、それ以上コマンドを受け付けない |
 
 ---
@@ -361,14 +363,12 @@ impl Occupant {
         }
     }
 
-    fn is_cpu(&self) -> bool {
-        matches!(self, Occupant::Cpu(_))
-    }
 }
 
+/// **`occupants` は Task 2 で足す。**Task 1 では読まないので、
+/// 先に持つと `-D warnings` が `field is never read` で落ちる。
 pub struct Table {
     engine: MatchEngine,
-    occupants: [Occupant; 4],
     /// 卓が出した真実。再接続の再送に使う。
     log: Vec<EventEnvelope>,
     next_seq: u32,
@@ -381,7 +381,6 @@ impl Table {
         let players = std::array::from_fn(|i| occupants[i].player_id());
         let mut table = Table {
             engine: MatchEngine::start(rules, players, now_ms),
-            occupants,
             log: Vec::new(),
             next_seq: 0,
             pending: std::array::from_fn(|_| Vec::new()),
@@ -453,9 +452,8 @@ impl Table {
 }
 ```
 
-**`occupants` は Task 2 まで読まれない。**`-D warnings` の `dead_code` を
-避けるため、Task 1 では `is_cpu` と `player_id` のうち `player_id` だけを
-使う。`is_cpu` は Task 2 で足す。
+**`Occupant::is_cpu` も Task 2 で足す。**Task 1 では使わないので、
+先に書くと未使用のメソッドとして残る。Task 1 が使うのは `player_id` だけである。
 
 - [ ] **Step 4: テストが通ることを確認する**
 
@@ -497,6 +495,15 @@ mod cpu_tests {
     use super::*;
     use protocol::client_event::ClientEvent;
 
+    /// 反応ウィンドウの最低待機を越えるまで時間を進める。
+    ///
+    /// **卓は時間を作らない。**CPU が即答しても、ウィンドウが確定するのは
+    /// 呼び出し側が `tick` で時計を進めたときである。
+    fn advance(table: &mut Table, now: &mut u64) {
+        *now += 1_000_000;
+        table.tick(*now);
+    }
+
     /// Task 3 も使う。**兄弟モジュールから見えるように `pub(super)` にする。**
     /// Task 1 に置くと、そこでは使われず `dead_code` で落ちる。
     pub(super) fn all_cpu() -> [Occupant; 4] {
@@ -518,7 +525,7 @@ mod cpu_tests {
         let mut table = table_of(all_cpu());
         table.begin_round(&seed_of(1), 0);
         let state = table.round_state().expect("局が動いている");
-        let view = build_view(state, Seat::new(2), table.engine.round());
+        let view = build_view(state, Seat::new(2));
 
         assert_eq!(view.hand, state.seat(Seat::new(2)).hand);
         // 他家の手牌がどこにも混ざっていない。
@@ -538,7 +545,7 @@ mod cpu_tests {
         let mut table = table_of(all_cpu());
         table.begin_round(&seed_of(1), 0);
         let state = table.round_state().expect("局が動いている");
-        let view = build_view(state, Seat::new(0), table.engine.round());
+        let view = build_view(state, Seat::new(0));
         assert_eq!(view.dora_indicators, state.wall.dora_indicators().to_vec());
         assert_eq!(view.dora_indicators.len(), 1, "局の頭は1枚だけ");
     }
@@ -549,7 +556,7 @@ mod cpu_tests {
         let mut table = table_of(all_cpu());
         table.begin_round(&seed_of(1), 0);
         let state = table.round_state().expect("局が動いている");
-        let view = build_view(state, Seat::new(0), table.engine.round());
+        let view = build_view(state, Seat::new(0));
         assert_eq!(view.rivers.len(), 4);
     }
 
@@ -587,11 +594,12 @@ mod cpu_tests {
             .any(|e| matches!(e.event, ClientEvent::RequestAction { .. })));
     }
 
-    /// 人が打つと、次の CPU たちが続けて動く。
+    /// 人が打つと、時間を進めるたびに CPU たちが続けて動く。
     #[test]
     fn the_cpus_continue_after_a_human_move() {
         let mut table = table_of(mixed());
-        table.begin_round(&seed_of(1), 0);
+        let mut now = 0u64;
+        table.begin_round(&seed_of(1), now);
         for seat in Seat::ALL {
             table.drain_for(seat);
         }
@@ -601,6 +609,7 @@ mod cpu_tests {
             .expect("局が動いている")
             .seat(Seat::new(0))
             .hand[0];
+        now += 1_000;
         table
             .apply(
                 Seat::new(0),
@@ -608,11 +617,15 @@ mod cpu_tests {
                     tile,
                     riichi: false,
                 },
-                1_000,
+                now,
             )
             .expect("切れる");
 
-        // 席1以降は CPU なので、人の次の手番が来るまで進む。
+        // **反応ウィンドウは最低待機を越えるまで確定しない。**
+        // CPU が即答していても、越えさせるのは呼び出し側である。
+        for _ in 0..3 {
+            advance(&mut table, &mut now);
+        }
         let events = table.drain_for(Seat::new(0));
         let discards = events
             .iter()
@@ -621,18 +634,39 @@ mod cpu_tests {
         assert!(discards >= 2, "CPU が続いていない: {discards}");
     }
 
-    /// CPU の反応も自動で決まる。誰も待たされない。
+    /// 最低待機を越える前は、CPU が即答していても確定しない。
     #[test]
-    fn a_cpu_answers_reaction_windows() {
+    fn a_reaction_window_waits_for_its_minimum() {
         let mut table = table_of(all_cpu());
         table.begin_round(&seed_of(1), 0);
-        // 一度も tick しなくても、CPU だけの卓は進み続ける。
+        // 親が打つところまでは tick なしで進む。反応はまだ確定しない。
         let events = table.drain_for(Seat::new(0));
+        assert!(events
+            .iter()
+            .any(|e| matches!(e.event, ClientEvent::Discard { .. })));
         let draws = events
             .iter()
             .filter(|e| matches!(e.event, ClientEvent::Draw { .. }))
             .count();
-        assert!(draws >= 2, "反応が解決していない: {draws}");
+        assert_eq!(draws, 1, "反応が確定する前に次のツモが出ている");
+    }
+
+    /// 時間を進めれば CPU の反応が解決し、次のツモへ進む。
+    #[test]
+    fn a_cpu_answers_reaction_windows() {
+        let mut table = table_of(all_cpu());
+        let mut now = 0u64;
+        table.begin_round(&seed_of(1), now);
+        table.drain_for(Seat::new(0));
+
+        advance(&mut table, &mut now);
+        let events = table.drain_for(Seat::new(0));
+        assert!(
+            events
+                .iter()
+                .any(|e| matches!(e.event, ClientEvent::Draw { .. })),
+            "反応が解決していない: {events:?}"
+        );
     }
 
     /// CPU は同じ局面から同じ手を打つ。卓ごと再現できる。
@@ -640,7 +674,11 @@ mod cpu_tests {
     fn a_cpu_table_is_reproducible() {
         let build = || {
             let mut table = table_of(all_cpu());
-            table.begin_round(&seed_of(1), 0);
+            let mut now = 0u64;
+            table.begin_round(&seed_of(1), now);
+            for _ in 0..5 {
+                advance(&mut table, &mut now);
+            }
             table.drain_for(Seat::new(0))
         };
         assert_eq!(build(), build());
@@ -666,11 +704,13 @@ use protocol::seat::Round;
 ///
 /// **その席の分だけを読む。**手牌と副露は `seat` のものに限り、
 /// 裏ドラは触れない。ここを誤ると CPU が他家の手を見られる。
-fn build_view(state: &RoundState, seat: Seat, round: Round) -> View {
+fn build_view(state: &RoundState, seat: Seat) -> View {
     View {
         seat,
         seat_wind: state.seat_wind(seat),
-        round_wind: round.wind,
+        // **`state.round` を使う。**外から場風を渡せるようにすると、
+        // 食い違った値を渡せてしまう。
+        round_wind: state.round.wind,
         hand: state.seat(seat).hand.clone(),
         melds: state.seat(seat).melds.clone(),
         rivers: std::array::from_fn(|i| {
@@ -694,66 +734,130 @@ fn build_view(state: &RoundState, seat: Seat, round: Round) -> View {
 }
 ```
 
-`collect` のあとに CPU を動かす。**要求が出た席が CPU なら、その場で決める。**
+**Task 2 で `Table` へ足すもの。**
 
 ```rust
-    fn collect(&mut self) {
-        // ... 既存の取り込み ...
-        self.let_cpus_act();
+    /// 席にいるのが人か CPU か。CPU の席だけを卓が代打ちする。
+    occupants: [Occupant; 4],
+    /// 席ごとの、まだ答えていない要求。
+    ///
+    /// **ログから探さない。**`Command` はログに残らず、`ActionPassed` も
+    /// 最低待機のあいだは出ないので、ログでは「まだ答えていない」を判別できない。
+    outstanding: [Option<PendingRequest>; 4],
+
+/// 応答を待っている要求。CPU が答えるのに要る分だけを持つ。
+struct PendingRequest {
+    window_id: u32,
+    options: Vec<ActionOption>,
+}
+```
+
+`Occupant` へ `is_cpu` を足す。
+
+```rust
+    fn is_cpu(&self) -> bool {
+        matches!(self, Occupant::Cpu(_))
+    }
+```
+
+`collect` を `now_ms` を取る形へ変え、3つに分ける。
+
+```rust
+    fn collect(&mut self, now_ms: u64) {
+        self.take_events();
+        self.let_cpus_act(now_ms);
+    }
+
+    /// 局のイベントを取り込み、連番を振り、要求を控える。
+    fn take_events(&mut self) {
+        for event in self.engine.drain_events() {
+            if let Event::RequestAction {
+                seat,
+                window_id,
+                options,
+                ..
+            } = &event
+            {
+                self.outstanding[seat.index()] = Some(PendingRequest {
+                    window_id: *window_id,
+                    options: options.clone(),
+                });
+            }
+            let index = self.log.len();
+            self.log.push(EventEnvelope {
+                seq: self.next_seq,
+                event,
+            });
+            self.next_seq += 1;
+            for queue in &mut self.pending {
+                queue.push(index);
+            }
+        }
     }
 
     /// CPU の席へ出た要求を、その場で処理する。
     ///
-    /// **時間を待たない。**CPU は考える必要がないので、締切を待つ意味がない。
-    /// 人の席の要求はここで触らない。
+    /// **時計は進めない。**CPU は考えないので時間を消費しないが、
+    /// 反応ウィンドウは最低待機を越えるまで確定しない。越えさせるのは
+    /// 呼び出し側の `tick` である。ここで進めると、人の席の締切まで縮む。
     ///
     /// 1回の応答が次の要求を生むので、要求が尽きるまで繰り返す。
-    /// 上限を置くのは、万一の取りこぼしで無限に回らないようにするためである。
-    fn let_cpus_act(&mut self) {
+    fn let_cpus_act(&mut self, now_ms: u64) {
         for _ in 0..1_000 {
-            let Some((seat, options, now_ms)) = self.pending_cpu_request() else {
+            let Some(seat) = self.next_cpu_to_act() else {
                 return;
             };
+            // **先に取り下げる。**応答が拒まれても、同じ要求で回り続けない。
+            let request = self.outstanding[seat.index()]
+                .take()
+                .expect("直前に確認した");
             let Some(state) = self.engine.round_state() else {
                 return;
             };
-            let view = build_view(state, seat, self.engine.round());
-            let command = if options
+            let view = build_view(state, seat);
+            let command = if request
+                .options
                 .iter()
                 .any(|o| matches!(o, ActionOption::Discard { .. }))
             {
-                discard::choose(&view, &options)
+                discard::choose(&view, &request.options)
             } else {
                 Command::CallResponse {
-                    window_id: self.last_window_id_for(seat),
-                    response: call::respond(&view, &options),
+                    window_id: request.window_id,
+                    response: call::respond(&view, &request.options),
                 }
             };
-            // 応答は engine を進める。取り込みは自分で行う。
             let _ = self.engine.apply(seat, command, now_ms);
             self.take_events();
         }
         panic!("CPU の応答が終わらない");
     }
+
+    /// まだ答えていない CPU の席。席順で先にあるものを返す。
+    fn next_cpu_to_act(&self) -> Option<Seat> {
+        Seat::ALL.into_iter().find(|seat| {
+            self.occupants[seat.index()].is_cpu() && self.outstanding[seat.index()].is_some()
+        })
+    }
 ```
 
-**`pending_cpu_request` / `last_window_id_for` / `take_events` の3つは
-実装者が決めてよい。**満たすべき性質だけを書く。
+`apply` は人の応答でも控えを消す。
 
-| 関数 | 満たすこと |
-|---|---|
-| `take_events` | `engine.drain_events()` を `log` へ移し、連番を振り、全席の待ち行列へ入れる。Task 1 の `collect` の前半をそのまま切り出す |
-| `pending_cpu_request` | まだ応答していない CPU 席の `RequestAction` を1つ返す。無ければ `None`。**`log` の末尾から探す** |
-| `last_window_id_for` | その席へ最後に出た `RequestAction` の `window_id` |
+```rust
+    pub fn apply(&mut self, seat: Seat, command: Command, now_ms: u64) -> Result<(), Reject> {
+        self.outstanding[seat.index()] = None;
+        let result = self.engine.apply(seat, command, now_ms);
+        self.collect(now_ms);
+        result
+    }
+```
 
-`collect` は `take_events` と `let_cpus_act` を順に呼ぶだけにする。
-
-**`now_ms` は要求が出た時刻をそのまま使う。**CPU は時間を消費しない。
+`new` / `begin_round` / `tick` も `collect(now_ms)` を呼ぶ形へ変える。
 
 - [ ] **Step 4: テストが通ることを確認する**
 
 Run: `cargo test --package server`
-Expected: 8テスト PASS（クレート全体では20件）
+Expected: 9テスト PASS（クレート全体では21件）
 
 - [ ] **Step 5: 既存のテストを壊していないことを確認する**
 
@@ -842,7 +946,9 @@ mod resume_tests {
         let mut now = 1_000u64;
         let mut seed_index = 1u8;
 
-        for _ in 0..200 {
+        // 1回の tick は反応ウィンドウを1つ解決する。1局は最大で70ツモ前後、
+        // 半荘は延長を含めて12局あるので、余裕をもって上限を置く。
+        for _ in 0..5_000 {
             if table.is_over() {
                 break;
             }
@@ -851,7 +957,6 @@ mod resume_tests {
                 seed_index = seed_index.wrapping_add(1);
                 continue;
             }
-            // CPU だけの卓は自分で進むが、念のため時間も進める。
             now += 1_000_000;
             table.tick(now);
         }
@@ -863,13 +968,13 @@ mod resume_tests {
             .any(|e| matches!(e.event, ClientEvent::MatchEnd { .. })));
     }
 
-    /// 通し対局のあとも、連番は飛ばずに並んでいる。
+    /// 通し対局のあとも、連番は単調に増えている。
     #[test]
-    fn the_sequence_has_no_holes() {
+    fn the_sequence_never_goes_backwards() {
         let mut table = table_of(all_cpu());
         let mut now = 1_000u64;
         let mut seed_index = 1u8;
-        for _ in 0..200 {
+        for _ in 0..5_000 {
             if table.is_over() {
                 break;
             }
@@ -881,6 +986,7 @@ mod resume_tests {
             now += 1_000_000;
             table.tick(now);
         }
+        assert!(table.is_over(), "半荘が終わらなかった");
 
         // 射影で落ちる席があるので、連番は飛びうる。**単調増加だけを見る。**
         let events = table.since(Seat::new(0), None);
@@ -895,7 +1001,7 @@ mod resume_tests {
         let mut table = table_of(all_cpu());
         let mut now = 1_000u64;
         let mut seed_index = 1u8;
-        for _ in 0..200 {
+        for _ in 0..5_000 {
             if table.is_over() {
                 break;
             }
@@ -907,6 +1013,9 @@ mod resume_tests {
             now += 1_000_000;
             table.tick(now);
         }
+        // **終局していることを先に確かめる。**そうしないと、単に反応待ちで
+        // 拒まれただけでもテストが通ってしまう。
+        assert!(table.is_over(), "半荘が終わらなかった");
         assert!(table.apply(Seat::new(0), Command::Tsumo, now).is_err());
     }
 }
@@ -940,7 +1049,7 @@ Expected: コンパイルエラー（`since` が未定義）
 - [ ] **Step 4: テストが通ることを確認する**
 
 Run: `cargo test --package server`
-Expected: 7テスト PASS（クレート全体では27件）
+Expected: 7テスト PASS（クレート全体では28件）
 
 - [ ] **Step 5: 既存のテストを壊していないことを確認する**
 
@@ -958,7 +1067,7 @@ git commit -m "feat(server): 再接続の再送と通し対局を実装"
 
 ## Wave 3b 完了の判定
 
-- [ ] `cargo test --workspace` が通る（server 27テスト）
+- [ ] `cargo test --workspace` が通る（server 28テスト）
 - [ ] `cargo clippy --all-targets -- -D warnings` が通る
 - [ ] `cargo fmt --check` が通る
 - [ ] 既存の524件を1つも壊していない
