@@ -377,6 +377,53 @@ describe("盤面の組み立て", () => {
     expect(state.seats[2]?.handSize).toBe(11);
   });
 
+  it("加槓の4枚目がツモ牌でも手牌が狂わない", () => {
+    // **4枚目はたいていツモってきた牌。**手牌だけを見ると取り除けず、
+    // 1枚多いまま残る。
+    // **5m は4枚しかない。**手に2枚、ポンで1枚もらい、4枚目をツモる。
+    const withPair: ClientEvent = {
+      type: "deal",
+      your_hand: [5, 5, 0, 1, 2, 9, 10, 11, 18, 19, 20, 27, 30],
+      hand_sizes: [13, 13, 13, 13],
+      dora_indicator: 8,
+    };
+    const state = fold([
+      roundStart,
+      withPair,
+      { type: "draw", seat: 1, tile: null, source: "wall", wall_remaining: 69 },
+      { type: "discard", seat: 1, tile: 5, manner: "tedashi" },
+      { type: "call", seat: 0, from: 1, kind: "pon", tiles: [5, 5, 5] },
+      // 鳴いた席はそのまま打つ。
+      { type: "discard", seat: 0, tile: 0, manner: "tedashi" },
+      // 巡ってきて4枚目をツモり、加槓する。
+      { type: "draw", seat: 0, tile: 5, source: "wall", wall_remaining: 68 },
+      { type: "call", seat: 0, from: 1, kind: "kakan", tiles: [5, 5, 5, 5] },
+    ]);
+    expect(state.drawn).toBeNull();
+    expect(state.hand).toHaveLength(10);
+    expect(state.hand.filter((t) => t === 5)).toHaveLength(0);
+  });
+
+  it("暗槓の4枚目がツモ牌でも手牌が狂わない", () => {
+    const withThree: ClientEvent = {
+      type: "deal",
+      your_hand: [5, 5, 5, 0, 1, 2, 9, 10, 11, 18, 19, 27, 30],
+      hand_sizes: [13, 13, 13, 13],
+      dora_indicator: 8,
+    };
+    const state = fold([
+      roundStart,
+      withThree,
+      { type: "draw", seat: 0, tile: 5, source: "wall", wall_remaining: 69 },
+      { type: "call", seat: 0, from: 0, kind: "ankan", tiles: [5, 5, 5, 5] },
+      { type: "draw", seat: 0, tile: 33, source: "dead_wall", wall_remaining: 69 },
+    ]);
+    expect(state.hand).toHaveLength(10);
+    expect(state.hand.filter((t) => t === 5)).toHaveLength(0);
+    expect(state.drawn).toBe(33);
+    expect(state.seats[0]?.melds[0]?.kind).toBe("ankan");
+  });
+
   it("暗槓は河を触らず、手牌から4枚出る", () => {
     // **暗槓は from が自分自身。**河を消すと無関係な牌が消える。
     const withFour: ClientEvent = {
@@ -596,6 +643,24 @@ function seatOf(state: GameState, seat: Seat): SeatView {
   return found;
 }
 
+/**
+ * 自分の持ち牌から1枚取り除く。
+ *
+ * **ツモ牌は手牌と分けて持っている。**加槓の4枚目や暗槓の4枚目は
+ * たいていツモってきた牌なので、手牌だけを見ると取り除けず、
+ * 手牌が1枚多いまま残る。
+ */
+function takeFromMine(state: GameState, tile: Tile): void {
+  const at = state.hand.indexOf(tile);
+  if (at >= 0) {
+    state.hand.splice(at, 1);
+    return;
+  }
+  if (state.drawn === tile) {
+    state.drawn = null;
+  }
+}
+
 function emptySeat(): SeatView {
   return { handSize: 0, river: [], melds: [], riichi: false, declaring: false };
 }
@@ -767,10 +832,7 @@ export function apply(
 
       if (event.seat === state.you) {
         for (const tile of fromHand) {
-          const at = state.hand.indexOf(tile);
-          if (at >= 0) {
-            state.hand.splice(at, 1);
-          }
+          takeFromMine(state, tile);
         }
         state.pending = null;
       } else {
@@ -832,7 +894,7 @@ export function apply(
 - [ ] **Step 4: 通ることを確かめる**
 
 Run: `pnpm --dir apps/web test state`
-Expected: 20 passed
+Expected: 22 passed
 
 - [ ] **Step 5: コミット**
 
