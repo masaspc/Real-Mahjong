@@ -53,6 +53,312 @@ pub trait Seeds: Send + 'static {
 }
 
 #[cfg(test)]
+mod reaction_tests {
+    use super::tests::rules;
+    use super::*;
+    use protocol::client_event::ClientEvent;
+    use protocol::command::{ActionOption, CallResponse};
+    use protocol::event::PlayerId;
+
+    fn human_at(seat: usize) -> [Occupant; 4] {
+        std::array::from_fn(|index| {
+            if index == seat {
+                Occupant::Human(PlayerId("human".to_owned()))
+            } else {
+                Occupant::Cpu(PlayerId(format!("cpu{index}")))
+            }
+        })
+    }
+
+    fn all_cpu() -> [Occupant; 4] {
+        std::array::from_fn(|index| Occupant::Cpu(PlayerId(format!("cpu{index}"))))
+    }
+
+    fn humans_at(first: usize, second: usize) -> [Occupant; 4] {
+        std::array::from_fn(|index| {
+            if index == first || index == second {
+                Occupant::Human(PlayerId(format!("human{index}")))
+            } else {
+                Occupant::Cpu(PlayerId(format!("cpu{index}")))
+            }
+        })
+    }
+
+    /// その席へ最初に届く「鳴きの要求」まで進める。
+    /// 打牌の要求（自分の番）は読み飛ばす。
+    async fn advance_to_a_call_window(inbox: &mut Inbound) -> (u32, Vec<ActionOption>) {
+        for _ in 0..3_000 {
+            let next = tokio::time::timeout(Duration::from_millis(120_000), inbox.recv())
+                .await
+                .expect("仮想2分のうちに何か届く");
+            let Some(envelope) = next else {
+                break;
+            };
+            if let ClientEvent::RequestAction {
+                window_id, options, ..
+            } = &envelope.event
+            {
+                if options
+                    .iter()
+                    .any(|option| !matches!(option, ActionOption::Discard { .. }))
+                {
+                    return (*window_id, options.clone());
+                }
+            }
+        }
+        panic!("鳴きの要求に到達しなかった");
+    }
+
+    /// **卓は時間を作らない。**最低待機 350ms を越えさせるのは Actor の tick。
+    #[tokio::test(start_paused = true)]
+    async fn the_actor_carries_a_call_across_the_minimum_wait() {
+        let (handle, _actor) = spawn(rules(), human_at(1), SeedSource::from_master([1u8; 32]));
+        let clock = Clock::start();
+        let (_, mut inbox) = handle
+            .attach(Seat::new(1), None)
+            .await
+            .expect("卓は生きている");
+
+        let (window_id, options) = advance_to_a_call_window(&mut inbox).await;
+        // 実測では 55,200ms だが、そこは CPU の打牌方針しだいで動く。
+        // **仕様は「応答から最低待機ぶん後に成立する」であって、
+        // 要求が何ミリ秒に届くかではない。**時刻そのものは固定しない。
+        let opened_at = clock.now_ms();
+
+        let tiles = options
+            .iter()
+            .find_map(|option| match option {
+                ActionOption::Pon { candidates } if !candidates.is_empty() => Some(candidates[0]),
+                _ => None,
+            })
+            .expect("ポンの候補がある");
+
+        // **同じミリ秒に応じる。**卓が自分で時間を進めるなら、ここで成立して
+        // しまう。成立が 350ms 後になることが、Actor が越えさせている証拠。
+        let accepted = handle
+            .command(
+                Seat::new(1),
+                Command::CallResponse {
+                    window_id,
+                    response: CallResponse::Pon { tiles },
+                },
+                handle.now_ms(),
+            )
+            .await
+            .expect("卓は生きている");
+        assert_eq!(accepted, Ok(()));
+        assert_eq!(clock.now_ms(), opened_at, "応答で時間が進んでいる");
+
+        let mut called_at = None;
+        for _ in 0..40 {
+            let next = tokio::time::timeout(Duration::from_millis(60_000), inbox.recv())
+                .await
+                .expect("仮想60秒のうちに届く");
+            let Some(envelope) = next else {
+                break;
+            };
+            if matches!(envelope.event, ClientEvent::Call { .. }) {
+                called_at = Some(clock.now_ms());
+                break;
+            }
+        }
+        let called_at = called_at.expect("鳴きが成立しなかった");
+        assert!(
+            called_at >= opened_at + 350,
+            "最低待機を越えずに成立した: +{}ms",
+            called_at - opened_at
+        );
+        assert!(
+            called_at <= opened_at + 450,
+            "ポーリング1周を超えて遅れた: +{}ms",
+            called_at - opened_at
+        );
+    }
+
+    /// **誰も鳴けない打牌でも一律に待つ。**（仕様 6.4）
+    ///
+    /// 鳴ける者がいないときだけ次のツモが速いと、待ち時間の長短から
+    /// 「誰も鳴けなかった」が読めてしまう。一律に待つのは情報を漏らさない
+    /// ためであり、その待機を越えさせるのも Actor の `tick` である。
+    ///
+    /// 実測では、4人 CPU の対局で打牌から次のツモまでが**30回すべて
+    /// ちょうど 400ms**（最低待機 350ms の直後のポーリング）だった。
+    #[tokio::test(start_paused = true)]
+    async fn even_an_uncalled_discard_waits_out_the_minimum() {
+        let (handle, _actor) = spawn(rules(), all_cpu(), SeedSource::from_master([1u8; 32]));
+        let clock = Clock::start();
+        let (_, mut inbox) = handle
+            .attach(Seat::new(0), None)
+            .await
+            .expect("卓は生きている");
+
+        let mut discarded_at: Option<u64> = None;
+        let mut gaps: Vec<u64> = Vec::new();
+        while gaps.len() < 20 {
+            let next = tokio::time::timeout(Duration::from_millis(600_000), inbox.recv())
+                .await
+                .expect("仮想10分のうちに届く");
+            let Some(envelope) = next else { break };
+            match &envelope.event {
+                ClientEvent::Discard { .. } => discarded_at = Some(clock.now_ms()),
+                // **鳴きが挟まった区間は数えない。**鳴けた場合の待機と
+                // 混ぜると「誰も鳴けなくても待つ」の検証にならない。
+                ClientEvent::Call { .. } | ClientEvent::RequestAction { .. } => {
+                    discarded_at = None;
+                }
+                ClientEvent::Draw { .. } => {
+                    if let Some(at) = discarded_at.take() {
+                        gaps.push(clock.now_ms() - at);
+                    }
+                }
+                _ => {}
+            }
+        }
+
+        assert_eq!(gaps.len(), 20, "測れた間隔が足りない");
+        for gap in &gaps {
+            assert!(
+                *gap >= 350,
+                "誰も鳴かなかった打牌の直後に次のツモが来た: {gap}ms"
+            );
+            assert!(*gap <= 450, "ポーリング1周を超えて遅れた: {gap}ms");
+        }
+    }
+
+    /// **同じミリ秒に2席が同じウィンドウへ応じても、両方が受理される。**
+    ///
+    /// エンジンの判定規則は 298 件のテストが見ているが、「締切前に入口へ
+    /// 着いた応答が、解決の tick より先に全部適用される」のは Actor が
+    /// 新たに担う輸送の保証であり、エンジン単体では確かめられない。
+    #[tokio::test(start_paused = true)]
+    async fn two_seats_answer_the_same_window_before_the_tick() {
+        let (handle, _actor) = spawn(rules(), humans_at(0, 2), SeedSource::from_master([1u8; 32]));
+        let (_, mut east) = handle
+            .attach(Seat::new(0), None)
+            .await
+            .expect("卓は生きている");
+        let (_, mut west) = handle
+            .attach(Seat::new(2), None)
+            .await
+            .expect("卓は生きている");
+
+        let mut seen_east: Vec<u32> = Vec::new();
+        let mut seen_west: Vec<u32> = Vec::new();
+        let mut shared = None;
+        for _ in 0..6_000 {
+            for (inbox, seen) in [(&mut east, &mut seen_east), (&mut west, &mut seen_west)] {
+                while let Ok(envelope) = inbox.try_recv() {
+                    if let ClientEvent::RequestAction {
+                        window_id, options, ..
+                    } = &envelope.event
+                    {
+                        if options
+                            .iter()
+                            .any(|option| !matches!(option, ActionOption::Discard { .. }))
+                        {
+                            seen.push(*window_id);
+                        }
+                    }
+                }
+            }
+            if let Some(window) = seen_east.iter().find(|w| seen_west.contains(w)) {
+                shared = Some(*window);
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(100)).await;
+        }
+        let window_id = shared.expect("2席共通のウィンドウに到達しなかった");
+
+        // **同時に投入する。**逐次に送ると1件ずつ処理されるだけで、
+        // 「入口に並んだ複数の応答が tick より先に片づく」を試せない。
+        let at = handle.now_ms();
+        let (first, second) = tokio::join!(
+            handle.command(
+                Seat::new(0),
+                Command::CallResponse {
+                    window_id,
+                    response: CallResponse::Pass,
+                },
+                at,
+            ),
+            handle.command(
+                Seat::new(2),
+                Command::CallResponse {
+                    window_id,
+                    response: CallResponse::Pass,
+                },
+                at,
+            )
+        );
+        assert_eq!(first.expect("卓は生きている"), Ok(()), "先の応答が拒まれた");
+        assert_eq!(
+            second.expect("卓は生きている"),
+            Ok(()),
+            "同じミリ秒の2席目の応答が拒まれた"
+        );
+    }
+
+    /// `window_id` は再送や遅れた応答を別のウィンドウへ当てないための鍵。
+    #[tokio::test(start_paused = true)]
+    async fn a_response_to_an_unknown_window_is_refused() {
+        let (handle, _actor) = spawn(rules(), human_at(1), SeedSource::from_master([1u8; 32]));
+        let (_, mut inbox) = handle
+            .attach(Seat::new(1), None)
+            .await
+            .expect("卓は生きている");
+        let (window_id, _) = advance_to_a_call_window(&mut inbox).await;
+
+        assert_eq!(
+            handle
+                .command(
+                    Seat::new(1),
+                    Command::CallResponse {
+                        window_id: window_id + 999,
+                        response: CallResponse::Pass,
+                    },
+                    handle.now_ms(),
+                )
+                .await
+                .expect("卓は生きている"),
+            Err(Reject::StaleWindow),
+            "知らないウィンドウへの応答が通った"
+        );
+
+        assert_eq!(
+            handle
+                .command(
+                    Seat::new(1),
+                    Command::CallResponse {
+                        window_id,
+                        response: CallResponse::Pass,
+                    },
+                    handle.now_ms(),
+                )
+                .await
+                .expect("卓は生きている"),
+            Ok(()),
+            "正しいウィンドウへの応答が通らない"
+        );
+
+        assert_eq!(
+            handle
+                .command(
+                    Seat::new(1),
+                    Command::CallResponse {
+                        window_id,
+                        response: CallResponse::Pass,
+                    },
+                    handle.now_ms(),
+                )
+                .await
+                .expect("卓は生きている"),
+            Err(Reject::StaleWindow),
+            "同じウィンドウへ二度応えられている"
+        );
+    }
+}
+
+#[cfg(test)]
 mod reconnect_tests {
     use super::tests::{humans, one_human_three_cpus, rules, take_ready};
     use super::*;
