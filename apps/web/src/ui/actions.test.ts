@@ -15,7 +15,8 @@ describe("選べる操作からコマンドを組み立てる", () => {
 
   it("チーは候補ごとにボタンを出し、call_response で送る", () => {
     const choices = actionsFor(offering([{ type: "chi", candidates: [[0, 1], [1, 3]] }]));
-    expect(choices).toHaveLength(2);
+    // 候補2つ + 見送り。
+    expect(choices).toHaveLength(3);
     expect(choices[0]?.command).toEqual({
       type: "call_response",
       window_id: 7,
@@ -63,7 +64,12 @@ describe("選べる操作からコマンドを組み立てる", () => {
         },
       ]),
     );
-    expect(choices.map((c) => c.command.type)).toEqual(["call_response", "ankan", "kakan"]);
+    // 末尾の見送りは別のテストで見る。ここは送り方の違いだけを固定する。
+    expect(choices.slice(0, 3).map((c) => c.command.type)).toEqual([
+      "call_response",
+      "ankan",
+      "kakan",
+    ]);
   });
 
   it("ロンは call_response、ツモは専用のコマンド", () => {
@@ -75,13 +81,33 @@ describe("選べる操作からコマンドを組み立てる", () => {
     expect(actionsFor(offering([{ type: "tsumo" }]))[0]?.command).toEqual({ type: "tsumo" });
   });
 
-  it("九種九牌と見送り", () => {
+  it("九種九牌", () => {
     expect(actionsFor(offering([{ type: "kyuushu" }]))[0]?.command).toEqual({ type: "kyuushu" });
-    expect(actionsFor(offering([{ type: "pass" }]))[0]?.command).toEqual({
+  });
+
+  it("反応ウィンドウでは必ず見送れる", () => {
+    // **エンジンは ActionOption::Pass を一度も出さない。**それでも
+    // CallResponse::Pass は常に受理される。押せないと、鳴きたくない席が
+    // 時間切れまで待つことになり、他の3人まで待たされる。
+    const choices = actionsFor(offering([{ type: "pon", candidates: [[4, 4]] }]));
+    const last = choices[choices.length - 1];
+    expect(last?.label).toBe("見送り");
+    expect(last?.command).toEqual({
       type: "call_response",
       window_id: 7,
       response: { type: "pass" },
     });
+  });
+
+  it("自分の番には見送りを出さない", () => {
+    // 打牌を求められているのだから、必ず何かを切る。
+    const choices = actionsFor(
+      offering([
+        { type: "discard", allowed: [0], riichi_allowed: [] },
+        { type: "tsumo" },
+      ]),
+    );
+    expect(choices.map((c) => c.label)).toEqual(["ツモ"]);
   });
 
   it("打てる牌は allowed のものだけ", () => {

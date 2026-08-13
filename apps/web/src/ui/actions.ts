@@ -26,6 +26,10 @@ export function actionsFor(state: GameState): Choice[] {
   const windowId = pending.windowId;
   const choices: Choice[] = [];
 
+  // **打牌を求められていなければ反応ウィンドウ。**そのときだけ見送れる。
+  // 自分の番に「見送り」は意味を持たない。必ず何かを切る。
+  const isReaction = !pending.options.some((option) => option.type === "discard");
+
   for (const option of pending.options) {
     switch (option.type) {
       case "chi":
@@ -82,16 +86,20 @@ export function actionsFor(state: GameState): Choice[] {
         choices.push({ label: "九種九牌", command: { type: "kyuushu" } });
         break;
 
-      case "pass":
-        choices.push({
-          label: "見送り",
-          command: { type: "call_response", window_id: windowId, response: { type: "pass" } },
-        });
-        break;
-
       default:
         break;
     }
+  }
+
+  // **`ActionOption::Pass` はエンジンが一度も出さない。**それでも
+  // `CallResponse::Pass` はいつでも受理される（`response_is_offered` が
+  // Pass だけ無条件に真）。見送りが押せないと、鳴きたくない席は
+  // 時間切れまで待つことになり、他の3人まで待たされる。
+  if (isReaction && choices.length > 0) {
+    choices.push({
+      label: "見送り",
+      command: { type: "call_response", window_id: windowId, response: { type: "pass" } },
+    });
   }
   return choices;
 }
