@@ -1,44 +1,107 @@
-:root { font-family: system-ui, sans-serif; color: #f7f4df; background: #153e2d; }
+:root {
+  font-family: system-ui, sans-serif;
+  color: #f7f4df;
+  background: #071a12;
+}
+
 * { box-sizing: border-box; }
-body { margin: 0; }
+html, body, #app { width: 100%; height: 100%; margin: 0; overflow: hidden; }
 button { font: inherit; }
-.board { max-width: 1180px; min-height: 100vh; margin: auto; padding: 16px; display: grid; gap: 14px; }
-.summary, .opponents, .hand-row, .actions, .melds { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; }
-.summary { padding: 10px; background: #102a20; }
+
+#table, #ui { position: absolute; inset: 0; }
+#table { z-index: 0; background: #071a12; }
+#table canvas { display: block; width: 100%; height: 100%; }
+#ui { z-index: 1; pointer-events: none; }
+
+.board { position: relative; width: 100%; height: 100%; padding: 14px; }
+.summary, .scores, .actions { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; }
+.summary {
+  pointer-events: auto;
+  max-width: 1180px;
+  margin: auto;
+  padding: 8px 10px;
+  border: 1px solid rgba(213, 196, 93, .55);
+  background: rgba(8, 30, 21, .88);
+  box-shadow: 0 2px 12px rgba(0, 0, 0, .45);
+}
 .summary .action { margin-left: auto; }
-.opponents { align-items: stretch; }
-.seat { flex: 1 1 280px; min-width: 0; padding: 10px; border: 1px solid #8db09b; background: #1c513b; }
-.seat h2, .my-hand h2 { margin: 0 0 8px; font-size: 1rem; }
-.concealed { margin: 4px 0; }
-.river { display: grid; grid-template-columns: repeat(6, 34px); gap: 4px 3px; min-height: 46px; margin-top: 8px; }
-/* 牌。面は SVG なので、ここでは大きさと厚みだけを作る。 */
-.tile { display: inline-block; width: 34px; padding: 0; border: 0; background: none; line-height: 0; }
-.tile-face { display: block; width: 100%; height: auto; border-radius: 5px; box-shadow: 0 2px 0 #b0a074, 0 3px 4px rgba(0, 0, 0, .35); }
-.tile.back .tile-face { box-shadow: 0 2px 0 #17402c, 0 3px 4px rgba(0, 0, 0, .35); }
-.tiles { display: inline-flex; gap: 2px; vertical-align: middle; }
-.meld { display: inline-flex; align-items: end; gap: 3px; }
-.meld small { color: #d8e6dc; }
-/* リーチ宣言牌は横に倒す。 */
-.riichi-discard { transform: rotate(90deg); }
-.my-hand { padding: 12px; background: #102a20; }
-.hand-row { flex-wrap: nowrap; overflow-x: auto; padding: 10px 0 6px; gap: 3px; }
-/* 押せる牌は浮かせる。押せない牌は沈める。 */
-.hand-tile { width: 42px; cursor: pointer; transition: transform .08s ease; }
-.hand-tile:not(:disabled):hover { transform: translateY(-6px); }
-.hand-tile:disabled { cursor: default; filter: grayscale(.5) brightness(.82); }
-.drawn { margin-left: 14px; }
-.concealed { margin: 4px 0; }
-.concealed .tile { width: 22px; }
-.actions { min-height: 44px; margin-top: 8px; }
-.action { padding: 7px 12px; border: 1px solid #d5c45d; border-radius: 4px; color: #fff; background: #674d13; cursor: pointer; }
+.dora { display: inline-flex; align-items: center; gap: 3px; }
+
+.tile { display: inline-block; width: 28px; border: 0; line-height: 0; }
+.tile-face {
+  display: block;
+  width: 100%;
+  height: auto;
+  border-radius: 4px;
+  box-shadow: 0 2px 0 #b0a074, 0 3px 4px rgba(0, 0, 0, .35);
+}
+
+.scores {
+  position: absolute;
+  inset: 68px 14px auto;
+  justify-content: center;
+}
+.score {
+  min-width: 150px;
+  padding: 5px 8px;
+  text-align: center;
+  border-radius: 3px;
+  background: rgba(8, 30, 21, .8);
+  text-shadow: 0 1px 2px #000;
+}
+.score:first-child { color: #ffe86a; }
+
+.controls {
+  position: absolute;
+  left: 50%;
+  bottom: 16px;
+  width: min(720px, calc(100% - 28px));
+  transform: translateX(-50%);
+  pointer-events: auto;
+}
+.actions { min-height: 44px; justify-content: center; }
+.action {
+  padding: 8px 14px;
+  border: 1px solid #d5c45d;
+  border-radius: 4px;
+  color: #fff;
+  background: rgba(103, 77, 19, .96);
+  cursor: pointer;
+  box-shadow: 0 2px 8px rgba(0, 0, 0, .45);
+}
 .action.selected { outline: 3px solid #ffdf33; }
-.timer { height: 8px; overflow: hidden; background: #0a2118; }
-.timer-fill { display: block; height: 100%; background: #f0d34f; transition: width .1s linear; }
-.notice, .ranking { padding: 12px; text-align: center; font-weight: 700; background: #7a2d24; }
+.timer {
+  height: 8px;
+  margin-top: 6px;
+  overflow: hidden;
+  border: 1px solid rgba(255, 255, 255, .3);
+  background: rgba(10, 33, 24, .9);
+}
+.timer-fill {
+  display: block;
+  height: 100%;
+  background: #f0d34f;
+  transition: width .1s linear;
+}
+
+.notice, .ranking {
+  position: absolute;
+  top: 50%;
+  left: 50%;
+  width: min(760px, calc(100% - 32px));
+  padding: 14px;
+  transform: translate(-50%, -50%);
+  text-align: center;
+  font-weight: 700;
+  background: rgba(122, 45, 36, .94);
+  box-shadow: 0 3px 20px rgba(0, 0, 0, .55);
+}
+.ranking { top: calc(50% + 58px); }
+
 @media (max-width: 700px) {
-  .board { padding: 8px; }
-  .opponents { display: grid; }
-  .river { grid-template-columns: repeat(9, 26px); }
-  .tile { width: 26px; }
-  .hand-tile { width: 32px; }
+  .board { padding: 7px; }
+  .summary { font-size: .8rem; }
+  .scores { inset: 104px 7px auto; gap: 4px; font-size: .75rem; }
+  .score { min-width: 120px; }
+  .controls { bottom: 8px; }
 }
