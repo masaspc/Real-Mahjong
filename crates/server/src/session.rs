@@ -52,6 +52,582 @@ pub trait Seeds: Send + 'static {
     fn next_seed(&mut self) -> impl std::future::Future<Output = Seed> + Send;
 }
 
+#[cfg(test)]
+mod reconnect_tests {
+    use super::tests::{humans, one_human_three_cpus, rules, take_ready};
+    use super::*;
+    use protocol::client_event::ClientEvent;
+    use protocol::event::PlayerId;
+
+    fn all_cpu() -> [Occupant; 4] {
+        std::array::from_fn(|i| Occupant::Cpu(PlayerId(format!("cpu{i}"))))
+    }
+
+    /// 仮想時間でこれを超えたら、卓が終わらない不具合とみなす。
+    const A_VIRTUAL_HOUR_MS: u64 = 3_600_000;
+
+    /// **正直な申告は必ず受理される。**
+    ///
+    /// 卓を進めてから繋ぎ直すので、受け取る束が空にならない。空のまま
+    /// 「戻ってきたものは無かった」で通ると、`checked` が常に最初から
+    /// 送り直していても気づけない。
+    #[tokio::test(start_paused = true)]
+    async fn reattaching_from_a_sequence_skips_what_was_already_seen() {
+        let (handle, _actor) = spawn(
+            rules(),
+            one_human_three_cpus(),
+            SeedSource::from_master([1u8; 32]),
+        );
+        let (_, mut first) = handle
+            .attach(Seat::new(1), None)
+            .await
+            .expect("卓は生きている");
+
+        let seen = take_ready(&mut first);
+        let last = seen.last().expect("何か届いている").seq;
+
+        // 親は席0の人間。その持ち時間が尽きて卓が進むまで待つ。
+        tokio::time::sleep(Duration::from_millis(30_000)).await;
+
+        let (_, mut second) = handle
+            .attach(Seat::new(1), Some(last))
+            .await
+            .expect("卓は生きている");
+
+        let caught_up = take_ready(&mut second);
+        assert!(!caught_up.is_empty(), "正直な申告が受理されていない");
+        assert_ne!(
+            caught_up.first().map(|e| e.seq),
+            Some(0),
+            "正直な申告なのに最初から送り直している"
+        );
+        for envelope in &caught_up {
+            assert!(envelope.seq > last, "見たものがまた来ている");
+        }
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn reattaching_from_nothing_replays_the_whole_match() {
+        let (handle, _actor) = spawn(rules(), humans(), SeedSource::from_master([1u8; 32]));
+        let (_, mut first) = handle
+            .attach(Seat::new(0), None)
+            .await
+            .expect("卓は生きている");
+        let original = take_ready(&mut first);
+
+        let (_, mut second) = handle
+            .attach(Seat::new(0), None)
+            .await
+            .expect("卓は生きている");
+        let replayed = take_ready(&mut second);
+
+        assert_eq!(
+            original.iter().map(|e| e.seq).collect::<Vec<_>>(),
+            replayed.iter().map(|e| e.seq).collect::<Vec<_>>(),
+            "再送が元と食い違っている"
+        );
+        assert!(
+            replayed
+                .iter()
+                .any(|e| matches!(e.event, ClientEvent::MatchStart { .. })),
+            "最初から再送されていない"
+        );
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn an_impossible_sequence_replays_from_the_beginning() {
+        let (handle, _actor) = spawn(rules(), humans(), SeedSource::from_master([1u8; 32]));
+        let (_, mut inbox) = handle
+            .attach(Seat::new(0), Some(u32::MAX))
+            .await
+            .expect("卓は生きている");
+
+        let events = take_ready(&mut inbox);
+        assert!(!events.is_empty(), "未来の連番で配信が永久に止まった");
+        assert_eq!(
+            events.first().map(|e| e.seq),
+            Some(0),
+            "先頭が seq 0 でない"
+        );
+        assert!(events
+            .iter()
+            .any(|e| matches!(e.event, ClientEvent::MatchStart { .. })));
+    }
+
+    /// **その席に投影されなかった連番を申告されたら、最初から送り直す。**
+    ///
+    /// 全体のログを連番で絞ってから席ごとに投影するので、その席に見えない
+    /// 連番が正常に飛び飛びで存在する。`RequestAction` は当該席以外へ
+    /// 投影されないのが代表例。それを申告されて受理すると、まだ一度も
+    /// 見ていない可視イベントが飛ぶ。
+    #[tokio::test(start_paused = true)]
+    async fn a_sequence_hidden_from_this_seat_is_refused() {
+        let (handle, _actor) = spawn(rules(), all_cpu(), SeedSource::from_master([1u8; 32]));
+        let (_, mut inbox) = handle
+            .attach(Seat::new(1), None)
+            .await
+            .expect("卓は生きている");
+
+        let mut visible: Vec<u32> = Vec::new();
+        while visible.len() < 40 {
+            let next = tokio::time::timeout(Duration::from_millis(60_000), inbox.recv())
+                .await
+                .expect("仮想60秒のうちに届く");
+            let Some(envelope) = next else { break };
+            visible.push(envelope.seq);
+        }
+        let highest = *visible.last().expect("何か届いている");
+        let hidden: Vec<u32> = (0..highest).filter(|s| !visible.contains(s)).collect();
+        assert!(!hidden.is_empty(), "見えない連番が無いと検証にならない");
+
+        let claim = hidden[hidden.len() / 2];
+        let (_, mut liar) = handle
+            .attach(Seat::new(1), Some(claim))
+            .await
+            .expect("卓は生きている");
+        assert_eq!(
+            take_ready(&mut liar).first().map(|e| e.seq),
+            Some(0),
+            "自席に見えない連番を受理して途中から送っている"
+        );
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn every_connection_gets_its_own_id() {
+        let (handle, _actor) = spawn(rules(), humans(), SeedSource::from_master([1u8; 32]));
+        let (first, _a) = handle
+            .attach(Seat::new(0), None)
+            .await
+            .expect("卓は生きている");
+        let (second, _b) = handle
+            .attach(Seat::new(0), None)
+            .await
+            .expect("卓は生きている");
+        let (third, _c) = handle
+            .attach(Seat::new(1), None)
+            .await
+            .expect("卓は生きている");
+        assert_ne!(first, second, "同じ席で ID が使い回されている");
+        assert_ne!(second, third, "別の席と ID が衝突している");
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn a_stale_detach_does_not_kill_the_new_connection() {
+        let (handle, _actor) = spawn(
+            rules(),
+            one_human_three_cpus(),
+            SeedSource::from_master([1u8; 32]),
+        );
+        let (old_id, mut old) = handle
+            .attach(Seat::new(0), None)
+            .await
+            .expect("卓は生きている");
+        let seen = take_ready(&mut old).last().map(|e| e.seq);
+        let (new_id, mut fresh) = handle
+            .attach(Seat::new(0), seen)
+            .await
+            .expect("卓は生きている");
+        assert_ne!(old_id, new_id);
+
+        // 置き換えられた古い接続が、遅れて切断を申し出る。
+        handle
+            .detach(Seat::new(0), old_id)
+            .await
+            .expect("卓は生きている");
+        drop(old);
+
+        tokio::time::sleep(Duration::from_millis(30_000)).await;
+        assert!(
+            !take_ready(&mut fresh).is_empty(),
+            "古い接続の切断が新しい接続を巻き添えにした"
+        );
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn a_detached_seat_catches_up_when_it_comes_back() {
+        let (handle, _actor) = spawn(
+            rules(),
+            one_human_three_cpus(),
+            SeedSource::from_master([1u8; 32]),
+        );
+        let (id, mut inbox) = handle
+            .attach(Seat::new(1), None)
+            .await
+            .expect("卓は生きている");
+        let last = take_ready(&mut inbox).last().expect("何か届いている").seq;
+
+        handle
+            .detach(Seat::new(1), id)
+            .await
+            .expect("卓は生きている");
+        drop(inbox);
+
+        // 席が居ないあいだも卓は進む。**親は席0の人間**なので、
+        // その持ち時間が尽きて自動打牌されるまで待つ必要がある。
+        tokio::time::sleep(Duration::from_millis(30_000)).await;
+
+        let (_, mut back) = handle
+            .attach(Seat::new(1), Some(last))
+            .await
+            .expect("卓は生きている");
+        let caught_up = take_ready(&mut back);
+
+        assert!(!caught_up.is_empty(), "留守中の分が追いついていない");
+        assert!(caught_up.iter().all(|e| e.seq > last));
+        for pair in caught_up.windows(2) {
+            assert!(pair[0].seq < pair[1].seq);
+        }
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn dropping_a_receiver_does_not_stop_the_table() {
+        let (handle, _actor) = spawn(
+            rules(),
+            one_human_three_cpus(),
+            SeedSource::from_master([1u8; 32]),
+        );
+        let (_, inbox) = handle
+            .attach(Seat::new(2), None)
+            .await
+            .expect("卓は生きている");
+        drop(inbox);
+
+        tokio::time::sleep(Duration::from_millis(30_000)).await;
+
+        let (_, mut other) = handle
+            .attach(Seat::new(3), None)
+            .await
+            .expect("卓は生きている");
+        assert!(!take_ready(&mut other).is_empty(), "卓が止まっている");
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn four_cpus_play_a_whole_match_and_the_actor_shuts_down() {
+        let (handle, _actor) = spawn(rules(), all_cpu(), SeedSource::from_master([1u8; 32]));
+        let (_, mut watcher) = handle
+            .attach(Seat::new(0), None)
+            .await
+            .expect("卓は生きている");
+
+        let mut saw_match_end = false;
+        let mut previous = None;
+        loop {
+            // 卓が終わらない不具合を、ハングでなく assertion で捕まえる。
+            let next =
+                tokio::time::timeout(Duration::from_millis(A_VIRTUAL_HOUR_MS), watcher.recv())
+                    .await
+                    .expect("仮想1時間のうちに終わる");
+            let Some(envelope) = next else { break };
+            if let Some(prev) = previous {
+                assert!(envelope.seq > prev, "連番が戻った");
+            }
+            previous = Some(envelope.seq);
+            if matches!(envelope.event, ClientEvent::MatchEnd { .. }) {
+                saw_match_end = true;
+            }
+        }
+        assert!(saw_match_end, "半荘が終わっていない");
+
+        // Actor が落ちるとハンドルの送り口も閉じる。
+        for _ in 0..100 {
+            if handle.is_closed() {
+                break;
+            }
+            tokio::task::yield_now().await;
+        }
+        assert!(handle.is_closed(), "卓が終わったのに Actor が生きている");
+    }
+
+    /// **何度繋ぎ直しても、残り時間は同じ一本の絶対締切を指す。**
+    ///
+    /// 絶対締切を Actor が測り直した時刻から作ると、繋ぎ直すたびに
+    /// 指す先がずれる。控えるのは「エンジンへ渡した時刻」でなければ
+    /// ならない。実測では4回の再送がすべて 25,750ms を指した。
+    #[tokio::test(start_paused = true)]
+    async fn the_remaining_time_shrinks_exactly_with_the_clock() {
+        let (handle, _actor) = spawn(
+            rules(),
+            one_human_three_cpus(),
+            SeedSource::from_master([1u8; 32]),
+        );
+        let (_, mut inbox) = handle
+            .attach(Seat::new(0), None)
+            .await
+            .expect("卓は生きている");
+        let seq = take_ready(&mut inbox)
+            .iter()
+            .find_map(|e| match &e.event {
+                ClientEvent::RequestAction { .. } => Some(e.seq),
+                _ => None,
+            })
+            .expect("要求が届いている");
+
+        let mut readings: Vec<(u64, u32)> = Vec::new();
+        for _ in 0..4 {
+            let (_, mut fresh) = handle
+                .attach(Seat::new(0), None)
+                .await
+                .expect("卓は生きている");
+            let now = handle.now_ms();
+            let value = take_ready(&mut fresh)
+                .iter()
+                .find_map(|e| match &e.event {
+                    ClientEvent::RequestAction { deadline_ms, .. } if e.seq == seq => {
+                        Some(*deadline_ms)
+                    }
+                    _ => None,
+                })
+                .expect("同じ要求が再送される");
+            readings.push((now, value));
+            drop(fresh);
+            tokio::time::sleep(Duration::from_millis(3_000)).await;
+        }
+
+        let absolute = readings[0].0 + u64::from(readings[0].1);
+        for (at, value) in &readings {
+            assert_eq!(
+                at + u64::from(*value),
+                absolute,
+                "時刻 {at} の再送が別の絶対締切を指している"
+            );
+        }
+    }
+
+    /// **締切を過ぎた要求は、残り0で再送される。**
+    ///
+    /// `attach(seat, None)` は対局の頭から送り直すので、とっくに過ぎた
+    /// 要求も混ざる。満額の残り時間で送ると、クライアントは終わった
+    /// ウィンドウのタイマーを回し始める。
+    #[tokio::test(start_paused = true)]
+    async fn an_expired_request_is_resent_with_no_time_left() {
+        let (handle, _actor) = spawn(
+            rules(),
+            one_human_three_cpus(),
+            SeedSource::from_master([1u8; 32]),
+        );
+        let (_, mut inbox) = handle
+            .attach(Seat::new(0), None)
+            .await
+            .expect("卓は生きている");
+        let seq = take_ready(&mut inbox)
+            .iter()
+            .find_map(|e| match &e.event {
+                ClientEvent::RequestAction { .. } => Some(e.seq),
+                _ => None,
+            })
+            .expect("要求が届いている");
+
+        // 締切（5,000 + 20,000 + 500 + 250 = 25,750ms）を大きく越える。
+        tokio::time::sleep(Duration::from_millis(40_000)).await;
+
+        let (_, mut back) = handle
+            .attach(Seat::new(0), None)
+            .await
+            .expect("卓は生きている");
+        assert_eq!(
+            take_ready(&mut back).iter().find_map(|e| match &e.event {
+                ClientEvent::RequestAction { deadline_ms, .. } if e.seq == seq =>
+                    Some(*deadline_ms),
+                _ => None,
+            }),
+            Some(0),
+            "過ぎた要求が残り時間を持ったまま再送されている"
+        );
+    }
+
+    /// **最新の連番を申告したら、何も返らない。**
+    ///
+    /// `>` と `>=` を取り違えると、直前に見たものがもう一度届く。
+    #[tokio::test(start_paused = true)]
+    async fn reattaching_from_the_latest_sequence_sends_nothing() {
+        let (handle, _actor) = spawn(rules(), humans(), SeedSource::from_master([1u8; 32]));
+        let (_, mut inbox) = handle
+            .attach(Seat::new(0), None)
+            .await
+            .expect("卓は生きている");
+        let latest = take_ready(&mut inbox).last().expect("何か届いている").seq;
+
+        let (_, mut again) = handle
+            .attach(Seat::new(0), Some(latest))
+            .await
+            .expect("卓は生きている");
+        assert!(
+            take_ready(&mut again).is_empty(),
+            "最新の連番を申告したのに送り直された"
+        );
+    }
+
+    /// **一度も読まない接続が切られない。**
+    ///
+    /// 受け口の容量は追いつきぶんを見てから決めるので、半荘1回ぶんが
+    /// たまっても溢れない。溢れて切られると、生きている接続が黙る。
+    #[tokio::test(start_paused = true)]
+    async fn a_seat_that_never_reads_still_gets_the_whole_match() {
+        let (handle, _actor) = spawn(rules(), all_cpu(), SeedSource::from_master([2u8; 32]));
+        let (_, mut idle) = handle
+            .attach(Seat::new(1), None)
+            .await
+            .expect("卓は生きている");
+        let (_, mut watcher) = handle
+            .attach(Seat::new(0), None)
+            .await
+            .expect("卓は生きている");
+
+        loop {
+            let next =
+                tokio::time::timeout(Duration::from_millis(A_VIRTUAL_HOUR_MS), watcher.recv())
+                    .await
+                    .expect("仮想1時間のうちに終わる");
+            if next.is_none() {
+                break;
+            }
+        }
+        let piled = take_ready(&mut idle);
+        assert!(piled.len() > 500, "溢れて切られている: {} 件", piled.len());
+    }
+
+    /// **再送する要求は、いま本当に残っている時間を載せる。**
+    ///
+    /// `deadline_ms` は発行時点からの残りなので、そのまま送り直すと
+    /// クライアントは満額の持ち時間で表示し、サーバは元の絶対締切で
+    /// 判定する。実測では初回 25,750ms が5秒後の再送で 20,750ms になる。
+    #[tokio::test(start_paused = true)]
+    async fn a_resent_request_shows_the_time_that_is_actually_left() {
+        let (handle, _actor) = spawn(
+            rules(),
+            one_human_three_cpus(),
+            SeedSource::from_master([1u8; 32]),
+        );
+        let (id, mut inbox) = handle
+            .attach(Seat::new(0), None)
+            .await
+            .expect("卓は生きている");
+
+        let (seq, original) = take_ready(&mut inbox)
+            .iter()
+            .find_map(|e| match &e.event {
+                ClientEvent::RequestAction { deadline_ms, .. } => Some((e.seq, *deadline_ms)),
+                _ => None,
+            })
+            .expect("要求が届いている");
+
+        handle
+            .detach(Seat::new(0), id)
+            .await
+            .expect("卓は生きている");
+        drop(inbox);
+        tokio::time::sleep(Duration::from_millis(5_000)).await;
+
+        let (_, mut back) = handle
+            .attach(Seat::new(0), None)
+            .await
+            .expect("卓は生きている");
+        let resent = take_ready(&mut back)
+            .iter()
+            .find_map(|e| match &e.event {
+                ClientEvent::RequestAction { deadline_ms, .. } if e.seq == seq => {
+                    Some(*deadline_ms)
+                }
+                _ => None,
+            })
+            .expect("同じ要求が再送されている");
+
+        assert!(
+            resent < original,
+            "再送された要求が満額の残り時間のまま: {resent} / {original}"
+        );
+        let drained = original - resent;
+        assert!(
+            (4_900..=5_100).contains(&drained),
+            "引き方がずれている: {drained}ms 減った"
+        );
+    }
+
+    /// **出口の容量が、半荘1回ぶんの再送に足りている。**
+    ///
+    /// 足りないと `attach(seat, None)` が溢れ、正当な再接続が切られる。
+    /// 実測は 1,304 / 1,875 / 1,677 件（シード3種）だが、ばらつきが4割
+    /// あるので、将来 CPU の打ち方が変わったときに気づけるようにしておく。
+    #[tokio::test(start_paused = true)]
+    async fn a_whole_match_fits_in_one_outbox() {
+        let (handle, _actor) = spawn(rules(), all_cpu(), SeedSource::from_master([2u8; 32]));
+        let (_, mut watcher) = handle
+            .attach(Seat::new(0), None)
+            .await
+            .expect("卓は生きている");
+
+        let mut count = 0usize;
+        loop {
+            let next =
+                tokio::time::timeout(Duration::from_millis(A_VIRTUAL_HOUR_MS), watcher.recv())
+                    .await
+                    .expect("仮想1時間のうちに終わる");
+            if next.is_none() {
+                break;
+            }
+            count += 1;
+        }
+        assert!(count > 500, "半荘にしてはイベントが少なすぎる: {count}");
+        assert!(
+            count < OUTBOX,
+            "出口の容量が足りない: {count} 件 / {OUTBOX}"
+        );
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn a_finished_table_refuses_new_connections() {
+        let (handle, _actor) = spawn(rules(), all_cpu(), SeedSource::from_master([1u8; 32]));
+        let (_, mut watcher) = handle
+            .attach(Seat::new(0), None)
+            .await
+            .expect("卓は生きている");
+        loop {
+            let next =
+                tokio::time::timeout(Duration::from_millis(A_VIRTUAL_HOUR_MS), watcher.recv())
+                    .await
+                    .expect("仮想1時間のうちに終わる");
+            if next.is_none() {
+                break;
+            }
+        }
+        for _ in 0..100 {
+            if handle.is_closed() {
+                break;
+            }
+            tokio::task::yield_now().await;
+        }
+        assert_eq!(
+            handle.attach(Seat::new(0), None).await.err(),
+            Some(Gone),
+            "終わった卓が接続を受けつけている"
+        );
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn every_round_uses_a_fresh_seed() {
+        let (handle, _actor) = spawn(rules(), all_cpu(), SeedSource::from_master([1u8; 32]));
+        let (_, mut watcher) = handle
+            .attach(Seat::new(0), None)
+            .await
+            .expect("卓は生きている");
+
+        let mut commits = Vec::new();
+        loop {
+            let next =
+                tokio::time::timeout(Duration::from_millis(A_VIRTUAL_HOUR_MS), watcher.recv())
+                    .await
+                    .expect("仮想1時間のうちに終わる");
+            let Some(envelope) = next else { break };
+            if let ClientEvent::RoundStart { seed_commit, .. } = &envelope.event {
+                commits.push(seed_commit.clone());
+            }
+        }
+        assert!(commits.len() >= 2, "局が1つしか立っていない");
+        let unique: std::collections::HashSet<_> = commits.iter().collect();
+        assert_eq!(unique.len(), commits.len(), "同じシードが2度使われている");
+    }
+}
+
 impl Seeds for SeedSource {
     async fn next_seed(&mut self) -> Seed {
         SeedSource::next_seed(self)
