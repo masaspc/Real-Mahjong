@@ -336,7 +336,7 @@ def check_unresolved_types(text, base="."):
 def check_characters(text):
     bad = set()
     for ch in text:
-        if ord(ch) < 128 or ch in "、。「」『』（）ー・…—→×〜§±≤≥":
+        if ord(ch) < 128 or ch in "、。「」『』（）ー・…—→×〜§±≤≥·":
             continue
         name = unicodedata.name(ch, "")
         if name.startswith(("CJK UNIFIED", "HIRAGANA", "KATAKANA", "FULLWIDTH",
