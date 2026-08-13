@@ -330,7 +330,7 @@ std::time を使わないのは、仮想時間で試験できなくなるため�
   - `pub struct Gone;`
   - `pub struct ConnectionId(pub u64);`
   - `pub enum TableMsg { Command { seat, command, at_ms, reply }, Attach { seat, last_seq, out, ack }, Detach { seat, connection } }`
-  - `pub struct TableHandle`, `TableHandle::command`, `TableHandle::attach`, `TableHandle::detach`, `TableHandle::is_closed`
+  - `pub struct TableHandle`（`Clone + Send + Sync + 'static`）, `TableHandle::command`, `TableHandle::attach`, `TableHandle::detach`, `TableHandle::is_closed`
   - `pub fn spawn(rules: Ruleset, occupants: [Occupant; 4], seeds: SeedSource) -> TableHandle`
 
 - [ ] **Step 1: 失敗するテストを書く**
@@ -531,6 +531,14 @@ mod tests {
         for pair in events.windows(2) {
             assert!(pair[0].seq < pair[1].seq, "連番が戻っている");
         }
+    }
+
+    /// Wave 3d で axum のハンドラへ持たせるには `Send + Sync` が要る。
+    /// **ここで確かめておかないと、次のウェーブで型を作り直すことになる。**
+    #[test]
+    fn the_handle_can_cross_threads() {
+        fn assert_send_sync<T: Send + Sync + Clone + 'static>() {}
+        assert_send_sync::<TableHandle>();
     }
 
     /// **これが成り立たないと、入口に着いた時刻で判定する設計が崩れる。**
@@ -862,14 +870,14 @@ async fn run(
 - [ ] **Step 5: 通ることを確かめる**
 
 Run: `cargo test --package server session::tests`
-Expected: 9 passed
+Expected: 10 passed
 
 `a_silent_seat_is_made_to_discard_when_its_bank_runs_out` が落ちる場合、時計が仮想化されていない疑いが濃い。`session_time.rs` に `std::time` が紛れ込んでいないか確認する。
 
 - [ ] **Step 6: crate 全体を測る**
 
 Run: `cargo test --package server`
-期待: 44 件（table 28 + session_time 7 + session 9）
+期待: 45 件（table 28 + session_time 7 + session 10）
 
 - [ ] **Step 7: 検査してコミット**
 
@@ -1212,7 +1220,7 @@ Expected: 10 passed
 - [ ] **Step 5: crate と workspace 全体を測る**
 
 ```bash
-cargo test --package server     # 54 件（table 28 + session_time 7 + session 9 + reconnect 10）
+cargo test --package server     # 55 件（table 28 + session_time 7 + session 10 + reconnect 10）
 cargo test --workspace
 cargo clippy --all-targets -- -D warnings
 cargo fmt --check

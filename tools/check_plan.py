@@ -157,6 +157,7 @@ BUILTIN_NAMES = {
 BUILTIN_TYPES = {
     "Some", "None", "Ok", "Err", "Option", "Result", "String", "Vec", "Box",
     "Default", "Iterator", "Clone", "Copy", "PartialEq", "Eq", "Debug", "Self",
+    "Send", "Sync", "Sized", "Drop", "From", "Into", "Ord", "PartialOrd", "Hash",
 }
 
 
