@@ -377,6 +377,27 @@ describe("盤面の組み立て", () => {
     expect(state.seats[2]?.handSize).toBe(11);
   });
 
+  it("槓に使わなかったツモ牌が嶺上ツモで消えない", () => {
+    // 手牌の4枚で暗槓する。直前のツモ牌は槓と無関係なので手牌へ入る。
+    const withFour: ClientEvent = {
+      type: "deal",
+      your_hand: [5, 5, 5, 5, 0, 1, 2, 9, 10, 11, 18, 19, 20],
+      hand_sizes: [13, 13, 13, 13],
+      dora_indicator: 8,
+    };
+    const state = fold([
+      roundStart,
+      withFour,
+      { type: "draw", seat: 0, tile: 33, source: "wall", wall_remaining: 69 },
+      { type: "call", seat: 0, from: 0, kind: "ankan", tiles: [5, 5, 5, 5] },
+      { type: "draw", seat: 0, tile: 6, source: "dead_wall", wall_remaining: 69 },
+    ]);
+    expect(state.drawn).toBe(6);
+    expect(state.hand).toHaveLength(10);
+    expect(state.hand).toContain(33);
+    expect(state.hand.filter((t) => t === 5)).toHaveLength(0);
+  });
+
   it("加槓の4枚目がツモ牌でも手牌が狂わない", () => {
     // **4枚目はたいていツモってきた牌。**手牌だけを見ると取り除けず、
     // 1枚多いまま残る。
@@ -740,6 +761,13 @@ export function apply(
     case "draw":
       state.wallRemaining = event.wall_remaining;
       if (event.seat === state.you && event.tile !== null) {
+        // **前のツモ牌が残っていれば手牌へ入れる。**カンのあとの嶺上ツモで
+        // 上書きすると、槓に使わなかったツモ牌が消える。手牌の4枚で
+        // 暗槓したときがそれにあたる。
+        if (state.drawn !== null) {
+          state.hand.push(state.drawn);
+          state.hand = sortTiles(state.hand);
+        }
         state.drawn = event.tile;
       } else {
         seatOf(state, event.seat).handSize += 1;
@@ -894,7 +922,7 @@ export function apply(
 - [ ] **Step 4: 通ることを確かめる**
 
 Run: `pnpm --dir apps/web test state`
-Expected: 22 passed
+Expected: 23 passed
 
 - [ ] **Step 5: コミット**
 
