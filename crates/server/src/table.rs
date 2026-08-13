@@ -138,6 +138,18 @@ impl Table {
             .collect()
     }
 
+    /// その連番より後を、視界フィルタを通して返す。
+    ///
+    /// **卓の状態を変えない。**何度呼んでも同じものが返る。
+    /// `None` なら最初から全部返す。
+    pub fn since(&self, seat: Seat, last_seq: Option<u32>) -> Vec<ClientEventEnvelope> {
+        self.log
+            .iter()
+            .filter(|envelope| last_seq.is_none_or(|last| envelope.seq > last))
+            .filter_map(|envelope| project_envelope(envelope, seat))
+            .collect()
+    }
+
     /// 局のイベントを取り込み、連番を振って席ごとの待ち行列へ入れる。
     ///
     /// **射影はここでは行わない。**`drain_for` まで遅らせることで、
@@ -558,5 +570,119 @@ mod cpu_tests {
             table.drain_for(Seat::new(0))
         };
         assert_eq!(build(), build());
+    }
+}
+
+#[cfg(test)]
+mod resume_tests {
+    use super::cpu_tests::all_cpu;
+    use super::tests::{humans, seed_of, table_of};
+    use super::*;
+    use protocol::client_event::ClientEvent;
+
+    #[test]
+    fn a_first_connection_gets_everything() {
+        let mut table = table_of(humans());
+        table.begin_round(&seed_of(1), 0);
+        table.drain_for(Seat::new(0));
+        let all = table.since(Seat::new(0), None);
+        assert!(matches!(all[0].event, ClientEvent::MatchStart { .. }));
+        assert_eq!(all[0].seq, 0);
+    }
+
+    #[test]
+    fn a_resume_sends_only_what_came_after() {
+        let mut table = table_of(humans());
+        table.begin_round(&seed_of(1), 0);
+        let seen = table.drain_for(Seat::new(0));
+        let last = seen.last().expect("何か届いている").seq;
+        assert!(table.since(Seat::new(0), Some(last)).is_empty());
+    }
+
+    #[test]
+    fn a_resume_is_filtered_the_same_way() {
+        let mut table = table_of(humans());
+        table.begin_round(&seed_of(1), 0);
+        let live = table.drain_for(Seat::new(1));
+        let resent = table.since(Seat::new(1), None);
+        assert_eq!(live, resent, "生と再送で内容が変わってはならない");
+    }
+
+    #[test]
+    fn a_resume_does_not_advance_anything() {
+        let mut table = table_of(humans());
+        table.begin_round(&seed_of(1), 0);
+        let before = table.since(Seat::new(0), None);
+        let after = table.since(Seat::new(0), None);
+        assert_eq!(before, after);
+    }
+
+    #[test]
+    fn four_cpus_finish_a_whole_match() {
+        let mut table = table_of(all_cpu());
+        let mut now = 1_000u64;
+        let mut seed_index = 1u8;
+        for _ in 0..5_000 {
+            if table.is_over() {
+                break;
+            }
+            if table.needs_seed() {
+                table.begin_round(&seed_of(seed_index), now);
+                seed_index = seed_index.wrapping_add(1);
+                continue;
+            }
+            now += 1_000_000;
+            table.tick(now);
+        }
+        assert!(table.is_over(), "半荘が終わらなかった");
+        let events = table.since(Seat::new(0), None);
+        assert!(events
+            .iter()
+            .any(|e| matches!(e.event, ClientEvent::MatchEnd { .. })));
+    }
+
+    #[test]
+    fn the_sequence_never_goes_backwards() {
+        let mut table = table_of(all_cpu());
+        let mut now = 1_000u64;
+        let mut seed_index = 1u8;
+        for _ in 0..5_000 {
+            if table.is_over() {
+                break;
+            }
+            if table.needs_seed() {
+                table.begin_round(&seed_of(seed_index), now);
+                seed_index = seed_index.wrapping_add(1);
+                continue;
+            }
+            now += 1_000_000;
+            table.tick(now);
+        }
+        assert!(table.is_over(), "半荘が終わらなかった");
+        let events = table.since(Seat::new(0), None);
+        for pair in events.windows(2) {
+            assert!(pair[0].seq < pair[1].seq, "連番が戻っている");
+        }
+    }
+
+    #[test]
+    fn a_finished_table_takes_no_more_commands() {
+        let mut table = table_of(all_cpu());
+        let mut now = 1_000u64;
+        let mut seed_index = 1u8;
+        for _ in 0..5_000 {
+            if table.is_over() {
+                break;
+            }
+            if table.needs_seed() {
+                table.begin_round(&seed_of(seed_index), now);
+                seed_index = seed_index.wrapping_add(1);
+                continue;
+            }
+            now += 1_000_000;
+            table.tick(now);
+        }
+        assert!(table.is_over(), "半荘が終わらなかった");
+        assert!(table.apply(Seat::new(0), Command::Tsumo, now).is_err());
     }
 }
