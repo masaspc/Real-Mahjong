@@ -352,7 +352,9 @@ def check_test_counts(text):
     for index in range(len(bounds) - 1):
         section = text[bounds[index]:bounds[index + 1]]
         # 行頭のものだけを数える。散文中の `#[test]` という言及は宣言ではない。
+        # TypeScript の計画では `it(...)` と `test(...)` が1件にあたる。
         actual = len(re.findall(r"^[ \t]*#\[(?:tokio::)?test[\](]", section, re.M))
+        actual += len(re.findall(r"^[ \t]*(?:it|test)\(", section, re.M))
         claimed = (re.search(r"Expected: (\d+)テスト PASS", section)
                    or re.search(r"Expected: (\d+) passed$", section, re.M))
         if claimed and int(claimed.group(1)) != actual:
