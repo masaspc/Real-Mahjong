@@ -20,6 +20,31 @@ export const TILE = {
 /** 河は6枚で1段。 */
 export const DISCARDS_PER_ROW = 6;
 
+/**
+ * 卓の広さ（一辺）。
+ *
+ * **山は一辺17枚ぶんある。**それを中心から 6.2 の位置に置くと、
+ * 四辺が卓の角で交差する。17枚を並べる辺どうしがぶつからないためには、
+ * 辺の位置が半分の長さ（8.5）より外になければならない。
+ */
+export const TABLE_SIZE = 26;
+
+/** 山を置く距離。**一辺の半分（8.5）より外。** */
+const WALL_Z = 11.5;
+
+/** 手牌と副露を並べる距離。山より内側、河より外側。 */
+export const HAND_Z = 10;
+
+/**
+ * 河の1段目を置く奥行き。
+ *
+ * **4段目が中心へ寄りすぎると、隣席の河と重なる。**河は6枚幅なので
+ * 中心から 3 より内へ入ってはいけない。4段（5.4）ぶんを 3.05 から
+ * 積むと、1段目の外端は 8.45 になり、山（10.825 から）にも
+ * 手牌（9.7 から）にも当たらない。
+ */
+const RIVER_FRONT_Z = 7.775;
+
 /** 自席から見た相対席。自分が 0、下家が 1、対面が 2、上家が 3。 */
 export function relativeSeat(absolute: number, viewer: number): number {
   return (absolute - viewer + 4) % 4;
@@ -47,20 +72,10 @@ export function handPosition(seat: number, index: number, handSize: number): Vec
   const local: Vec3 = {
     x: index * TILE.width - spread / 2,
     y: TILE.height / 2,
-    z: 7.5,
+    z: HAND_Z,
   };
   return rotateY(local, seatRotation(seat));
 }
-
-/**
- * 河の1段目を置く奥行き。
- *
- * **4段目が卓の中央へ届いてはいけない。**寝かせた牌は z 方向に
- * 1.35 を占めるので、4段目が z=0.15 に来ると対面の河と重なる。
- * 一方で1段目を奥へ出しすぎると山（z=6.2）へ食い込む。
- * 4.8 なら4段目が 0.075..1.425、1段目が 4.125..5.475 に収まる。
- */
-const RIVER_FRONT_Z = 4.8;
 
 /** 河。6枚ごとに1段、段が進むほど卓中央へ寄る。 */
 export function discardPosition(seat: number, index: number): Vec3 {
@@ -81,7 +96,7 @@ export function wallPosition(seat: number, index: number): Vec3 {
   const local: Vec3 = {
     x: (stack - 8) * TILE.width,
     y: TILE.depth / 2 + (upper ? TILE.depth : 0),
-    z: 6.2,
+    z: WALL_Z,
   };
   return rotateY(local, seatRotation(seat));
 }
