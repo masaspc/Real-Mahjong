@@ -34,7 +34,11 @@ export function uvOffsetOf(cellIndex: number): {
   const dv = 1 / ATLAS.rows;
   const column = cellIndex % ATLAS.columns;
   const row = Math.floor(cellIndex / ATLAS.columns);
-  return { u: column * du, v: row * dv, du, dv };
+  // **v は canvas の行と上下が逆である。**アトラスは canvas の左上から
+  // 右下へ順に描くのに対し、テクスチャの v=0 は下端に当たる（`flipY` は
+  // 既定のまま）。素直に `row * dv` と書くと行が上下反転し、東が3pに、
+  // 牌体が7mに化ける。**真ん中の行だけ偶然正しくなるので気付きにくい。**
+  return { u: column * du, v: 1 - (row + 1) * dv, du, dv };
 }
 
 const SUIT_MARK = ["m", "p", "s"] as const;

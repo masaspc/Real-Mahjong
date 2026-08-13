@@ -28,11 +28,15 @@ describe("createTileGeometry", () => {
     const geometry = createTileGeometry();
     const uv = geometry.getAttribute("uv");
     const body = uvOffsetOf(BODY_INDEX);
+    // **UV は Float32 で持たれる。**セルの境目にぴったり乗る値は倍精度の
+    // ままでは表せず、0.2 が 0.20000000298 になる。境界を厳密に比べると
+    // セルの端に触れる牌体で落ちる。丸め1つぶんだけ緩める。
+    const slack = 1e-6;
     for (let i = 0; i < uv.count; i += 1) {
-      expect(uv.getX(i)).toBeGreaterThanOrEqual(body.u);
-      expect(uv.getX(i)).toBeLessThanOrEqual(body.u + body.du);
-      expect(uv.getY(i)).toBeGreaterThanOrEqual(body.v);
-      expect(uv.getY(i)).toBeLessThanOrEqual(body.v + body.dv);
+      expect(uv.getX(i)).toBeGreaterThanOrEqual(body.u - slack);
+      expect(uv.getX(i)).toBeLessThanOrEqual(body.u + body.du + slack);
+      expect(uv.getY(i)).toBeGreaterThanOrEqual(body.v - slack);
+      expect(uv.getY(i)).toBeLessThanOrEqual(body.v + body.dv + slack);
     }
   });
 });

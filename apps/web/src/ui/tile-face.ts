@@ -17,6 +17,18 @@ const FACE_H = 54;
 const MAN_DIGITS = ["一", "二", "三", "四", "五", "六", "七", "八", "九"] as const;
 const HONORS = ["東", "南", "西", "北", "白", "發", "中"] as const;
 
+/**
+ * SVG の名前空間。
+ *
+ * **`innerHTML` に入れるだけなら要らないが、外すと 3D の牌面が死ぬ。**
+ * HTML に直に書いた `<svg>` は名前空間が補われるのに対し、`data:` URL で
+ * 画像として読ませたものは独立した文書として解析されるので、宣言が無いと
+ * SVG と見なされず読み込みに失敗する。`scene/face-atlas.ts` はこれを画像
+ * として読み、しかも 39 枚を `Promise.all` で待つ。**1枚欠けると全部が
+ * 焼けず、牌が仮の文字ラベルのまま出る。**
+ */
+const SVG_NS = "http://www.w3.org/2000/svg";
+
 const INK = "#1a1a2e";
 const RED = "#c0392b";
 const GREEN = "#1f7a44";
@@ -155,7 +167,7 @@ export function tileFaceSvg(tile: Tile): string {
   const red = isRed(tile);
   const body = kind >= 27 ? honorBody(kind) : suitBody(kind, red);
   return (
-    `<svg viewBox="0 0 ${FACE_W} ${FACE_H}" class="tile-face" aria-hidden="true">` +
+    `<svg xmlns="${SVG_NS}" viewBox="0 0 ${FACE_W} ${FACE_H}" class="tile-face" aria-hidden="true">` +
     `<rect x="0.7" y="0.7" width="${FACE_W - 1.4}" height="${FACE_H - 1.4}" rx="4.5" ` +
     `fill="#fffdf2" stroke="#b9a97c" stroke-width="1.2"/>` +
     body +
@@ -166,7 +178,7 @@ export function tileFaceSvg(tile: Tile): string {
 /** 裏向きの牌。他家の手牌に使う。 */
 export function tileBackSvg(): string {
   return (
-    `<svg viewBox="0 0 ${FACE_W} ${FACE_H}" class="tile-face" aria-hidden="true">` +
+    `<svg xmlns="${SVG_NS}" viewBox="0 0 ${FACE_W} ${FACE_H}" class="tile-face" aria-hidden="true">` +
     `<rect x="0.7" y="0.7" width="${FACE_W - 1.4}" height="${FACE_H - 1.4}" rx="4.5" ` +
     `fill="#2f7a52" stroke="#1c4b33" stroke-width="1.2"/>` +
     `<rect x="6" y="7" width="${FACE_W - 12}" height="${FACE_H - 14}" rx="3" fill="none" ` +
