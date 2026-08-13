@@ -19,7 +19,11 @@
 - **`mahjong-engine` に依存しない。**山を持つ側を参照した瞬間、CPU が山を読めてしまう。`Cargo.toml` も変更しない
 - `crates/protocol` と `crates/mahjong-core` は凍結済み。**編集も追加もしない**
 - **時刻も乱数も使わない。** `Instant::now()` / `rand` を呼ばない。同じ `View` と同じ選択肢からは必ず同じ手を返す
-- 新しい麻雀判定を書かない。向聴数・待ち・役・鳴きの候補はすべて `mahjong-core` の公開 API を使う
+- **和了の判定を書き直さない。**向聴数・待ち・役・符・鳴きの候補はすべて
+  `mahjong-core` の公開 API を使う
+- **牌の分類（自風・場風・三元牌など）は AI 側に書いてよい。**これは「その牌が
+  役になるか」ではなく「鳴く価値があるか」という方針の判断であり、`mahjong-core`
+  に対応する公開 API も無い。和了の判定とは別物として扱う
 - 完了条件は `cargo test --workspace` / `cargo clippy --all-targets -- -D warnings` / `cargo fmt --check` がすべて通ること
 
 ## CPU に何を見せるか
@@ -36,6 +40,7 @@ pub struct View {
     pub round_wind: Wind,
     /// 自分の手牌。打牌の判断ではツモ牌を含む。
     pub hand: Vec<Tile>,
+    /// **自分の副露と暗槓だけ。**他家の副露は入れない。
     pub melds: Vec<Meld>,
     /// 4席の捨て牌。鳴かれた牌も見えているので含める。
     pub rivers: [Vec<Tile>; 4],
@@ -432,6 +437,7 @@ pub struct View {
     pub round_wind: Wind,
     /// 自分の手牌。打牌の判断ではツモ牌を含む。
     pub hand: Vec<Tile>,
+    /// **自分の副露と暗槓だけ。**他家の副露は入れない。
     pub melds: Vec<Meld>,
     /// 4席の捨て牌。鳴かれた牌も見えているので含める。
     pub rivers: [Vec<Tile>; 4],
@@ -545,14 +551,20 @@ git commit -m "feat(ai): 安全度と打牌の選択を実装"
 mod tests {
     use super::*;
     use protocol::command::KanCandidate;
+    use protocol::meld::{Meld, MeldKind};
     use protocol::notation::{parse_hand, parse_tile};
     use protocol::seat::Seat;
 
+    /// 東場の東家。自風も場風も東になる。
     fn view_with(hand: &str) -> View {
+        view_in(Wind::East, Wind::East, hand)
+    }
+
+    fn view_in(seat_wind: Wind, round_wind: Wind, hand: &str) -> View {
         View {
             seat: Seat::new(0),
-            seat_wind: Wind::East,
-            round_wind: Wind::East,
+            seat_wind,
+            round_wind,
             hand: parse_hand(hand).expect("正しい記法"),
             melds: Vec::new(),
             rivers: std::array::from_fn(|_| Vec::new()),
@@ -588,7 +600,7 @@ mod tests {
     /// 場風のポンは鳴く。1翻が確定する。
     #[test]
     fn the_round_wind_is_ponned() {
-        let view = view_with("234567m234p11z");
+        let view = view_with("234567m234p11z99s");
         let options = vec![pon_of("11z")];
         let tiles = parse_hand("11z").expect("正しい記法");
         assert_eq!(
@@ -602,7 +614,7 @@ mod tests {
     /// 三元牌のポンは鳴く。
     #[test]
     fn a_dragon_is_ponned() {
-        let view = view_with("234567m234p55z");
+        let view = view_with("234567m234p55z99s");
         let options = vec![pon_of("55z")];
         let tiles = parse_hand("55z").expect("正しい記法");
         assert_eq!(
@@ -617,7 +629,7 @@ mod tests {
     #[test]
     fn a_guest_wind_is_not_ponned() {
         // 東場の東家にとって、西（3z）は自風でも場風でもない。
-        let view = view_with("234567m234p33z");
+        let view = view_with("234567m234p33z99s");
         let options = vec![pon_of("33z")];
         assert_eq!(respond(&view, &options), CallResponse::Pass);
     }
@@ -625,7 +637,7 @@ mod tests {
     /// 幺九牌が手に無ければ、断幺九が見込めるので鳴く。
     #[test]
     fn a_hand_without_terminals_pons_for_tanyao() {
-        let view = view_with("234567m234p55p");
+        let view = view_with("234567m234p55p22s");
         let options = vec![pon_of("55p")];
         let tiles = parse_hand("55p").expect("正しい記法");
         assert_eq!(
@@ -639,7 +651,7 @@ mod tests {
     /// 幺九牌が手にあれば、断幺九にならないので見送る。
     #[test]
     fn a_hand_with_a_terminal_does_not_pon_for_tanyao() {
-        let view = view_with("134567m234p55p");
+        let view = view_with("134567m234p55p22s");
         let options = vec![pon_of("55p")];
         assert_eq!(respond(&view, &options), CallResponse::Pass);
     }
@@ -647,7 +659,7 @@ mod tests {
     /// 幺九牌そのもののポンは断幺九にならない。
     #[test]
     fn a_terminal_pon_is_never_taken_for_tanyao() {
-        let view = view_with("234567m234p11p");
+        let view = view_with("234567m234p11p22s");
         let options = vec![pon_of("11p")];
         assert_eq!(respond(&view, &options), CallResponse::Pass);
     }
@@ -655,7 +667,7 @@ mod tests {
     /// チーはしない。
     #[test]
     fn a_chi_is_never_taken() {
-        let view = view_with("234567m234p56p");
+        let view = view_with("234567m234p56p22s");
         let options = vec![chi_of("56p")];
         assert_eq!(respond(&view, &options), CallResponse::Pass);
     }
@@ -663,7 +675,7 @@ mod tests {
     /// 槓はしない。
     #[test]
     fn a_kan_is_never_taken() {
-        let view = view_with("234567m234p555p");
+        let view = view_with("234567m234p555p2s");
         let options = vec![ActionOption::Kan {
             candidates: vec![KanCandidate::Minkan],
         }];
@@ -677,10 +689,83 @@ mod tests {
         assert_eq!(respond(&view, &[]), CallResponse::Pass);
     }
 
+    /// 幺九牌を含む副露があれば、手が中張牌だけでも断幺九にならない。
+    ///
+    /// **手牌だけを見ると見落とす。**副露も数える。
+    #[test]
+    fn a_meld_with_a_terminal_blocks_the_tanyao_pon() {
+        // 副露1つぶん短い10枚。すべて中張牌である。
+        let mut view = view_with("234567m234p2s");
+        view.melds.push(Meld {
+            kind: MeldKind::Pon,
+            tiles: parse_hand("111m").expect("正しい記法"),
+            from: Some(Seat::new(1)),
+            called_tile: Some(parse_tile("1m").expect("正しい記法")),
+        });
+        let options = vec![pon_of("55p")];
+        assert_eq!(respond(&view, &options), CallResponse::Pass);
+    }
+
+    /// 中張牌だけの副露なら断幺九は生きている。
+    #[test]
+    fn a_clean_meld_keeps_the_tanyao_pon() {
+        let mut view = view_with("234567m234p2s");
+        view.melds.push(Meld {
+            kind: MeldKind::Pon,
+            tiles: parse_hand("333m").expect("正しい記法"),
+            from: Some(Seat::new(1)),
+            called_tile: Some(parse_tile("3m").expect("正しい記法")),
+        });
+        let options = vec![pon_of("55p")];
+        let tiles = parse_hand("55p").expect("正しい記法");
+        assert_eq!(
+            respond(&view, &options),
+            CallResponse::Pon {
+                tiles: [tiles[0], tiles[1]]
+            }
+        );
+    }
+
+    /// 自風だけでも鳴く。東場の南家にとって南は自風である。
+    #[test]
+    fn the_seat_wind_alone_is_enough() {
+        let view = view_in(Wind::South, Wind::East, "234567m234p22z99s");
+        let options = vec![pon_of("22z")];
+        let tiles = parse_hand("22z").expect("正しい記法");
+        assert_eq!(
+            respond(&view, &options),
+            CallResponse::Pon {
+                tiles: [tiles[0], tiles[1]]
+            }
+        );
+    }
+
+    /// 場風だけでも鳴く。東場の南家にとって東は場風である。
+    #[test]
+    fn the_round_wind_alone_is_enough() {
+        let view = view_in(Wind::South, Wind::East, "234567m234p11z99s");
+        let options = vec![pon_of("11z")];
+        let tiles = parse_hand("11z").expect("正しい記法");
+        assert_eq!(
+            respond(&view, &options),
+            CallResponse::Pon {
+                tiles: [tiles[0], tiles[1]]
+            }
+        );
+    }
+
+    /// どちらでもない風は鳴かない。東場の南家にとって西は客風である。
+    #[test]
+    fn a_wind_that_is_neither_is_passed() {
+        let view = view_in(Wind::South, Wind::East, "234567m234p33z99s");
+        let options = vec![pon_of("33z")];
+        assert_eq!(respond(&view, &options), CallResponse::Pass);
+    }
+
     /// 同じ局面からは必ず同じ答えが出る。
     #[test]
     fn the_same_view_always_gives_the_same_response() {
-        let view = view_with("234567m234p11z");
+        let view = view_with("234567m234p11z99s");
         let options = vec![pon_of("11z")];
         assert_eq!(respond(&view, &options), respond(&view, &options));
     }
@@ -690,7 +775,7 @@ mod tests {
     /// 幺九牌が手にあっても、役牌なら鳴く。
     #[test]
     fn a_value_tile_is_ponned_even_with_terminals() {
-        let view = view_with("134567m234p11z");
+        let view = view_with("134567m234p11z99s");
         let options = vec![pon_of("11z")];
         let tiles = parse_hand("11z").expect("正しい記法");
         assert_eq!(
@@ -747,11 +832,18 @@ fn worth_ponning(view: &View, tile: Tile) -> bool {
     if is_value_tile(view, tile.kind()) {
         return true;
     }
-    // 断幺九。鳴く牌が中張牌で、手にも幺九牌が無いこと。
+    // 断幺九。鳴く牌が中張牌で、**手にも副露にも**幺九牌が無いこと。
+    // 副露を見ないと、幺九牌を含む副露があるのに断幺九を当てにしてしまう。
     if tile.kind().is_terminal_or_honor() {
         return false;
     }
-    view.hand.iter().all(|t| !t.kind().is_terminal_or_honor())
+    let hand_is_clean = view.hand.iter().all(|t| !t.kind().is_terminal_or_honor());
+    let melds_are_clean = view
+        .melds
+        .iter()
+        .flat_map(|m| m.tiles.iter())
+        .all(|t| !t.kind().is_terminal_or_honor());
+    hand_is_clean && melds_are_clean
 }
 
 /// 自風・場風・三元牌のいずれか。
@@ -782,7 +874,7 @@ fn wind_of(kind: TileKind) -> Option<Wind> {
 - [ ] **Step 4: テストが通ることを確認する**
 
 Run: `cargo test --package mahjong-ai`
-Expected: 12テスト PASS（クレート全体では28件）
+Expected: 17テスト PASS（クレート全体では33件）
 
 - [ ] **Step 5: コミット**
 
@@ -795,7 +887,7 @@ git commit -m "feat(ai): 鳴きの判断を実装"
 
 ## Wave 3a 完了の判定
 
-- [ ] `cargo test --workspace` が通る（mahjong-ai 28テスト。discard 10 / safety 6 / call 12）
+- [ ] `cargo test --workspace` が通る（mahjong-ai 33テスト。discard 10 / safety 6 / call 17）
 - [ ] `cargo clippy --all-targets -- -D warnings` が通る
 - [ ] `cargo fmt --check` が通る
 - [ ] `mahjong-ai` が `mahjong-engine` に依存していない（`Cargo.toml` が無変更）
