@@ -698,7 +698,6 @@ use mahjong_ai::call;
 use mahjong_ai::discard::{self, View};
 use protocol::command::ActionOption;
 use protocol::event::Event;
-use protocol::seat::Round;
 
 /// CPU へ渡す `View` を組み立てる。
 ///
@@ -946,8 +945,10 @@ mod resume_tests {
         let mut now = 1_000u64;
         let mut seed_index = 1u8;
 
-        // 1回の tick は反応ウィンドウを1つ解決する。1局は最大で70ツモ前後、
-        // 半荘は延長を含めて12局あるので、余裕をもって上限を置く。
+        // 1回の tick はおよそ1手番進む。1局は最大で70手番ほどだが、
+        // 局数は親の連荘で伸びるので上限は決まらない。**終わることは
+        // 別に保証されている**（延長した風の4局目で必ず打ち切る）。
+        // ここは「異常なら止まる」ための番人であり、十分に大きく取る。
         for _ in 0..5_000 {
             if table.is_over() {
                 break;
