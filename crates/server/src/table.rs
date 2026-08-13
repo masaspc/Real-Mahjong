@@ -3,12 +3,14 @@
 //! **非同期も実時間も持たない。**時刻もシードも外から受け取る。
 //! tokio の task で包むのは Wave 3c の仕事である。
 
+use mahjong_ai::call;
+use mahjong_ai::discard::{self, View};
 use mahjong_engine::match_flow::{MatchEngine, Reject};
 use mahjong_engine::state::RoundState;
 use mahjong_engine::wall::Seed;
 use protocol::client_event::ClientEventEnvelope;
-use protocol::command::Command;
-use protocol::event::{EventEnvelope, PlayerId};
+use protocol::command::{ActionOption, Command};
+use protocol::event::{Event, EventEnvelope, PlayerId};
 use protocol::project::project_envelope;
 use protocol::ruleset::Ruleset;
 use protocol::seat::Seat;
@@ -26,10 +28,55 @@ impl Occupant {
             Occupant::Human(id) | Occupant::Cpu(id) => id.clone(),
         }
     }
+
+    fn is_cpu(&self) -> bool {
+        matches!(self, Occupant::Cpu(_))
+    }
+}
+
+/// CPU へ渡す `View` を組み立てる。
+///
+/// **その席の分だけを読む。**手牌と副露は `seat` のものに限り、
+/// 裏ドラは触れない。ここを誤ると CPU が他家の手を見られる。
+fn build_view(state: &RoundState, seat: Seat) -> View {
+    View {
+        seat,
+        seat_wind: state.seat_wind(seat),
+        round_wind: state.round.wind,
+        hand: state.seat(seat).hand.clone(),
+        melds: state.seat(seat).melds.clone(),
+        rivers: std::array::from_fn(|i| {
+            state
+                .seat(Seat::new(i as u8))
+                .river
+                .iter()
+                .map(|d| d.tile)
+                .collect()
+        }),
+        riichi: std::array::from_fn(|i| {
+            matches!(
+                &state.seat(Seat::new(i as u8)).riichi,
+                Some(r) if r.step == protocol::event::RiichiStep::Accepted
+            )
+        }),
+        dora_indicators: state.wall.dora_indicators().to_vec(),
+        wall_remaining: state.wall.live_remaining(),
+        scores: state.scores,
+    }
+}
+
+/// 応答を待っている要求。CPU が答えるのに要る分だけを持つ。
+struct PendingRequest {
+    window_id: u32,
+    options: Vec<ActionOption>,
 }
 
 pub struct Table {
     engine: MatchEngine,
+    /// 席にいるのが人か CPU か。CPU の席だけを卓が代打ちする。
+    occupants: [Occupant; 4],
+    /// 席ごとの、まだ答えていない要求。
+    outstanding: [Option<PendingRequest>; 4],
     /// 卓が出した真実。再接続の再送に使う。
     log: Vec<EventEnvelope>,
     next_seq: u32,
@@ -42,11 +89,13 @@ impl Table {
         let players = std::array::from_fn(|i| occupants[i].player_id());
         let mut table = Table {
             engine: MatchEngine::start(rules, players, now_ms),
+            occupants,
+            outstanding: std::array::from_fn(|_| None),
             log: Vec::new(),
             next_seq: 0,
             pending: std::array::from_fn(|_| Vec::new()),
         };
-        table.collect();
+        table.collect(now_ms);
         table
     }
 
@@ -66,18 +115,19 @@ impl Table {
 
     pub fn begin_round(&mut self, seed: &Seed, now_ms: u64) {
         self.engine.begin_round(seed, now_ms);
-        self.collect();
+        self.collect(now_ms);
     }
 
     pub fn apply(&mut self, seat: Seat, command: Command, now_ms: u64) -> Result<(), Reject> {
+        self.outstanding[seat.index()] = None;
         let result = self.engine.apply(seat, command, now_ms);
-        self.collect();
+        self.collect(now_ms);
         result
     }
 
     pub fn tick(&mut self, now_ms: u64) {
         self.engine.tick(now_ms);
-        self.collect();
+        self.collect(now_ms);
     }
 
     /// その席へまだ届けていない分を取り出す。
@@ -92,8 +142,26 @@ impl Table {
     ///
     /// **射影はここでは行わない。**`drain_for` まで遅らせることで、
     /// `log` には真実だけが残り、再接続の再送でも同じ経路を通る。
-    fn collect(&mut self) {
+    fn collect(&mut self, now_ms: u64) {
+        self.take_events();
+        self.let_cpus_act(now_ms);
+    }
+
+    /// 局のイベントを取り込み、連番を振り、要求を控える。
+    fn take_events(&mut self) {
         for event in self.engine.drain_events() {
+            if let Event::RequestAction {
+                seat,
+                window_id,
+                options,
+                ..
+            } = &event
+            {
+                self.outstanding[seat.index()] = Some(PendingRequest {
+                    window_id: *window_id,
+                    options: options.clone(),
+                });
+            }
             let index = self.log.len();
             self.log.push(EventEnvelope {
                 seq: self.next_seq,
@@ -104,6 +172,47 @@ impl Table {
                 queue.push(index);
             }
         }
+    }
+
+    /// CPU の席へ出た要求を、その場で処理する。
+    ///
+    /// **時計は進めない。**反応ウィンドウの最低待機を越えさせるのは、
+    /// 呼び出し側の `tick` である。
+    fn let_cpus_act(&mut self, now_ms: u64) {
+        for _ in 0..1_000 {
+            let Some(seat) = self.next_cpu_to_act() else {
+                return;
+            };
+            let request = self.outstanding[seat.index()]
+                .take()
+                .expect("直前に確認した");
+            let Some(state) = self.engine.round_state() else {
+                return;
+            };
+            let view = build_view(state, seat);
+            let command = if request
+                .options
+                .iter()
+                .any(|o| matches!(o, ActionOption::Discard { .. }))
+            {
+                discard::choose(&view, &request.options)
+            } else {
+                Command::CallResponse {
+                    window_id: request.window_id,
+                    response: call::respond(&view, &request.options),
+                }
+            };
+            let _ = self.engine.apply(seat, command, now_ms);
+            self.take_events();
+        }
+        panic!("CPU の応答が終わらない");
+    }
+
+    /// まだ答えていない CPU の席。席順で先にあるものを返す。
+    fn next_cpu_to_act(&self) -> Option<Seat> {
+        Seat::ALL.into_iter().find(|seat| {
+            self.occupants[seat.index()].is_cpu() && self.outstanding[seat.index()].is_some()
+        })
     }
 }
 
@@ -275,6 +384,177 @@ mod tests {
         let build = || {
             let mut table = table_of(humans());
             table.begin_round(&seed_of(1), 0);
+            table.drain_for(Seat::new(0))
+        };
+        assert_eq!(build(), build());
+    }
+}
+
+#[cfg(test)]
+mod cpu_tests {
+    use super::tests::{seed_of, table_of};
+    use super::*;
+    use protocol::client_event::ClientEvent;
+
+    fn advance(table: &mut Table, now: &mut u64) {
+        *now += 1_000_000;
+        table.tick(*now);
+    }
+
+    pub(super) fn all_cpu() -> [Occupant; 4] {
+        std::array::from_fn(|i| Occupant::Cpu(PlayerId(format!("cpu{i}"))))
+    }
+
+    fn mixed() -> [Occupant; 4] {
+        [
+            Occupant::Human(PlayerId("human".to_owned())),
+            Occupant::Cpu(PlayerId("cpu1".to_owned())),
+            Occupant::Cpu(PlayerId("cpu2".to_owned())),
+            Occupant::Cpu(PlayerId("cpu3".to_owned())),
+        ]
+    }
+
+    #[test]
+    fn the_view_carries_only_its_own_hand() {
+        let mut table = table_of(all_cpu());
+        table.begin_round(&seed_of(1), 0);
+        let state = table.round_state().expect("局が動いている");
+        let view = build_view(state, Seat::new(2));
+
+        assert_eq!(view.hand, state.seat(Seat::new(2)).hand);
+        for other in [Seat::new(0), Seat::new(1), Seat::new(3)] {
+            for tile in &state.seat(other).hand {
+                assert!(
+                    !view.hand.contains(tile) || state.seat(Seat::new(2)).hand.contains(tile),
+                    "他家の手牌が混ざっている"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn the_view_never_carries_the_ura_indicators() {
+        let mut table = table_of(all_cpu());
+        table.begin_round(&seed_of(1), 0);
+        let state = table.round_state().expect("局が動いている");
+        let view = build_view(state, Seat::new(0));
+        assert_eq!(view.dora_indicators, state.wall.dora_indicators().to_vec());
+        assert_eq!(view.dora_indicators.len(), 1, "局の頭は1枚だけ");
+    }
+
+    #[test]
+    fn the_view_carries_every_river() {
+        let mut table = table_of(all_cpu());
+        table.begin_round(&seed_of(1), 0);
+        let state = table.round_state().expect("局が動いている");
+        let view = build_view(state, Seat::new(0));
+        assert_eq!(view.rivers.len(), 4);
+    }
+
+    #[test]
+    fn a_cpu_seat_acts_on_its_own() {
+        let mut table = table_of(all_cpu());
+        table.begin_round(&seed_of(1), 0);
+        let events = table.drain_for(Seat::new(1));
+        assert!(
+            events
+                .iter()
+                .any(|e| matches!(e.event, ClientEvent::Discard { .. })),
+            "CPU が打っていない: {events:?}"
+        );
+    }
+
+    #[test]
+    fn a_human_seat_is_left_alone() {
+        let mut table = table_of(mixed());
+        table.begin_round(&seed_of(1), 0);
+        let events = table.drain_for(Seat::new(0));
+        assert!(
+            !events
+                .iter()
+                .any(|e| matches!(e.event, ClientEvent::Discard { .. })),
+            "人の席で勝手に打っている"
+        );
+        assert!(events
+            .iter()
+            .any(|e| matches!(e.event, ClientEvent::RequestAction { .. })));
+    }
+
+    #[test]
+    fn the_cpus_continue_after_a_human_move() {
+        let mut table = table_of(mixed());
+        let mut now = 0u64;
+        table.begin_round(&seed_of(1), now);
+        for seat in Seat::ALL {
+            table.drain_for(seat);
+        }
+        let tile = table
+            .round_state()
+            .expect("局が動いている")
+            .seat(Seat::new(0))
+            .hand[0];
+        now += 1_000;
+        table
+            .apply(
+                Seat::new(0),
+                Command::Discard {
+                    tile,
+                    riichi: false,
+                },
+                now,
+            )
+            .expect("切れる");
+        for _ in 0..3 {
+            advance(&mut table, &mut now);
+        }
+        let events = table.drain_for(Seat::new(0));
+        let discards = events
+            .iter()
+            .filter(|e| matches!(e.event, ClientEvent::Discard { .. }))
+            .count();
+        assert!(discards >= 2, "CPU が続いていない: {discards}");
+    }
+
+    #[test]
+    fn a_reaction_window_waits_for_its_minimum() {
+        let mut table = table_of(all_cpu());
+        table.begin_round(&seed_of(1), 0);
+        let events = table.drain_for(Seat::new(0));
+        assert!(events
+            .iter()
+            .any(|e| matches!(e.event, ClientEvent::Discard { .. })));
+        let draws = events
+            .iter()
+            .filter(|e| matches!(e.event, ClientEvent::Draw { .. }))
+            .count();
+        assert_eq!(draws, 1, "反応が確定する前に次のツモが出ている");
+    }
+
+    #[test]
+    fn a_cpu_answers_reaction_windows() {
+        let mut table = table_of(all_cpu());
+        let mut now = 0u64;
+        table.begin_round(&seed_of(1), now);
+        table.drain_for(Seat::new(0));
+        advance(&mut table, &mut now);
+        let events = table.drain_for(Seat::new(0));
+        assert!(
+            events
+                .iter()
+                .any(|e| matches!(e.event, ClientEvent::Draw { .. })),
+            "反応が解決していない: {events:?}"
+        );
+    }
+
+    #[test]
+    fn a_cpu_table_is_reproducible() {
+        let build = || {
+            let mut table = table_of(all_cpu());
+            let mut now = 0u64;
+            table.begin_round(&seed_of(1), now);
+            for _ in 0..5 {
+                advance(&mut table, &mut now);
+            }
             table.drain_for(Seat::new(0))
         };
         assert_eq!(build(), build());
