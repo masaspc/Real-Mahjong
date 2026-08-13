@@ -4217,6 +4217,13 @@ impl MatchEngine {
         self.engine.is_none() && !self.over
     }
 
+    /// 動いている局の状態。局と局のあいだは `None`。
+    ///
+    /// 卓が CPU へ渡す `View` を組み立てるために公開する。
+    pub fn round_state(&self) -> Option<&RoundState> {
+        self.engine.as_ref().map(|e| e.state())
+    }
+
     pub fn begin_round(&mut self, seed: &Seed, now_ms: u64) {
         assert!(self.needs_seed(), "局が動いている間は始められない");
         self.seeds.push(*seed);
@@ -4384,7 +4391,7 @@ impl MatchEngine {
     }
 
     #[cfg(test)]
-    pub(crate) fn round_state(&self) -> &RoundState {
+    pub(crate) fn test_round_state(&self) -> &RoundState {
         self.engine.as_ref().expect("局が動いている").state()
     }
 
@@ -4545,7 +4552,7 @@ mod match_tests {
         game.begin_round(&seed_of(1), 0);
         game.drain_events();
 
-        let tile = game.round_state().seat(Seat::new(0)).hand[0];
+        let tile = game.test_round_state().seat(Seat::new(0)).hand[0];
         game.apply(
             Seat::new(0),
             Command::Discard {
@@ -4647,7 +4654,7 @@ mod match_tests {
     /// **席0を決め打ちしない。**局が進むと親は移る。
     /// イベントは drain しない。呼び出し側が `RoundEnd` を読むためである。
     pub(super) fn finish_with_a_dealer_tsumo(game: &mut MatchEngine) {
-        let dealer = game.round_state().dealer;
+        let dealer = game.test_round_state().dealer;
         make_tenpai(game.round_state_mut(), dealer);
         game.force_draw_turn(dealer, parse_tile("6p").expect("正しい記法"));
         game.apply(dealer, Command::Tsumo, 2_000)
@@ -4658,7 +4665,7 @@ mod match_tests {
     ///
     /// こちらもイベントは drain しない。
     pub(super) fn finish_with_a_child_tsumo(game: &mut MatchEngine) {
-        let dealer = game.round_state().dealer;
+        let dealer = game.test_round_state().dealer;
         let child = Seat::new(((dealer.index() + 1) % 4) as u8);
         make_tenpai(game.round_state_mut(), child);
         game.force_draw_turn(child, parse_tile("6p").expect("正しい記法"));
@@ -4703,7 +4710,7 @@ mod progression_tests {
     /// 「誰も返し点へ届かないまま何局も進める」テストが配牌に依存する。
     /// 全員ノーテンの流局なら点棒はまったく動かない。
     pub(super) fn finish_with_a_noten_draw(game: &mut MatchEngine) {
-        let dealer = game.round_state().dealer;
+        let dealer = game.test_round_state().dealer;
         // 親は14枚、子は13枚。どちらも対子も塔子も無い散らばった形にする。
         game.round_state_mut().seat_mut(dealer).hand =
             parse_hand("147m258p369s12345z").expect("正しい記法");
@@ -4868,7 +4875,7 @@ mod progression_tests {
         game.drain_events();
         clear_nagashi(game.round_state_mut());
         drain_the_wall(game.round_state_mut());
-        let tile = game.round_state().seat(Seat::new(1)).hand[0];
+        let tile = game.test_round_state().seat(Seat::new(1)).hand[0];
         game.apply(
             Seat::new(1),
             Command::Discard {
