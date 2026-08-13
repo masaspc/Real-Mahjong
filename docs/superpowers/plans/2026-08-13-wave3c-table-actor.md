@@ -67,7 +67,7 @@ mod time;
 
 **これを外すと、締切前に押した操作が時間切れになる。**`RoundEngine::apply` は検証より先に `tick(now_ms)` を回し、`now_ms` が締切を過ぎていれば自動打牌してしまう。Actor が `select!` でどちらの枝を選ぶか、入口の待ち行列がどれだけ混んでいたかによって、同じ操作の結果が変わってはならない。
 
-そこで `TableHandle::command` が**送る前に**時刻を刻み、Actor はその刻印を `Table::apply` へ渡す。刻印は Actor が処理する時刻より必ず古いが、エンジンは時刻の巻き戻しを受けつける（実測済み）。締切は絶対時刻なので、古い時刻を渡すことは「まだ切れていない」を意味し、これがまさに求める挙動である。
+そこで `TableHandle::command` が**入口の席を取ってから**時刻を刻み、Actor はその刻印を `Table::apply` へ渡す。`reserve()` より前に刻んではならない。入口が満杯のあいだ古い刻印を抱えたまま待つことになり、**入口を埋めるだけで締切を伸ばせてしまう。**刻印は Actor が処理する時刻より必ず古いが、エンジンは時刻の巻き戻しを受けつける（実測済み）。締切は絶対時刻なので、古い時刻を渡すことは「まだ切れていない」を意味し、これがまさに求める挙動である。
 
 **しかし刻印だけでは足りない。**`select!` が ticker の枝を先に選び、その `tick` が締切を越えて自動打牌を済ませてしまうと、あとから締切前の刻印で `apply` しても局面は巻き戻らない。実測すると `Err(NotYourTurn)` になる。
 
@@ -340,7 +340,7 @@ std::time を使わないのは、仮想時間で試験できなくなるため�
   - `pub type Outbound = tokio::sync::mpsc::UnboundedSender<ClientEventEnvelope>`
   - `pub type Inbound = tokio::sync::mpsc::UnboundedReceiver<ClientEventEnvelope>`
   - `pub struct Gone;`
-  - `pub struct ConnectionId(pub u64);`
+  - `pub struct ConnectionId(u64);`（中身は非公開）
   - `pub enum TableMsg { Command { seat, command, at_ms, reply }, Attach { seat, last_seq, out, ack }, Detach { seat, connection } }`
   - `pub struct TableHandle`（`Clone + Send + Sync + 'static`）, `TableHandle::command`, `TableHandle::attach`, `TableHandle::detach`, `TableHandle::is_closed`
   - `pub fn spawn(rules: Ruleset, occupants: [Occupant; 4], seeds: SeedSource) -> TableHandle`
@@ -658,6 +658,13 @@ use tokio::time::MissedTickBehavior;
 /// 最低待機は 350ms なので、100ms の粒度は人には見えない。
 const POLL_MS: u64 = 100;
 
+/// 入口の容量。
+///
+/// **`tick` の前に片づける件数の上限でもある。**空になるまで回すと、
+/// 受信で空いたスロットへ待機中の送信者が補充するので、コマンドが
+/// 途切れないかぎり `tick` が永久に来ない。
+const INBOX: usize = 32;
+
 /// 接続へイベントを押し出す口。
 ///
 /// **unbounded。**ここが詰まると Actor ごと止まり、他の3人まで巻き添えに
@@ -673,8 +680,11 @@ pub struct Gone;
 ///
 /// **同じ席に2本目が来たら1本目は無効になる。**この ID がないと、
 /// 置き換えられた古い接続の切断が、新しい接続を巻き添えにする。
+///
+/// **中身は非公開。**外から作れないので、Wave 3d で他人の接続 ID を
+/// 騙ることができない。卓が配ったものを返すことしかできない。
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
-pub struct ConnectionId(pub u64);
+pub struct ConnectionId(u64);
 
 pub enum TableMsg {
     Command {
@@ -706,19 +716,22 @@ pub struct TableHandle {
 }
 
 impl TableHandle {
-    /// 席の操作を送る。**送る前に時刻を刻む。**
+    /// 席の操作を送る。
+    ///
+    /// **入口の席を取ってから時刻を刻む。**先に刻んでから `send().await` すると、
+    /// 入口が満杯のあいだ古い刻印を抱えたまま待つことになり、入口を埋めるだけで
+    /// 締切を実質的に伸ばせてしまう。`reserve` が返った時点で待ちは終わって
+    /// いるので、そこで刻めば「入口へ着いた時刻」になる。
     pub async fn command(&self, seat: Seat, command: Command) -> Result<Result<(), Reject>, Gone> {
+        let permit = self.tx.reserve().await.map_err(|_| Gone)?;
         let at_ms = self.clock.now_ms();
         let (reply, answer) = oneshot::channel();
-        self.tx
-            .send(TableMsg::Command {
-                seat,
-                command,
-                at_ms,
-                reply,
-            })
-            .await
-            .map_err(|_| Gone)?;
+        permit.send(TableMsg::Command {
+            seat,
+            command,
+            at_ms,
+            reply,
+        });
         answer.await.map_err(|_| Gone)
     }
 
@@ -769,7 +782,7 @@ impl TableHandle {
 ///
 /// **時計は卓が生まれた瞬間から始まる。**`Table::new` に渡す最初の時刻は 0。
 pub fn spawn(rules: Ruleset, occupants: [Occupant; 4], seeds: SeedSource) -> TableHandle {
-    let (tx, rx) = mpsc::channel(32);
+    let (tx, rx) = mpsc::channel(INBOX);
     let clock = Arc::new(Clock::start());
     let table = Table::new(rules, occupants, clock.now_ms());
     tokio::spawn(run(table, seeds, Arc::clone(&clock), rx));
@@ -915,8 +928,16 @@ async fn run(
                 // **時計を進める前に、既に着いている分を片づける。**
                 // 刻印だけでは足りない。tick が締切を越えて自動打牌したあとでは、
                 // 締切前の刻印で apply しても局面は巻き戻らない。
-                while let Ok(message) = rx.try_recv() {
-                    handle(&mut table, &mut sinks, message);
+                //
+                // **ただし上限を設ける。**空になるまで回すと、受信で空いた
+                // スロットへ待機中の送信者が補充するので、コマンドが途切れない
+                // かぎり tick が永久に来ない。入口の容量ぶんだけ片づけたら、
+                // 残りがあっても必ず時計を進める。
+                for _ in 0..INBOX {
+                    match rx.try_recv() {
+                        Ok(message) => handle(&mut table, &mut sinks, message),
+                        Err(_) => break,
+                    }
                 }
                 table.tick(clock.now_ms());
             }
@@ -991,23 +1012,42 @@ mod reconnect_tests {
     /// 仮想時間でこれを超えたら、卓が終わらない不具合とみなす。
     const A_VIRTUAL_HOUR_MS: u64 = 3_600_000;
 
+    /// **正直な申告は必ず受理される。**
+    ///
+    /// 卓を進めてから繋ぎ直すので、受け取る束が空にならない。空のまま
+    /// 「戻ってきたものは無かった」で通ると、`checked` が常に最初から
+    /// 送り直していても気づけない。
     #[tokio::test(start_paused = true)]
     async fn reattaching_from_a_sequence_skips_what_was_already_seen() {
-        let handle = spawn(rules(), humans(), SeedSource::from_master([1u8; 32]));
+        let handle = spawn(
+            rules(),
+            one_human_three_cpus(),
+            SeedSource::from_master([1u8; 32]),
+        );
         let (_, mut first) = handle
-            .attach(Seat::new(0), None)
+            .attach(Seat::new(1), None)
             .await
             .expect("卓は生きている");
 
         let seen = take_ready(&mut first);
         let last = seen.last().expect("何か届いている").seq;
 
+        // 親は席0の人間。その持ち時間が尽きて卓が進むまで待つ。
+        tokio::time::sleep(Duration::from_millis(30_000)).await;
+
         let (_, mut second) = handle
-            .attach(Seat::new(0), Some(last))
+            .attach(Seat::new(1), Some(last))
             .await
             .expect("卓は生きている");
 
-        for envelope in take_ready(&mut second) {
+        let caught_up = take_ready(&mut second);
+        assert!(!caught_up.is_empty(), "正直な申告が受理されていない");
+        assert_ne!(
+            caught_up.first().map(|e| e.seq),
+            Some(0),
+            "正直な申告なのに最初から送り直している"
+        );
+        for envelope in &caught_up {
             assert!(envelope.seq > last, "見たものがまた来ている");
         }
     }
@@ -1412,8 +1452,10 @@ mod reaction_tests {
             .expect("卓は生きている");
 
         let (window_id, options) = advance_to_a_call_window(&mut inbox).await;
+        // 実測では 55,200ms だが、そこは CPU の打牌方針しだいで動く。
+        // **仕様は「応答から最低待機ぶん後に成立する」であって、
+        // 要求が何ミリ秒に届くかではない。**時刻そのものは固定しない。
         let opened_at = clock.now_ms();
-        assert_eq!(opened_at, 55_200, "要求の届く時刻がずれた");
 
         let tiles = options
             .iter()
@@ -1532,7 +1574,9 @@ Expected: いくつか落ちる。Task 2 の実装が正しければ全部通る
 Run: `cargo test --package server reaction_tests`
 Expected: 2 passed
 
-`the_actor_carries_a_call_across_the_minimum_wait` の `assert_eq!(opened_at, 55_200)` が落ちるなら、`SeedSource` の繰り出し方か `POLL_MS` が計画と違っている。**期待値を書き換える前にそちらを疑う。**
+`the_actor_carries_a_call_across_the_minimum_wait` が「鳴きの要求に到達しなかった」で落ちるなら、`SeedSource` の繰り出し方が計画と違っている。`+350ms` の下限で落ちるなら、Actor が `tick` を呼んでいないか `POLL_MS` が違う。**期待値を書き換える前にそちらを疑う。**
+
+**要求が届く時刻そのものは固定していない。**実測は 55,200ms だが、そこは `mahjong-ai` の打牌方針が変われば動く。仕様が要求しているのは「応答から最低待機ぶん後に成立すること」であって、何ミリ秒目に鳴けるかではない。付随的な値を期待値に据えると、無関係な変更でテストが落ちる。
 
 - [ ] **Step 4: workspace 全体を測る**
 
