@@ -823,8 +823,9 @@ mod progression_tests {
     fn nobody_reaching_the_return_score_forces_an_extension() {
         let mut game = hanchan();
         game.drain_events();
-        // 8局ぶん親を流して南4局まで進める。子ツモで持ち点は動くが、
-        // 4席が順に和了るので一周ごとに25,000点へ戻る。
+        // 8局ぶん親を流して南4局まで進める。**持ち点は検査しない。**
+        // 和了の額はドラ次第で変わるので、局ごとにいくら動くかは決まらない。
+        // このタスクではまだ終局を判定しないため、局の進み方だけを見る。
         for index in 1..=8u8 {
             begin(&mut game, index);
             finish_with_a_child_tsumo(&mut game);
@@ -1172,7 +1173,8 @@ mod ending_match_tests {
         game.begin_round(&seed_of(1), 0);
         game.drain_events();
         // 席1を大きく減らしてから親に和了らせる。
-        // 親のツモは子から1300点ずつ取る。席1は500点しかないので飛ぶ。
+        // 親のツモは最低でも子から1300点ずつ取る。額はドラで増えるが、
+        // 500点しかない席1が負になることは変わらない。
         game.force_scores([25_000, 500, 25_000, 49_500]);
         finish_with_a_dealer_tsumo(&mut game);
         let events = game.drain_events();
