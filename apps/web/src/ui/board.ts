@@ -57,6 +57,19 @@ function actionButton(label: string, command: Command, send: (command: Command) 
   return button;
 }
 
+/**
+ * サーバへ送らないボタン。
+ *
+ * **`actionButton` を流用してダミーのコマンドを渡さない。**送られない
+ * ことがコールバック側の都合に依存してしまい、`actionButton` を変えた
+ * ときに本当に送られるようになる。
+ */
+function plainButton(label: string, onClick: () => void): HTMLButtonElement {
+  const button = node("button", "action", label);
+  button.addEventListener("click", onClick);
+  return button;
+}
+
 function renderActions(state: GameState, send: (command: Command) => void): HTMLElement {
   const actions = node("div", "actions");
   const pending = state.pending;
@@ -92,7 +105,10 @@ export function renderBoard(root: HTMLElement, state: GameState, send: (command:
   header.append(node("strong", undefined, round), node("span", undefined, `${state.honba}本場`), node("span", undefined, `供託 ${state.sticks}`), node("span", undefined, `残り ${state.wallRemaining}枚`));
   const dora = node("span", "dora", "ドラ表示 ");
   dora.append(tiles(state.doraIndicators));
-  header.append(dora, actionButton("新しい卓", { type: "kyuushu" }, () => (globalThis as unknown as { newTable: () => void }).newTable()));
+  header.append(
+    dora,
+    plainButton("新しい卓", () => (globalThis as unknown as { newTable: () => void }).newTable()),
+  );
   board.append(header);
 
   const opponents = node("div", "opponents");
