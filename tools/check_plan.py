@@ -65,7 +65,7 @@ def check_forward_references(text):
         if task == 0:
             continue
         for line in block.split("\n"):
-            for pattern in (r"\bfn (\w+)\s*\(", r"^\s*(?:pub(?:\(\w+\))?\s+)?const (\w+)\s*:"):
+            for pattern in (r"\bfn (\w+)\s*[<(]", r"^\s*(?:pub(?:\(\w+\))?\s+)?const (\w+)\s*:"):
                 m = re.search(pattern, line)
                 if m:
                     name = m.group(1)
@@ -250,7 +250,7 @@ def check_unresolved_calls(text, base="."):
             if in_module(absolute):
                 continue
             parent_scope.update(names_from_use(line))
-            for pattern in (r"\bfn (\w+)\s*\(", r"const (\w+)\s*:", r"(?:struct|enum) (\w+)"):
+            for pattern in (r"\bfn (\w+)\s*[<(]", r"const (\w+)\s*:", r"(?:struct|enum) (\w+)"):
                 m = re.search(pattern, line)
                 if m:
                     parent_scope.add(m.group(1))
@@ -260,7 +260,7 @@ def check_unresolved_calls(text, base="."):
         scope = set(parent_scope)
         for line in body.split("\n"):
             scope.update(names_from_use(line))
-            m = re.search(r"\bfn (\w+)\s*\(", line)
+            m = re.search(r"\bfn (\w+)\s*[<(]", line)
             if m:
                 scope.add(m.group(1))
             m = re.search(r"const (\w+)\s*:", line)
