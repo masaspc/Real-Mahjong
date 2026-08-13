@@ -615,12 +615,44 @@ mod progression_tests {
     };
     use super::*;
     use protocol::command::Command;
-    use protocol::notation::parse_tile;
+    use protocol::notation::{parse_hand, parse_tile};
     use protocol::seat::Wind;
 
     /// 局を1つ始める。
     fn begin(game: &mut MatchEngine, index: u8) {
         game.begin_round(&seed_of(index), 0);
+        game.drain_events();
+    }
+
+    /// 全員ノーテンの荒牌平局で局を終える。
+    ///
+    /// **和了で局を送ると点棒が動く。**その額はドラ次第で変わるので、
+    /// 「誰も返し点へ届かないまま何局も進める」テストが配牌に依存する。
+    /// 全員ノーテンの流局なら点棒はまったく動かない。
+    pub(super) fn finish_with_a_noten_draw(game: &mut MatchEngine) {
+        let dealer = game.round_state().dealer;
+        // 親は14枚、子は13枚。どちらも対子も塔子も無い散らばった形にする。
+        game.round_state_mut().seat_mut(dealer).hand =
+            parse_hand("147m258p369s12345z").expect("正しい記法");
+        for seat in Seat::ALL {
+            if seat == dealer {
+                continue;
+            }
+            game.round_state_mut().seat_mut(seat).hand =
+                parse_hand("147m258p369s1234z").expect("正しい記法");
+        }
+        clear_nagashi(game.round_state_mut());
+        drain_the_wall(game.round_state_mut());
+        game.apply(
+            dealer,
+            Command::Discard {
+                tile: parse_tile("5z").expect("正しい記法"),
+                riichi: false,
+            },
+            1_000,
+        )
+        .expect("切れる");
+        game.tick(WAY_PAST_ANY_DEADLINE_MS);
         game.drain_events();
     }
 
@@ -740,10 +772,12 @@ mod progression_tests {
     fn the_round_wind_turns_after_the_fourth_round() {
         let mut game = hanchan();
         game.drain_events();
+        // **点棒の動かない流局で送る。**和了で送ると持ち点が偏り、
+        // Task 3 が足す飛びの判定に引っかかって局が続かなくなる。
+        // このテストは Task 2 の時点でも Task 3 のあとでも通る必要がある。
         for index in 1..=4u8 {
             begin(&mut game, index);
-            finish_with_a_child_tsumo(&mut game);
-            next_of(&mut game);
+            finish_with_a_noten_draw(&mut game);
         }
         assert_eq!(
             game.round(),
@@ -823,13 +857,12 @@ mod progression_tests {
     fn nobody_reaching_the_return_score_forces_an_extension() {
         let mut game = hanchan();
         game.drain_events();
-        // 8局ぶん親を流して南4局まで進める。**持ち点は検査しない。**
-        // 和了の額はドラ次第で変わるので、局ごとにいくら動くかは決まらない。
-        // このタスクではまだ終局を判定しないため、局の進み方だけを見る。
+        // 8局ぶん親を流して南4局まで進める。**点棒の動かない流局で送る。**
+        // 和了で送ると持ち点が偏り、誰かが返し点へ届くか飛ぶかして、
+        // 西入の前に終局してしまう。
         for index in 1..=8u8 {
             begin(&mut game, index);
-            finish_with_a_child_tsumo(&mut game);
-            next_of(&mut game);
+            finish_with_a_noten_draw(&mut game);
         }
         assert_eq!(game.round().wind, Wind::West, "西入した");
         assert_eq!(game.round().number, 1);
@@ -979,6 +1012,7 @@ mod ending_match_tests {
     use super::match_tests::{
         finish_with_a_child_tsumo, finish_with_a_dealer_tsumo, players, seed_of,
     };
+    use super::progression_tests::finish_with_a_noten_draw;
     use super::*;
     use protocol::command::Command;
     use protocol::notation::{parse_hand, parse_tile};
@@ -992,38 +1026,6 @@ mod ending_match_tests {
             players(),
             0,
         )
-    }
-
-    /// 全員ノーテンの荒牌平局で局を終える。
-    ///
-    /// **和了で局を送ると点棒が動く。**その額はドラ次第で変わるので、
-    /// 「誰も返し点へ届かないまま何局も進める」テストが配牌に依存する。
-    /// 全員ノーテンの流局なら点棒はまったく動かない。
-    fn finish_with_a_noten_draw(game: &mut MatchEngine) {
-        let dealer = game.round_state().dealer;
-        // 親は14枚、子は13枚。どちらも対子も塔子も無い散らばった形にする。
-        game.round_state_mut().seat_mut(dealer).hand =
-            parse_hand("147m258p369s12345z").expect("正しい記法");
-        for seat in Seat::ALL {
-            if seat == dealer {
-                continue;
-            }
-            game.round_state_mut().seat_mut(seat).hand =
-                parse_hand("147m258p369s1234z").expect("正しい記法");
-        }
-        clear_nagashi(game.round_state_mut());
-        drain_the_wall(game.round_state_mut());
-        game.apply(
-            dealer,
-            Command::Discard {
-                tile: parse_tile("5z").expect("正しい記法"),
-                riichi: false,
-            },
-            1_000,
-        )
-        .expect("切れる");
-        game.tick(WAY_PAST_ANY_DEADLINE_MS);
-        game.drain_events();
     }
 
     fn match_end_of(events: &[Event]) -> ([i32; 4], [u8; 4]) {
