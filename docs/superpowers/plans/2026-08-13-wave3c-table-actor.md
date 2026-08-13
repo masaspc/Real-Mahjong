@@ -380,7 +380,7 @@ std::time を使わないのは、仮想時間で試験できなくなるため�
   - `pub struct ConnectionId(u64);`（中身は非公開）
   - `pub enum TableMsg { Command { seat, command, at_ms, reply }, Attach { seat, last_seq, ack }, Detach { seat, connection } }`
   - `pub struct TableHandle`（`Clone + Send + Sync + 'static`）, `TableHandle::command`, `TableHandle::attach`, `TableHandle::detach`, `TableHandle::is_closed`
-  - `pub fn spawn(...) -> (TableHandle, tokio::task::JoinHandle<()>)`
+  - `pub fn spawn<S: Seeds>(rules: Ruleset, occupants: [Occupant; 4], seeds: S) -> (TableHandle, tokio::task::JoinHandle<()>)`
 
 - [ ] **Step 1: 失敗するテストを書く**
 
@@ -687,6 +687,7 @@ Expected: コンパイルエラー。`spawn` / `TableHandle` / `Inbound` が無�
 ```rust
 use crate::table::{Occupant, Table};
 use mahjong_engine::match_flow::Reject;
+use mahjong_engine::wall::Seed;
 use protocol::client_event::{ClientEvent, ClientEventEnvelope};
 use protocol::command::Command;
 use protocol::ruleset::Ruleset;
@@ -697,16 +698,65 @@ use std::time::Duration;
 use tokio::sync::{mpsc, oneshot};
 use tokio::time::MissedTickBehavior;
 
+/// Actor が目を覚ます間隔。
+///
+/// `Table` は「次の締切はいつか」を教えてくれないので、締切ちょうどで
+/// 起きることはできない。基準思考時間は 5,000ms、反応ウィンドウの
+/// 最低待機は 350ms なので、100ms の粒度は人には見えない。
 const POLL_MS: u64 = 100;
+
+/// 入口の容量。**`tick` の前に片づける件数の上限でもある。**
+///
+/// 空になるまで回すと、受信で空いたスロットへ待機中の送信者が補充する
+/// ので、コマンドが途切れないかぎり `tick` が永久に来ない。
 const INBOX: usize = 32;
+
+/// 1接続ぶんの出口の余裕。
+///
+/// 追いつきぶんはこれとは別に確保するので、ここは生配信のための余裕
+/// である。実測では1席あたりの可視イベントが 1,304 / 1,875 / 1,677 件
+/// （シード3種）だった。tokio の mpsc は容量ぶんを先に確保しないので、
+/// 健全な接続ではこの数を大きくしても費用はかからない。
 const OUTBOX: usize = 8_192;
 
+/// 局のシードを配る。
+///
+/// **Wave 3d はここで永続化してから返す。**局頭で配った `seed_commit` と、
+/// あとで開示するシードが食い違うと、プレイヤーが検算したときに
+/// **サーバが山を操作したように見える。**不正の疑いに答えるための仕組みが、
+/// 逆に不正の証拠を作ってしまう（仕様 8.3）。
+///
+/// だから「シードを作る」と「局を始める」のあいだに待てる形にしておく。
+/// Wave 3c の `SeedSource` は待たずに返すが、契約は同じである。
+pub trait Seeds: Send + 'static {
+    fn next_seed(&mut self) -> impl std::future::Future<Output = Seed> + Send;
+}
+
+impl Seeds for SeedSource {
+    async fn next_seed(&mut self) -> Seed {
+        SeedSource::next_seed(self)
+    }
+}
+
+/// 接続へイベントを押し出す口。
+///
+/// **有界だが、Actor は決して待たない。**`try_send` で押し込み、溢れたら
+/// その接続を切る。切られた側は `attach(seat, last_seq)` で追いつける。
+/// **遅い接続への対処は、既に持っている再接続の経路そのものである。**
 pub type Outbound = mpsc::Sender<ClientEventEnvelope>;
 pub type Inbound = mpsc::Receiver<ClientEventEnvelope>;
 
+/// 卓が既に畳まれている。
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub struct Gone;
 
+/// 席への接続1本を指す。
+///
+/// **同じ席に2本目が来たら1本目は無効になる。**この ID がないと、
+/// 置き換えられた古い接続の切断が、新しい接続を巻き添えにする。
+///
+/// **中身は非公開。**外から作れないので、Wave 3d で他人の接続 ID を
+/// 騙ることができない。卓が配ったものを返すことしかできない。
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub struct ConnectionId(u64);
 
@@ -808,10 +858,10 @@ impl TableHandle {
 /// **`JoinHandle` を返す。**捨てると panic と正常終局が区別できず、どちらも
 /// `Gone` に潰れる。Wave 3d の卓の台帳が障害を記録し、局頭から再開するかを
 /// 判断するには終了理由が要る（仕様 8.3）。
-pub fn spawn(
+pub fn spawn<S: Seeds>(
     rules: Ruleset,
     occupants: [Occupant; 4],
-    seeds: SeedSource,
+    seeds: S,
 ) -> (TableHandle, tokio::task::JoinHandle<()>) {
     let (tx, rx) = mpsc::channel(INBOX);
     let clock = Arc::new(Clock::start());
@@ -966,9 +1016,9 @@ fn handle(table: &mut Table, sinks: &mut Sinks, message: TableMsg, flush_now_ms:
     }
 }
 
-async fn run(
+async fn run<S: Seeds>(
     mut table: Table,
-    mut seeds: SeedSource,
+    mut seeds: S,
     clock: Arc<Clock>,
     mut rx: mpsc::Receiver<TableMsg>,
 ) {
@@ -983,7 +1033,12 @@ async fn run(
             break;
         }
         if table.needs_seed() {
-            table.begin_round(&seeds.next_seed(), now);
+            // **シードを受け取ってから局を始める。**Wave 3d はこの `await` の
+            // 中で永続化する。ここで待てないと、`seed_commit` を配ったあとに
+            // 落ちて別のシードで再開する経路ができてしまう。
+            let seed = seeds.next_seed().await;
+            let now = clock.now_ms();
+            table.begin_round(&seed, now);
             sinks.note_deadlines(&table, now);
             sinks.flush(&table, now);
         }
