@@ -43,7 +43,7 @@ export const HAND_Z = 10;
  * 積むと、1段目の外端は 8.45 になり、山（10.825 から）にも
  * 手牌（9.7 から）にも当たらない。
  */
-const RIVER_FRONT_Z = 7.775;
+const RIVER_FRONT_Z = 7.925;
 
 /** 自席から見た相対席。自分が 0、下家が 1、対面が 2、上家が 3。 */
 export function relativeSeat(absolute: number, viewer: number): number {
@@ -77,12 +77,18 @@ export function handPosition(seat: number, index: number, handSize: number): Vec
   return rotateY(local, seatRotation(seat));
 }
 
-/** 河。6枚ごとに1段、段が進むほど卓中央へ寄る。 */
-export function discardPosition(seat: number, index: number): Vec3 {
+/**
+ * 河。6枚ごとに1段、段が進むほど卓中央へ寄る。
+ *
+ * `xShift` は、その段にリーチ宣言牌があるときのずれ。
+ * **横に倒した牌は幅が 1.35 になる。**間隔 1 のまま並べると
+ * 隣の牌に 0.175 食い込むので、呼ぶ側がずらす量を渡す。
+ */
+export function discardPosition(seat: number, index: number, xShift = 0): Vec3 {
   const row = Math.floor(index / DISCARDS_PER_ROW);
   const column = index % DISCARDS_PER_ROW;
   const local: Vec3 = {
-    x: (column - (DISCARDS_PER_ROW - 1) / 2) * TILE.width,
+    x: (column - (DISCARDS_PER_ROW - 1) / 2) * TILE.width + xShift,
     y: TILE.depth / 2,
     z: RIVER_FRONT_Z - row * TILE.height,
   };
