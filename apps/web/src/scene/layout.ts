@@ -52,6 +52,16 @@ export function handPosition(seat: number, index: number, handSize: number): Vec
   return rotateY(local, seatRotation(seat));
 }
 
+/**
+ * 河の1段目を置く奥行き。
+ *
+ * **4段目が卓の中央へ届いてはいけない。**寝かせた牌は z 方向に
+ * 1.35 を占めるので、4段目が z=0.15 に来ると対面の河と重なる。
+ * 一方で1段目を奥へ出しすぎると山（z=6.2）へ食い込む。
+ * 4.8 なら4段目が 0.075..1.425、1段目が 4.125..5.475 に収まる。
+ */
+const RIVER_FRONT_Z = 4.8;
+
 /** 河。6枚ごとに1段、段が進むほど卓中央へ寄る。 */
 export function discardPosition(seat: number, index: number): Vec3 {
   const row = Math.floor(index / DISCARDS_PER_ROW);
@@ -59,7 +69,7 @@ export function discardPosition(seat: number, index: number): Vec3 {
   const local: Vec3 = {
     x: (column - (DISCARDS_PER_ROW - 1) / 2) * TILE.width,
     y: TILE.depth / 2,
-    z: 4.2 - row * TILE.height,
+    z: RIVER_FRONT_Z - row * TILE.height,
   };
   return rotateY(local, seatRotation(seat));
 }

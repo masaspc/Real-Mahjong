@@ -88,3 +88,22 @@ describe("wallPosition", () => {
     expect(second.x).not.toBeCloseTo(first.x);
   });
 });
+
+describe("河が互いに重ならない", () => {
+  it("4段目まで置いても、対面の河と重ならない", () => {
+    // **寝かせた牌は z 方向に 1.35 を占める。**4段目が z=0.15 に
+    // 来ると、対面の 4段目（z=-0.15）と重なる。
+    const half = TILE.height / 2;
+    const mine = discardPosition(0, 23);
+    const across = discardPosition(2, 23);
+    expect(Math.abs(mine.z - across.z)).toBeGreaterThan(TILE.height);
+    expect(mine.z - half).toBeGreaterThan(0);
+    expect(across.z + half).toBeLessThan(0);
+  });
+
+  it("1段目が山へ食い込まない", () => {
+    const river = discardPosition(0, 0);
+    const wall = wallPosition(0, 0);
+    expect(river.z + TILE.height / 2).toBeLessThan(wall.z - TILE.height / 2);
+  });
+});
