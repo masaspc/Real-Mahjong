@@ -21,7 +21,7 @@
 - `cargo clippy --all-targets -- -D warnings` と `cargo fmt --check` を通す。
 - テストは仕様である。**期待値を実装に合わせて書き換えてはならない。**合わないときは実装を直す。合わないまま進むなら止めて報告する。
 
-**この計画に載っているコードと期待値は、実際にコンパイルして実行し、全件通ることを確認済みである。**凍結済みの `Table` を外から使う試作クレートで、Actor をこの計画のとおりに組み、下の6点を実測した。
+**この計画に載っているコードと期待値は、実際にコンパイルして実行し、30件すべて通ることを確認済みである。**凍結済みの `Table` を外から使う試作クレートで、Actor をこの計画のとおりに組み、下を実測した。`cargo clippy --all-targets -- -D warnings` も通る。
 
 | 実測した前提 | 結果 |
 |---|---|
@@ -29,8 +29,12 @@
 | 配牌の枚数 | **親も子も 13 枚。**親の14枚目は別の `Draw { tile: Some(_) }` |
 | 無言の席が自動打牌されるまで | 仮想 **25,800ms**（式は 5,000 + 20,000 + 500 + lead_in 250 = 25,750、その次のポーリング） |
 | 4人 CPU の半荘 | 1,304 イベント / 9局 / 全部別シード / `MatchEnd` あり / 実時間 2.7 秒 |
-| 過去の時刻で刻印した `apply` | `Ok(())`。エンジンは時刻の巻き戻しを受けつける |
+| 締切を越えた `tick` のあとの、締切前の刻印 | **`Err(NotYourTurn)`。**刻印だけでは足りず、`tick` の前にキューを空にする必要がある |
+| ある席に見えない連番 | 151 件中 41 個。1つ申告すると**未受信の可視イベント 60 件が飛ぶ** |
+| 最初の鳴きの要求（シード `[1u8; 32]`・席1） | 仮想 **55,200ms**、`Chi` と `Pon`、残り 7,650ms |
+| 同じミリ秒にポンで応じたときの成立 | **55,600ms（+400ms）。**最低待機の終わり 55,550ms の次のポーリング |
 | 古い接続の `Detach` | 接続 ID で照合すれば新しい接続を切らない |
+| `TableHandle` | `Send + Sync + Clone + 'static` |
 
 ---
 
@@ -65,6 +69,10 @@ mod time;
 
 そこで `TableHandle::command` が**送る前に**時刻を刻み、Actor はその刻印を `Table::apply` へ渡す。刻印は Actor が処理する時刻より必ず古いが、エンジンは時刻の巻き戻しを受けつける（実測済み）。締切は絶対時刻なので、古い時刻を渡すことは「まだ切れていない」を意味し、これがまさに求める挙動である。
 
+**しかし刻印だけでは足りない。**`select!` が ticker の枝を先に選び、その `tick` が締切を越えて自動打牌を済ませてしまうと、あとから締切前の刻印で `apply` しても局面は巻き戻らない。実測すると `Err(NotYourTurn)` になる。
+
+そこで **`tick` を呼ぶ前に、入口に既に着いている分をすべて処理する。**`ticker.tick()` の枝で `rx.try_recv()` を空になるまで回してから `table.tick` を呼ぶ。これで「tick が起きた時点でキューにあったコマンドは、必ずその tick より先に適用される」が保証される。
+
 そのため `TableHandle` は Actor と**同じ `Clock` を共有する**（`Arc<Clock>`）。別々に `Clock::start()` すると原点がずれる。
 
 ### なぜ `since` だけで配るのか（`drain_for` を使わない）
@@ -86,6 +94,10 @@ Wave 3b の `Table` には `drain_for`（取り出したら消える）と `sinc
 ### 辻褄の合わない `last_seq` は信用しない
 
 クライアントの申告をそのまま `since` へ渡すと、`u32::MAX` を渡された席は卓が終わるまで一件も受け取れない。かといって「見えている最大値」へ丸めると、そのクライアントは文脈を持たないまま以降のイベントだけを受け取り、復旧できない。**存在しない連番を申告してきたら、最初から送り直す。**
+
+**「最大値以下かどうか」で検めてはならない。**`Table::since` は全体のログを連番で絞ってから席ごとに投影するので、その席に見えない連番が正常に飛び飛びで存在する。`RequestAction` は当該席以外へ投影されないのがその代表である。実測すると、ある席に見えるのは 151 件中 110 件で、見えない連番が 41 個あった。そのうちの1つを申告すると、**まだ一度も見ていない可視イベント 60 件が飛ぶ。**
+
+だから検めるのは「その席の可視列にその連番が実在するか」でなければならない。
 
 ### シードは1本のマスターから繰り出す
 
@@ -541,26 +553,49 @@ mod tests {
         assert_send_sync::<TableHandle>();
     }
 
-    /// **これが成り立たないと、入口に着いた時刻で判定する設計が崩れる。**
-    /// 刻印は Actor が処理する時刻より必ず古い。エンジンがそれを拒むなら
-    /// 別の手を考えねばならない。
+    /// **刻印だけでは足りないことの証明。**
+    ///
+    /// 締切前に処理すれば通る。締切を越えた `tick` のあとでは、同じ刻印でも
+    /// 通らない。だから Actor は `tick` の前にキューを空にしなければならない。
     #[test]
-    fn the_engine_accepts_a_command_stamped_in_the_past() {
-        let mut table = Table::new(rules(), humans(), 0);
-        table.begin_round(&Seed::from_hex(&"01".repeat(32)).expect("正しい hex"), 0);
-        let tile = table
+    fn an_expired_tick_cannot_be_undone() {
+        let seed = Seed::from_hex(&"01".repeat(32)).expect("正しい hex");
+
+        let mut early = Table::new(rules(), one_human_three_cpus(), 0);
+        early.begin_round(&seed, 0);
+        let tile = early
             .round_state()
             .expect("局が動いている")
             .seat(Seat::new(0))
             .hand[0];
-
-        table.tick(5_000);
-        let result = table.apply(
-            Seat::new(0),
-            Command::Discard { tile, riichi: false },
-            1_000,
+        early.tick(25_700);
+        assert_eq!(
+            early.apply(
+                Seat::new(0),
+                Command::Discard { tile, riichi: false },
+                25_700
+            ),
+            Ok(()),
+            "締切前に処理すれば通る"
         );
-        assert_eq!(result, Ok(()), "過去の刻印で弾かれた");
+
+        let mut late = Table::new(rules(), one_human_three_cpus(), 0);
+        late.begin_round(&seed, 0);
+        let tile = late
+            .round_state()
+            .expect("局が動いている")
+            .seat(Seat::new(0))
+            .hand[0];
+        late.tick(25_800);
+        assert_eq!(
+            late.apply(
+                Seat::new(0),
+                Command::Discard { tile, riichi: false },
+                25_700
+            ),
+            Err(Reject::NotYourTurn),
+            "締切を越えた tick は巻き戻らない"
+        );
     }
 
     #[tokio::test(start_paused = true)]
@@ -761,17 +796,20 @@ impl Sinks {
 
     /// クライアントの申告した `last_seq` を検める。
     ///
-    /// **辻褄の合わない申告は信用せず、最初から送り直す。**存在しない連番を
-    /// そのまま受け入れると、その席は卓が終わるまで一件も受け取れない。
-    /// 見えている最大値へ丸める手もあるが、それだと文脈のないまま途中の
-    /// イベントだけが届き、クライアントは組み立て直せない。
+    /// **その席の可視列にその連番が実在するかを見る。**「最大値以下か」では
+    /// 足りない。全体のログを絞ってから投影するので、その席に見えない連番が
+    /// 正常に飛び飛びで存在し、それを申告されると未受信の可視イベントが飛ぶ。
+    ///
+    /// 辻褄が合わなければ最初から送り直す。見えている最大値へ丸める手も
+    /// あるが、それだと文脈のないまま途中のイベントだけが届き、
+    /// クライアントは組み立て直せない。
     fn checked(table: &Table, seat: Seat, last_seq: Option<u32>) -> Option<u32> {
-        let high = table.since(seat, None).last().map(|e| e.seq);
-        match (last_seq, high) {
-            (Some(claimed), Some(highest)) if claimed <= highest => Some(claimed),
-            (Some(_), _) => None,
-            (None, _) => None,
-        }
+        let claimed = last_seq?;
+        table
+            .since(seat, None)
+            .iter()
+            .any(|envelope| envelope.seq == claimed)
+            .then_some(claimed)
     }
 
     /// まだ送っていない分を席ごとに押し出す。
@@ -804,6 +842,47 @@ impl Sinks {
     }
 }
 
+/// 1通を処理する。**`tick` の前にキューを空にするためにも呼ぶ。**
+fn handle(table: &mut Table, sinks: &mut Sinks, message: TableMsg) {
+    match message {
+        TableMsg::Command {
+            seat,
+            command,
+            at_ms,
+            reply,
+        } => {
+            // **入口へ着いた時刻で判定する。**取り出した時刻を使うと、
+            // 締切前に押した操作が時間切れになる。
+            let result = table.apply(seat, command, at_ms);
+            let _ = reply.send(result);
+        }
+        TableMsg::Attach {
+            seat,
+            last_seq,
+            out,
+            ack,
+        } => {
+            let index = seat.index();
+            sinks.sent_upto[index] = Sinks::checked(table, seat, last_seq);
+            sinks.out[index] = Some(out);
+            let connection = ConnectionId(sinks.next_id);
+            sinks.next_id += 1;
+            sinks.live[index] = Some(connection);
+            // 登録し、配り、それから返事する。この順序が
+            // 「attach が返れば届いている」を保証する。
+            sinks.flush(table);
+            let _ = ack.send(connection);
+        }
+        TableMsg::Detach { seat, connection } => {
+            // 置き換えられた古い接続の切断が、新しい接続を切ってはならない。
+            if sinks.live[seat.index()] == Some(connection) {
+                sinks.out[seat.index()] = None;
+                sinks.live[seat.index()] = None;
+            }
+        }
+    }
+}
+
 async fn run(
     mut table: Table,
     mut seeds: SeedSource,
@@ -830,33 +909,15 @@ async fn run(
         tokio::select! {
             message = rx.recv() => match message {
                 None => break,
-                Some(TableMsg::Command { seat, command, at_ms, reply }) => {
-                    // **入口へ着いた時刻で判定する。**取り出した時刻を使うと、
-                    // 締切前に押した操作が時間切れになる。
-                    let result = table.apply(seat, command, at_ms);
-                    let _ = reply.send(result);
-                }
-                Some(TableMsg::Attach { seat, last_seq, out, ack }) => {
-                    let index = seat.index();
-                    sinks.sent_upto[index] = Sinks::checked(&table, seat, last_seq);
-                    sinks.out[index] = Some(out);
-                    let connection = ConnectionId(sinks.next_id);
-                    sinks.next_id += 1;
-                    sinks.live[index] = Some(connection);
-                    // 登録し、配り、それから返事する。この順序が
-                    // 「attach が返れば届いている」を保証する。
-                    sinks.flush(&table);
-                    let _ = ack.send(connection);
-                }
-                Some(TableMsg::Detach { seat, connection }) => {
-                    // 置き換えられた古い接続の切断が、新しい接続を切ってはならない。
-                    if sinks.live[seat.index()] == Some(connection) {
-                        sinks.out[seat.index()] = None;
-                        sinks.live[seat.index()] = None;
-                    }
-                }
+                Some(message) => handle(&mut table, &mut sinks, message),
             },
             _ = ticker.tick() => {
+                // **時計を進める前に、既に着いている分を片づける。**
+                // 刻印だけでは足りない。tick が締切を越えて自動打牌したあとでは、
+                // 締切前の刻印で apply しても局面は巻き戻らない。
+                while let Ok(message) = rx.try_recv() {
+                    handle(&mut table, &mut sinks, message);
+                }
                 table.tick(clock.now_ms());
             }
         }
@@ -993,6 +1054,44 @@ mod reconnect_tests {
         assert!(events
             .iter()
             .any(|e| matches!(e.event, ClientEvent::MatchStart { .. })));
+    }
+
+    /// **その席に投影されなかった連番を申告されたら、最初から送り直す。**
+    ///
+    /// 全体のログを連番で絞ってから席ごとに投影するので、その席に見えない
+    /// 連番が正常に飛び飛びで存在する。`RequestAction` は当該席以外へ
+    /// 投影されないのが代表例。それを申告されて受理すると、まだ一度も
+    /// 見ていない可視イベントが飛ぶ。
+    #[tokio::test(start_paused = true)]
+    async fn a_sequence_hidden_from_this_seat_is_refused() {
+        let handle = spawn(rules(), all_cpu(), SeedSource::from_master([1u8; 32]));
+        let (_, mut inbox) = handle
+            .attach(Seat::new(1), None)
+            .await
+            .expect("卓は生きている");
+
+        let mut visible: Vec<u32> = Vec::new();
+        while visible.len() < 40 {
+            let next = tokio::time::timeout(Duration::from_millis(60_000), inbox.recv())
+                .await
+                .expect("仮想60秒のうちに届く");
+            let Some(envelope) = next else { break };
+            visible.push(envelope.seq);
+        }
+        let highest = *visible.last().expect("何か届いている");
+        let hidden: Vec<u32> = (0..highest).filter(|s| !visible.contains(s)).collect();
+        assert!(!hidden.is_empty(), "見えない連番が無いと検証にならない");
+
+        let claim = hidden[hidden.len() / 2];
+        let (_, mut liar) = handle
+            .attach(Seat::new(1), Some(claim))
+            .await
+            .expect("卓は生きている");
+        assert_eq!(
+            take_ready(&mut liar).first().map(|e| e.seq),
+            Some(0),
+            "自席に見えない連番を受理して途中から送っている"
+        );
     }
 
     #[tokio::test(start_paused = true)]
@@ -1215,31 +1314,14 @@ Expected: いくつか落ちる。Task 2 の実装が正しければ全部通る
 - [ ] **Step 4: 通ることを確かめる**
 
 Run: `cargo test --package server reconnect_tests`
-Expected: 10 passed
+Expected: 11 passed
 
-- [ ] **Step 5: crate と workspace 全体を測る**
+- [ ] **Step 5: crate 全体を測る**
 
-```bash
-cargo test --package server     # 55 件（table 28 + session_time 7 + session 10 + reconnect 10）
-cargo test --workspace
-cargo clippy --all-targets -- -D warnings
-cargo fmt --check
-```
-Expected: 失敗ゼロ
+Run: `cargo test --package server`
+期待: 56 件（table 28 + session_time 7 + session 10 + reconnect 11）
 
-- [ ] **Step 6: 禁じ手が入っていないか自分で確かめる**
-
-```bash
-# std の時計を使っていないか
-grep -n "std::time::Instant\|SystemTime" crates/server/src/session*.rs
-# table.rs を触っていないか
-git diff --stat main -- crates/server/src/table.rs
-# 凍結クレートを触っていないか
-git diff --stat main -- crates/protocol crates/mahjong-core crates/mahjong-engine crates/mahjong-ai
-```
-Expected: すべて空
-
-- [ ] **Step 7: コミット**
+- [ ] **Step 6: コミット**
 
 ```bash
 git add crates/server/src/session.rs
@@ -1258,9 +1340,243 @@ detach は接続 ID で照合する。置き換えられた古い接続の切断
 
 ---
 
+### Task 4: 反応ウィンドウを Actor 越しに検証する
+
+**Files:**
+- Modify: `crates/server/src/session.rs`
+
+**Interfaces:**
+- Consumes: Task 2・3 のすべて。
+- Produces: 新しい公開 API は無い。
+
+**なぜ別のタスクにするか。** ポン・チー・カン・ロンは Actor の存在理由そのものである。Wave 3b で「**卓は時間を作らない**」と決めたため、反応ウィンドウの最低待機 350ms を越えさせるのは呼び出し側の `tick` であり、いまその呼び出し側は Actor である。ここが壊れていると、鳴きが永久に成立しないか、逆に待たずに確定する。
+
+**実測した値。**シード `[1u8; 32]`・席1 が人・他が CPU のとき、最初の鳴きの要求は **仮想 55,200ms** に届き、選択肢は `Chi` と `Pon`、残り時間は 7,650ms。同じミリ秒にポンで応じると、鳴きの成立は **55,600ms**（+400ms）である。最低待機の終わりは 55,550ms なので、その次のポーリングで越えている。
+
+- [ ] **Step 1: 失敗するテストを書く**
+
+`session.rs` の末尾に新しいモジュールとして足す。
+
+```rust
+#[cfg(test)]
+mod reaction_tests {
+    use super::tests::rules;
+    use super::*;
+    use protocol::client_event::ClientEvent;
+    use protocol::command::{ActionOption, CallResponse};
+    use protocol::event::PlayerId;
+
+    fn human_at(seat: usize) -> [Occupant; 4] {
+        std::array::from_fn(|index| {
+            if index == seat {
+                Occupant::Human(PlayerId("human".to_owned()))
+            } else {
+                Occupant::Cpu(PlayerId(format!("cpu{index}")))
+            }
+        })
+    }
+
+    /// その席へ最初に届く「鳴きの要求」まで進める。
+    /// 打牌の要求（自分の番）は読み飛ばす。
+    async fn advance_to_a_call_window(inbox: &mut Inbound) -> (u32, Vec<ActionOption>) {
+        for _ in 0..3_000 {
+            let next = tokio::time::timeout(Duration::from_millis(120_000), inbox.recv())
+                .await
+                .expect("仮想2分のうちに何か届く");
+            let Some(envelope) = next else {
+                break;
+            };
+            if let ClientEvent::RequestAction {
+                window_id, options, ..
+            } = &envelope.event
+            {
+                if options
+                    .iter()
+                    .any(|option| !matches!(option, ActionOption::Discard { .. }))
+                {
+                    return (*window_id, options.clone());
+                }
+            }
+        }
+        panic!("鳴きの要求に到達しなかった");
+    }
+
+    /// **卓は時間を作らない。**最低待機 350ms を越えさせるのは Actor の tick。
+    #[tokio::test(start_paused = true)]
+    async fn the_actor_carries_a_call_across_the_minimum_wait() {
+        let handle = spawn(rules(), human_at(1), SeedSource::from_master([1u8; 32]));
+        let clock = Clock::start();
+        let (_, mut inbox) = handle
+            .attach(Seat::new(1), None)
+            .await
+            .expect("卓は生きている");
+
+        let (window_id, options) = advance_to_a_call_window(&mut inbox).await;
+        let opened_at = clock.now_ms();
+        assert_eq!(opened_at, 55_200, "要求の届く時刻がずれた");
+
+        let tiles = options
+            .iter()
+            .find_map(|option| match option {
+                ActionOption::Pon { candidates } if !candidates.is_empty() => Some(candidates[0]),
+                _ => None,
+            })
+            .expect("ポンの候補がある");
+
+        // **同じミリ秒に応じる。**卓が自分で時間を進めるなら、ここで成立して
+        // しまう。成立が 350ms 後になることが、Actor が越えさせている証拠。
+        let accepted = handle
+            .command(
+                Seat::new(1),
+                Command::CallResponse {
+                    window_id,
+                    response: CallResponse::Pon { tiles },
+                },
+            )
+            .await
+            .expect("卓は生きている");
+        assert_eq!(accepted, Ok(()));
+        assert_eq!(clock.now_ms(), opened_at, "応答で時間が進んでいる");
+
+        let mut called_at = None;
+        for _ in 0..40 {
+            let next = tokio::time::timeout(Duration::from_millis(60_000), inbox.recv())
+                .await
+                .expect("仮想60秒のうちに届く");
+            let Some(envelope) = next else {
+                break;
+            };
+            if matches!(envelope.event, ClientEvent::Call { .. }) {
+                called_at = Some(clock.now_ms());
+                break;
+            }
+        }
+        let called_at = called_at.expect("鳴きが成立しなかった");
+        assert!(
+            called_at >= opened_at + 350,
+            "最低待機を越えずに成立した: +{}ms",
+            called_at - opened_at
+        );
+        assert!(
+            called_at <= opened_at + 450,
+            "ポーリング1周を超えて遅れた: +{}ms",
+            called_at - opened_at
+        );
+    }
+
+    /// `window_id` は再送や遅れた応答を別のウィンドウへ当てないための鍵。
+    #[tokio::test(start_paused = true)]
+    async fn a_response_to_an_unknown_window_is_refused() {
+        let handle = spawn(rules(), human_at(1), SeedSource::from_master([1u8; 32]));
+        let (_, mut inbox) = handle
+            .attach(Seat::new(1), None)
+            .await
+            .expect("卓は生きている");
+        let (window_id, _) = advance_to_a_call_window(&mut inbox).await;
+
+        assert_eq!(
+            handle
+                .command(
+                    Seat::new(1),
+                    Command::CallResponse {
+                        window_id: window_id + 999,
+                        response: CallResponse::Pass,
+                    },
+                )
+                .await
+                .expect("卓は生きている"),
+            Err(Reject::StaleWindow),
+            "知らないウィンドウへの応答が通った"
+        );
+
+        assert_eq!(
+            handle
+                .command(
+                    Seat::new(1),
+                    Command::CallResponse {
+                        window_id,
+                        response: CallResponse::Pass,
+                    },
+                )
+                .await
+                .expect("卓は生きている"),
+            Ok(()),
+            "正しいウィンドウへの応答が通らない"
+        );
+
+        assert_eq!(
+            handle
+                .command(
+                    Seat::new(1),
+                    Command::CallResponse {
+                        window_id,
+                        response: CallResponse::Pass,
+                    },
+                )
+                .await
+                .expect("卓は生きている"),
+            Err(Reject::StaleWindow),
+            "同じウィンドウへ二度応えられている"
+        );
+    }
+}
+```
+
+- [ ] **Step 2: 落ちることを確かめる**
+
+Run: `cargo test --package server reaction_tests`
+Expected: いくつか落ちる。Task 2 の実装が正しければ全部通る可能性もある。
+
+- [ ] **Step 3: 通ることを確かめる**
+
+Run: `cargo test --package server reaction_tests`
+Expected: 2 passed
+
+`the_actor_carries_a_call_across_the_minimum_wait` の `assert_eq!(opened_at, 55_200)` が落ちるなら、`SeedSource` の繰り出し方か `POLL_MS` が計画と違っている。**期待値を書き換える前にそちらを疑う。**
+
+- [ ] **Step 4: workspace 全体を測る**
+
+```bash
+cargo test --package server     # 58 件（table 28 + session_time 7 + session 10 + reconnect 11 + reaction 2）
+cargo test --workspace
+cargo clippy --all-targets -- -D warnings
+cargo fmt --check
+```
+Expected: 失敗ゼロ
+
+- [ ] **Step 5: 禁じ手が入っていないか自分で確かめる**
+
+```bash
+# std の時計を使っていないか
+grep -n "std::time::Instant\|SystemTime" crates/server/src/session*.rs
+# table.rs を触っていないか
+git diff --stat main -- crates/server/src/table.rs
+# 凍結クレートを触っていないか
+git diff --stat main -- crates/protocol crates/mahjong-core crates/mahjong-engine crates/mahjong-ai
+```
+Expected: すべて空
+
+- [ ] **Step 6: コミット**
+
+```bash
+git add crates/server/src/session.rs
+git commit -m "feat(server): 反応ウィンドウを Actor 越しに検証する
+
+卓は時間を作らない。最低待機 350ms を越えさせるのは Actor の tick で
+ある。同じミリ秒にポンで応じても成立は 350ms 後になることを測って
+確かめる。ここが壊れると鳴きが永久に成立しないか、待たずに確定する。
+
+window_id は再送や遅れた応答を別のウィンドウへ当てないための鍵なので、
+知らないウィンドウと二度目の応答が拒まれることも確かめる。"
+```
+
+---
+
 ## Self-Review
 
-**仕様の網羅:** 仕様 3.2 節「server — 唯一 I/O と時間を持つ層。1卓 = 1 tokio task の Actor とし、卓同士を完全に独立させる」を Task 2 が満たす。8.1 節「再接続 = `seq` 以降のイベント再送」を Task 3 が満たす。6.2 節の時間モデルは、コマンドを入口の到着時刻で判定することと、自動打牌が 25,750ms を厳密に超えることの2点で検証している。シード開示（`SeedReveal`）を出すのはエンジン側の責務なので、このウェーブでは Actor が素通しするだけでよい。
+**仕様の網羅:** 仕様 3.2 節「server — 唯一 I/O と時間を持つ層。1卓 = 1 tokio task の Actor とし、卓同士を完全に独立させる」を Task 2 が満たす。8.1 節「再接続 = `seq` 以降のイベント再送」を Task 3 が満たす。6.2 節の時間モデルは、コマンドを入口の到着時刻で判定することと、自動打牌が 25,750ms を厳密に超えることの2点で検証している。6.4 節の反応ウィンドウは Task 4 が受け持つ。シード開示（`SeedReveal`）を出すのはエンジン側の責務なので、このウェーブでは Actor が素通しするだけでよい。
+
+**反応まわりで Actor 級の試験を書かなかったもの:** ダブロンと複数席の同時応答は、`mahjong-engine` の 298 テスト（Wave 2d・2e）が優先順位・供託分配・頭ハネまで網羅している。Actor が新たに担うのは「最低待機 350ms を越えさせること」と「`window_id` で遅れた応答を弾くこと」の2つであり、Task 4 はそこに絞ってある。**同じ判定を二重に試験しても、壊れたときに二重に落ちるだけで、原因の切り分けは楽にならない。**
 
 **このウェーブがやらないこと:** WebSocket・axum・HTTP・認証は Wave 3d。永続化とマッチングも Wave 3d 以降。ここは「卓が実時間で動く」ところまでで止める。**非同期とネットワークを一度に入れると、失敗したときどちらが原因か切り分けられない。**
 
