@@ -21,7 +21,7 @@
 - `cargo clippy --all-targets -- -D warnings` と `cargo fmt --check` を通す。
 - テストは仕様である。**期待値を実装に合わせて書き換えてはならない。**合わないときは実装を直す。合わないまま進むなら止めて報告する。
 
-**この計画に載っているコードと期待値は、実際にコンパイルして実行し、30件すべて通ることを確認済みである。**凍結済みの `Table` を外から使う試作クレートで、Actor をこの計画のとおりに組み、下を実測した。`cargo clippy --all-targets -- -D warnings` も通る。
+**この計画に載っているコードと期待値は、実際にコンパイルして実行し、38件すべて通ることを確認済みである。**凍結済みの `Table` を外から使う試作クレートで、Actor をこの計画のとおりに組み、下を実測した。`cargo clippy --all-targets -- -D warnings` も通る。
 
 | 実測した前提 | 結果 |
 |---|---|
@@ -110,6 +110,8 @@ Wave 3b の `Table` には `drain_for`（取り出したら消える）と `sinc
 `command` は `at_ms` を受け取る。**卓の中で刻んではならない。**入口の待ち行列に空きが出た時刻を使うと、他席や再接続の大量投入で枠が埋まっているあいだ、締切前にサーバへ届いた正当な操作まで遅刻扱いになる。他人の混雑が自分の締切を削ってはならない。
 
 Wave 3d は WebSocket の枠を読んだ直後に `TableHandle::now_ms()` を呼び、それを `command` へ渡す。**クライアントが時刻を指定するわけではない。**測るのは常にサーバ側である。
+
+`at_ms` は**サーバ内部だけが渡す。**未来の時刻や別の卓の時計の値を渡してはならない。古い時刻を渡すとバンクの消費まで巻き戻る（`timing.rs` の `charge_bank` は `saturating_sub` で引く）ので、信頼できる呼び出し側に限る。再送のときも刻印を取り直さない。**取り直すと、通信が詰まったぶんだけ本人の持ち時間が削られる。**
 
 **それでも入口が満杯なら、外で待つコマンドは tick に追い越される。**そこは救えない。救えるように見せかけないこと。4人が1手ずつ出す卓で入口に同時に並ぶのは高々4〜5件であり、`INBOX = 32` はその6倍以上ある。ここが埋まるのは濫用のときだけなので、**接続ごとの流量制限で埋めさせない**のが正しい対処であり、それは Wave 3d の仕事である。
 
@@ -373,6 +375,7 @@ std::time を使わないのは、仮想時間で試験できなくなるため�
 - Produces:
   - `pub type Outbound = tokio::sync::mpsc::Sender<ClientEventEnvelope>`（有界）
   - `pub type Inbound = tokio::sync::mpsc::Receiver<ClientEventEnvelope>`
+  - `pub trait Seeds { fn next_seed(&mut self) -> impl Future<Output = Seed> + Send; }`（`SeedSource` が実装する）
   - `pub struct Gone;`
   - `pub struct ConnectionId(u64);`（中身は非公開）
   - `pub enum TableMsg { Command { seat, command, at_ms, reply }, Attach { seat, last_seq, ack }, Detach { seat, connection } }`
@@ -989,6 +992,15 @@ async fn run(
             biased;
 
             _ = ticker.tick() => {
+                // **時計を進める前に、既に着いている分を片づける。**
+                // 刻印だけでは足りない。tick が締切を越えて自動打牌したあとでは、
+                // 締切前の刻印で apply しても局面は巻き戻らない。
+                //
+                // **上限は入口の容量と同じにする。**空になるまで回すと、受信で
+                // 空いたスロットへ待機中の送信者が補充するので、コマンドが
+                // 途切れないかぎり tick が永久に来ない。保証するのは
+                // 「**この tick を選んだ時点で入口にあった分**は、時計を進める
+                // 前に片づける」ところまでである。
                 let now = clock.now_ms();
                 for _ in 0..INBOX {
                     match rx.try_recv() {
@@ -1403,6 +1415,72 @@ mod reconnect_tests {
         }
     }
 
+    /// **締切を過ぎた要求は、残り0で再送される。**
+    ///
+    /// `attach(seat, None)` は対局の頭から送り直すので、とっくに過ぎた
+    /// 要求も混ざる。満額の残り時間で送ると、クライアントは終わった
+    /// ウィンドウのタイマーを回し始める。
+    #[tokio::test(start_paused = true)]
+    async fn an_expired_request_is_resent_with_no_time_left() {
+        let (handle, _actor) = spawn(
+            rules(),
+            one_human_three_cpus(),
+            SeedSource::from_master([1u8; 32]),
+        );
+        let (_, mut inbox) = handle
+            .attach(Seat::new(0), None)
+            .await
+            .expect("卓は生きている");
+        let seq = take_ready(&mut inbox)
+            .iter()
+            .find_map(|e| match &e.event {
+                ClientEvent::RequestAction { .. } => Some(e.seq),
+                _ => None,
+            })
+            .expect("要求が届いている");
+
+        // 締切（5,000 + 20,000 + 500 + 250 = 25,750ms）を大きく越える。
+        tokio::time::sleep(Duration::from_millis(40_000)).await;
+
+        let (_, mut back) = handle
+            .attach(Seat::new(0), None)
+            .await
+            .expect("卓は生きている");
+        assert_eq!(
+            take_ready(&mut back).iter().find_map(|e| match &e.event {
+                ClientEvent::RequestAction { deadline_ms, .. } if e.seq == seq => Some(*deadline_ms),
+                _ => None,
+            }),
+            Some(0),
+            "過ぎた要求が残り時間を持ったまま再送されている"
+        );
+    }
+
+    /// **最新の連番を申告したら、何も返らない。**
+    ///
+    /// `>` と `>=` を取り違えると、直前に見たものがもう一度届く。
+    #[tokio::test(start_paused = true)]
+    async fn reattaching_from_the_latest_sequence_sends_nothing() {
+        let (handle, _actor) = spawn(rules(), humans(), SeedSource::from_master([1u8; 32]));
+        let (_, mut inbox) = handle
+            .attach(Seat::new(0), None)
+            .await
+            .expect("卓は生きている");
+        let latest = take_ready(&mut inbox)
+            .last()
+            .expect("何か届いている")
+            .seq;
+
+        let (_, mut again) = handle
+            .attach(Seat::new(0), Some(latest))
+            .await
+            .expect("卓は生きている");
+        assert!(
+            take_ready(&mut again).is_empty(),
+            "最新の連番を申告したのに送り直された"
+        );
+    }
+
     /// **一度も読まない接続が切られない。**
     ///
     /// 受け口の容量は追いつきぶんを見てから決めるので、半荘1回ぶんが
@@ -1585,12 +1663,12 @@ Expected: いくつか落ちる。Task 2 の実装が正しければ全部通る
 - [ ] **Step 4: 通ることを確かめる**
 
 Run: `cargo test --package server reconnect_tests`
-Expected: 15 passed
+Expected: 17 passed
 
 - [ ] **Step 5: crate 全体を測る**
 
 Run: `cargo test --package server`
-期待: 60 件（table 28 + session_time 7 + session 10 + reconnect 15）
+期待: 62 件（table 28 + session_time 7 + session 10 + reconnect 17）
 
 - [ ] **Step 6: コミット**
 
@@ -1953,7 +2031,7 @@ Expected: 4 passed
 - [ ] **Step 4: workspace 全体を測る**
 
 ```bash
-cargo test --package server     # 64 件（table 28 + session_time 7 + session 10 + reconnect 15 + reaction 4）
+cargo test --package server     # 66 件（table 28 + session_time 7 + session 10 + reconnect 17 + reaction 4）
 cargo test --workspace
 cargo clippy --all-targets -- -D warnings
 cargo fmt --check
@@ -1998,11 +2076,28 @@ window_id は再送や遅れた応答を別のウィンドウへ当てないた�
 
 **Wave 3d へ渡す宿題（ここで決めておく）:**
 
-**仕様 8.2 の CPU 代打ち切り替えは、いまの凍結境界では誰も所有できない。**「連続して自動打牌が続いた場合は CPU 代打ちへ切り替える」は v1 の要件だが、`Table` は `occupants` を非公開の固定配列で持ち、CPU の代打ちは `Table` の内部だけで判断している。WebSocket 層に牌姿を持たせるわけにはいかないし、Actor 側で作り直せば `Table` の CPU 処理と二重になる。
+**仕様 8.2 の CPU 代打ち切り替えは、「実行」と「判定」を分けて置く。**
 
-**したがって切り替えは `Table` が所有する。**Wave 3d で `table.rs` に「その席を CPU に任せる」メソッドを1つ足す。Wave 3c では足さない。切り替えの引き金になる「連続して自動打牌が続いた」の判定には切断の概念が要り、それは WebSocket が入って初めて意味を持つからである。**凍結は並行作業の衝突を防ぐための取り決めであり、マージ済みのファイルへ後から必要な1メソッドを足すことを禁じるものではない。**
+| | 所有者 | 理由 |
+|---|---|---|
+| CPU の打牌を実行する | `Table` | 牌姿を持つのは `Table` だけ。既に `Occupant::Cpu` の席を代打ちしている |
+| 代打ちへ切り替えると決める | Actor | 接続 ID と `Attach` / `Detach` と時計を持つのは Actor だけ |
+
+**判定まで `Table` へ押し込んではならない。**`Table` は接続を知らないし、知るべきでもない。同期で決定的な卓に接続状態を持ち込むと、Wave 3b で分けた境界が崩れる。逆に WebSocket 層へ状態機械を置けば、接続層と卓の進行が密結合になる。
+
+Wave 3d で決めること。
+
+- **引き金**: その席が `Detach` されており、かつ連続して `n` 回自動打牌された（`n` の値は Wave 3d で決める）
+- **解除**: その席が `Attach` し直した時点で人へ戻す
+- **要る API**: `table.rs` に `Table::hand_over_to_cpu(seat)` と `Table::take_back_from_cpu(seat)` を足す。`occupants[seat]` を差し替えるだけの2メソッドで、卓の他の論理には触れない
+
+**Wave 3c では足さない。**引き金に切断の概念が要り、それは WebSocket が入って初めて意味を持つ。**凍結は並行作業の衝突を防ぐための取り決めであり、マージ済みのファイルへ後から必要なメソッドを足すことを禁じるものではない。**
+
+**シードは Actor の外から配る。**`Seeds` トレイトの `next_seed` は非同期であり、Wave 3d はこの中で永続化してから返す。局頭で配った `seed_commit` と、あとで開示するシードが食い違うと、プレイヤーが検算したときに**サーバが山を操作したように見える**（仕様 8.3）。だから「シードを作る」と「局を始める」のあいだに待てる形にしてある。Wave 3c の `SeedSource` は待たずに返すが、契約は同じである。
 
 `spawn` が返す `JoinHandle` は Wave 3d の卓の台帳が持つ。panic・入口の消滅・正常な終局がすべて `Gone` に潰れると、障害を記録することも局頭から再開すべきかを判断することもできない（仕様 8.3）。
+
+**再接続の濫用は Wave 3d が止める。**`attach(seat, None)` は追いつきぶんを丸ごと詰めた受け口を作る。古い受け口は新しい `attach` で回収されないので、繰り返せばその数だけ履歴が積まれる。同時接続数の上限、`attach` の頻度制限、古い WebSocket の強制切断は Wave 3d の責務である。
 
 **Wave 3d への引き継ぎで未決なこと:** `Gone` は理由を持たない。WebSocket 層が「認証失敗」「卓が無い」「不正な resume」を区別してクライアントへ返したくなったら、`Gone` を理由付きの enum へ広げる必要がある。いま広げないのは、理由の一覧を決めるのが認証設計の一部であり、それが Wave 3d の仕事だからである。`ConnectionId` と ack はその拡張に耐える形にしてある。
 
