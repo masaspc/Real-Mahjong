@@ -150,4 +150,104 @@ mod tests {
         assert_eq!(tables.sweep(), 0);
         assert_eq!(tables.len(), 1);
     }
+
+    /// **置き換えられた接続の受け口は閉じる。**
+    ///
+    /// WS のループで「受け口を先に見る」修正は、この性質に乗っている。
+    /// ここが崩れると、古い画面から遅れて届いた打牌が通ってしまう。
+    #[tokio::test(start_paused = true)]
+    async fn a_superseded_connection_sees_its_inbox_close() {
+        use protocol::seat::Seat;
+        use tokio::sync::mpsc::error::TryRecvError;
+
+        let tables = Tables::new();
+        let handle = tables.get_or_create(&TableId("supersede".to_owned()));
+        let (_, mut old) = handle
+            .attach(Seat::new(0), None)
+            .await
+            .expect("卓は生きている");
+        while old.try_recv().is_ok() {}
+
+        // 同じ席へ2本目を繋ぐ。卓は1本目の送り口を捨てる。
+        let (_, _new) = handle
+            .attach(Seat::new(0), None)
+            .await
+            .expect("卓は生きている");
+        tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+
+        let closed = loop {
+            match old.try_recv() {
+                Ok(_) => {}
+                Err(TryRecvError::Empty) => break false,
+                Err(TryRecvError::Disconnected) => break true,
+            }
+        };
+        assert!(closed, "置き換えられた受け口が閉じていない");
+    }
+
+    /// **繋ぎ直しても同じ卓に戻る。**ブラウザを再読み込みしても
+    /// 対局が最初からにならないことが、評価のしやすさに直結する。
+    #[tokio::test(start_paused = true)]
+    async fn the_same_id_resumes_the_same_match() {
+        use protocol::client_event::ClientEvent;
+        use protocol::seat::Seat;
+
+        let tables = Tables::new();
+        let id = TableId("resume".to_owned());
+
+        let first = tables.get_or_create(&id);
+        let (connection, mut inbox) = first
+            .attach(Seat::new(0), None)
+            .await
+            .expect("卓は生きている");
+        let mut seen = Vec::new();
+        while let Ok(envelope) = inbox.try_recv() {
+            seen.push(envelope.seq);
+        }
+        let commitment = seen.len();
+        assert!(commitment > 0, "何も届いていない");
+        let last = *seen.last().expect("何か届いている");
+        first
+            .detach(Seat::new(0), connection)
+            .await
+            .expect("卓は生きている");
+        drop(inbox);
+
+        // 卓は動き続ける。
+        tokio::time::sleep(std::time::Duration::from_millis(30_000)).await;
+
+        let again = tables.get_or_create(&id);
+        let (_, mut back) = again
+            .attach(Seat::new(0), Some(last))
+            .await
+            .expect("卓は生きている");
+        let mut caught_up = Vec::new();
+        while let Ok(envelope) = back.try_recv() {
+            caught_up.push(envelope.seq);
+        }
+
+        assert_eq!(tables.len(), 1, "繋ぎ直しで別の卓ができている");
+        assert!(!caught_up.is_empty(), "留守中の分が追いついていない");
+        assert!(
+            caught_up.iter().all(|seq| *seq > last),
+            "見たものがまた来ている"
+        );
+        // 対局の頭からやり直していないこと。
+        assert!(
+            !caught_up.contains(&0),
+            "繋ぎ直しで対局が最初からになっている"
+        );
+
+        let mut restarted = false;
+        let (_, mut fresh) = again
+            .attach(Seat::new(0), None)
+            .await
+            .expect("卓は生きている");
+        while let Ok(envelope) = fresh.try_recv() {
+            if matches!(envelope.event, ClientEvent::MatchStart { .. }) {
+                restarted = true;
+            }
+        }
+        assert!(restarted, "last_seq なしなら最初から送り直すはず");
+    }
 }
