@@ -2154,6 +2154,10 @@ Wave 3d で決めること。
 
 **再接続の濫用は Wave 3d が止める。**`attach(seat, None)` は追いつきぶんを丸ごと詰めた受け口を作る。古い受け口は新しい `attach` で回収されないので、繰り返せばその数だけ履歴が積まれる。同時接続数の上限、`attach` の頻度制限、古い WebSocket の強制切断は Wave 3d の責務である。
 
+**シードだけでは局頭の永続化に足りない。**仕様 8.3 は、シードと一緒に「局番号・親・本場・供託・開始時点の点数」も局頭で書けと定めている。`Seeds::next_seed` は引数を取らないので、Wave 3d はこのフックからそれらを知れない。`Table` は `MatchEngine` を非公開で包んでおり、局番号や本場を読む手段も無い。
+
+**したがって Wave 3d は、`next_seed` に局頭の状態を渡す引数を足すか、永続化のフックを別に設ける。**どちらにせよ `table.rs` に局頭の状態を読むアクセサが要る。CPU 代打ちのメソッドと同じく、そこで `table.rs` を開ける。
+
 **Wave 3d への引き継ぎで未決なこと:** `Gone` は理由を持たない。WebSocket 層が「認証失敗」「卓が無い」「不正な resume」を区別してクライアントへ返したくなったら、`Gone` を理由付きの enum へ広げる必要がある。いま広げないのは、理由の一覧を決めるのが認証設計の一部であり、それが Wave 3d の仕事だからである。`ConnectionId` と ack はその拡張に耐える形にしてある。
 
 **型の整合:** `Outbound` / `Inbound` / `Gone` / `ConnectionId` / `TableMsg` / `TableHandle` / `spawn` / `Clock` / `SeedSource` はすべて Task 1・2 で定義し、Task 3 は新しい型を足さない。`Reject` は `mahjong_engine::match_flow::Reject`（`PartialEq` と `Debug` を導出済み、`assert_eq!` で使える）。
