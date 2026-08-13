@@ -1225,7 +1225,280 @@ git commit -m "feat(web): WebSocket の接続と再接続
 
 ---
 
-### Task 4: 画面と操作
+### Task 4: 操作の組み立て
+
+**Files:**
+- Create: `apps/web/src/ui/actions.ts`
+- Test: `apps/web/src/ui/actions.test.ts`
+
+**Interfaces:**
+- Consumes: Task 1 の `tileLabel`、Task 2 の `GameState`。
+- Produces: `actionsFor(state): Choice[]`、`discardChoices(state, riichiReady): Map<number, Command>`、`canDeclareRiichi(state): boolean`
+
+**なぜ切り出すか。** 大明槓・暗槓・加槓・ロン・ツモは滅多に出ない。**その場面を引くまで遊んで確かめるのは現実的でない。**送信の形だけを純粋な関数にしておけば、場面に依存せず固定できる。
+
+**送り方が3通りある。**チー・ポン・大明槓・ロン・見送りは `call_response`、暗槓と加槓とツモと九種九牌は専用のコマンド。取り違えるとサーバが受け付けない。
+
+- [ ] **Step 1: 失敗するテストを書く**
+
+`apps/web/src/ui/actions.test.ts`:
+
+```typescript
+import { describe, expect, it } from "vitest";
+
+import type { ActionOption } from "../protocol/ActionOption";
+import { emptyState, type GameState } from "../game/state";
+import { actionsFor, canDeclareRiichi, discardChoices } from "./actions";
+
+function offering(options: ActionOption[]): GameState {
+  return { ...emptyState(0), pending: { windowId: 7, options, deadlineAt: 1000 } };
+}
+
+describe("選べる操作からコマンドを組み立てる", () => {
+  it("要求が無ければ何も出さない", () => {
+    expect(actionsFor(emptyState(0))).toEqual([]);
+  });
+
+  it("チーは候補ごとにボタンを出し、call_response で送る", () => {
+    const choices = actionsFor(offering([{ type: "chi", candidates: [[0, 1], [1, 3]] }]));
+    expect(choices).toHaveLength(2);
+    expect(choices[0]?.command).toEqual({
+      type: "call_response",
+      window_id: 7,
+      response: { type: "chi", tiles: [0, 1] },
+    });
+  });
+
+  it("ポンも call_response で送る", () => {
+    const choices = actionsFor(offering([{ type: "pon", candidates: [[4, 4]] }]));
+    expect(choices[0]?.command).toEqual({
+      type: "call_response",
+      window_id: 7,
+      response: { type: "pon", tiles: [4, 4] },
+    });
+  });
+
+  it("大明槓は call_response の kan で送る", () => {
+    const choices = actionsFor(offering([{ type: "kan", candidates: [{ type: "minkan" }] }]));
+    expect(choices[0]?.command).toEqual({
+      type: "call_response",
+      window_id: 7,
+      response: { type: "kan" },
+    });
+  });
+
+  it("暗槓は call_response ではなく専用のコマンドで送る", () => {
+    // **送り方が違う。**取り違えるとサーバが受け付けない。
+    const choices = actionsFor(offering([{ type: "kan", candidates: [{ type: "ankan", kind: 4 }] }]));
+    expect(choices[0]?.command).toEqual({ type: "ankan", kind: 4 });
+    expect(choices[0]?.label).toBe("暗槓 5m");
+  });
+
+  it("加槓も専用のコマンドで、牌そのものを送る", () => {
+    const choices = actionsFor(offering([{ type: "kan", candidates: [{ type: "kakan", tile: 34 }] }]));
+    expect(choices[0]?.command).toEqual({ type: "kakan", tile: 34 });
+    expect(choices[0]?.label).toBe("加槓 0m");
+  });
+
+  it("3種類のカンが同時に出せる", () => {
+    const choices = actionsFor(
+      offering([
+        {
+          type: "kan",
+          candidates: [{ type: "minkan" }, { type: "ankan", kind: 4 }, { type: "kakan", tile: 9 }],
+        },
+      ]),
+    );
+    expect(choices.map((c) => c.command.type)).toEqual(["call_response", "ankan", "kakan"]);
+  });
+
+  it("ロンは call_response、ツモは専用のコマンド", () => {
+    expect(actionsFor(offering([{ type: "ron" }]))[0]?.command).toEqual({
+      type: "call_response",
+      window_id: 7,
+      response: { type: "ron" },
+    });
+    expect(actionsFor(offering([{ type: "tsumo" }]))[0]?.command).toEqual({ type: "tsumo" });
+  });
+
+  it("九種九牌と見送り", () => {
+    expect(actionsFor(offering([{ type: "kyuushu" }]))[0]?.command).toEqual({ type: "kyuushu" });
+    expect(actionsFor(offering([{ type: "pass" }]))[0]?.command).toEqual({
+      type: "call_response",
+      window_id: 7,
+      response: { type: "pass" },
+    });
+  });
+
+  it("打てる牌は allowed のものだけ", () => {
+    const state = offering([{ type: "discard", allowed: [0, 5, 9], riichi_allowed: [] }]);
+    const map = discardChoices(state, false);
+    expect([...map.keys()]).toEqual([0, 5, 9]);
+    expect(map.get(5)).toEqual({ type: "discard", tile: 5, riichi: false });
+  });
+
+  it("リーチ待機なら riichi_allowed のものだけが押せる", () => {
+    // **allowed と riichi_allowed は違う。**リーチ後に振れる牌は限られる。
+    const state = offering([{ type: "discard", allowed: [0, 5, 9], riichi_allowed: [5] }]);
+    const map = discardChoices(state, true);
+    expect([...map.keys()]).toEqual([5]);
+    expect(map.get(5)).toEqual({ type: "discard", tile: 5, riichi: true });
+  });
+
+  it("リーチできるかは riichi_allowed の有無で決まる", () => {
+    expect(canDeclareRiichi(offering([{ type: "discard", allowed: [0], riichi_allowed: [] }]))).toBe(false);
+    expect(canDeclareRiichi(offering([{ type: "discard", allowed: [0], riichi_allowed: [0] }]))).toBe(true);
+  });
+});
+```
+
+- [ ] **Step 2: 実装する**
+
+`apps/web/src/ui/actions.ts`:
+
+```typescript
+import type { Command } from "../protocol/Command";
+import type { GameState } from "../game/state";
+import { tileLabel } from "../game/tiles";
+
+/** 押せるボタン1つぶん。 */
+export type Choice = {
+  label: string;
+  command: Command;
+};
+
+/**
+ * いま選べる操作を、押したら送るコマンドとして並べる。
+ *
+ * **DOM を触らない。**大明槓・暗槓・加槓・ロン・ツモは滅多に出ないので、
+ * その場面を引くまで遊んで確かめるのは現実的でない。ここを純粋な関数に
+ * しておけば、送信の形を場面に依存せず固定できる。
+ *
+ * **送り方が3通りあることに注意。**大明槓・チー・ポン・ロン・見送りは
+ * `call_response`、暗槓と加槓とツモと九種九牌は専用のコマンドである。
+ */
+export function actionsFor(state: GameState): Choice[] {
+  const pending = state.pending;
+  if (!pending) {
+    return [];
+  }
+  const windowId = pending.windowId;
+  const choices: Choice[] = [];
+
+  for (const option of pending.options) {
+    switch (option.type) {
+      case "chi":
+        for (const tiles of option.candidates) {
+          choices.push({
+            label: `チー ${tiles.map(tileLabel).join(" ")}`,
+            command: { type: "call_response", window_id: windowId, response: { type: "chi", tiles } },
+          });
+        }
+        break;
+
+      case "pon":
+        for (const tiles of option.candidates) {
+          choices.push({
+            label: `ポン ${tiles.map(tileLabel).join(" ")}`,
+            command: { type: "call_response", window_id: windowId, response: { type: "pon", tiles } },
+          });
+        }
+        break;
+
+      case "kan":
+        for (const candidate of option.candidates) {
+          if (candidate.type === "minkan") {
+            choices.push({
+              label: "大明槓",
+              command: { type: "call_response", window_id: windowId, response: { type: "kan" } },
+            });
+          } else if (candidate.type === "ankan") {
+            choices.push({
+              label: `暗槓 ${tileLabel(candidate.kind)}`,
+              command: { type: "ankan", kind: candidate.kind },
+            });
+          } else {
+            choices.push({
+              label: `加槓 ${tileLabel(candidate.tile)}`,
+              command: { type: "kakan", tile: candidate.tile },
+            });
+          }
+        }
+        break;
+
+      case "ron":
+        choices.push({
+          label: "ロン",
+          command: { type: "call_response", window_id: windowId, response: { type: "ron" } },
+        });
+        break;
+
+      case "tsumo":
+        choices.push({ label: "ツモ", command: { type: "tsumo" } });
+        break;
+
+      case "kyuushu":
+        choices.push({ label: "九種九牌", command: { type: "kyuushu" } });
+        break;
+
+      case "pass":
+        choices.push({
+          label: "見送り",
+          command: { type: "call_response", window_id: windowId, response: { type: "pass" } },
+        });
+        break;
+
+      default:
+        break;
+    }
+  }
+  return choices;
+}
+
+/** 押せる牌。押したら送るコマンドを添える。 */
+export function discardChoices(state: GameState, riichiReady: boolean): Map<number, Command> {
+  const map = new Map<number, Command>();
+  const option = state.pending?.options.find((o) => o.type === "discard");
+  if (!option || option.type !== "discard") {
+    return map;
+  }
+  const allowed = riichiReady ? option.riichi_allowed : option.allowed;
+  for (const tile of allowed) {
+    map.set(tile, { type: "discard", tile, riichi: riichiReady });
+  }
+  return map;
+}
+
+/** リーチを宣言できるか。 */
+export function canDeclareRiichi(state: GameState): boolean {
+  const option = state.pending?.options.find((o) => o.type === "discard");
+  return option?.type === "discard" && option.riichi_allowed.length > 0;
+}
+```
+
+- [ ] **Step 3: 通ることを確かめる**
+
+Run: `pnpm --dir apps/web test actions`
+Expected: 12 passed
+
+- [ ] **Step 4: コミット**
+
+```bash
+pnpm --dir apps/web typecheck
+git add apps/web/src/ui/actions.ts apps/web/src/ui/actions.test.ts
+git commit -m "feat(web): 選べる操作からコマンドを組み立てる
+
+大明槓・暗槓・加槓・ロン・ツモは滅多に出ないので、その場面を引くまで
+遊んで確かめるのは現実的でない。**送信の形だけを純粋な関数にして
+場面に依存せず固定する。**
+
+送り方が3通りあることをテストで押さえた。チー・ポン・大明槓・ロン・
+見送りは call_response、暗槓と加槓とツモと九種九牌は専用のコマンド。"
+```
+
+---
+
+### Task 5: 画面と操作
 
 **Files:**
 - Create: `apps/web/src/ui/board.ts`
@@ -1234,7 +1507,7 @@ git commit -m "feat(web): WebSocket の接続と再接続
 - Modify: `apps/web/index.html`
 
 **Interfaces:**
-- Consumes: Task 1〜3 のすべて。
+- Consumes: Task 1〜4 のすべて。**コマンドの組み立ては `actions.ts` に任せ、ここでは DOM だけを扱う。**
 - Produces: `export function renderBoard(root: HTMLElement, state: GameState, send: (c: Command) => void): void`
 
 **この Task に自動試験は置かない。**描画と入力は目で確かめる。状態の組み立ては Task 2 が試験している。
@@ -1246,11 +1519,10 @@ git commit -m "feat(web): WebSocket の接続と再接続
 - 上段: 場・本場・供託・残り枚数・ドラ表示・4席の点数（親に印）
 - 中段: 他家3人の河と副露（席番号と、リーチ中の印）
 - 下段: 自分の河、自分の手牌（`sortTiles` 済み）とツモ牌を右に離して置く
-- 手牌の牌は `<button>` にする。`pending` に `discard` があり、その牌が `allowed` に含まれるときだけ押せる
-- 押したら `{ type: "discard", tile, riichi: リーチ待機中か }` を送る
-- `riichi_allowed` が空でなければ「リーチ」ボタンを出す。押すと待機状態になり、次に押した牌がリーチ宣言牌になる
-- `pending` に `chi` / `pon` / `kan` / `ron` / `tsumo` / `kyuushu` があればボタンを出し、押したら対応する `Command` を送る。候補が複数ある鳴きは候補ごとにボタンを出す
-- `pass` があれば「見送り」ボタンを出す
+- 手牌の牌は `<button>` にする。押せるかどうかと送るコマンドは `discardChoices(state, riichiReady)` が返す
+- `canDeclareRiichi(state)` が真なら「リーチ」ボタンを出す。押すと待機状態になり、以降 `discardChoices(state, true)` で押せる牌が絞られる
+- 鳴きと和了のボタンは `actionsFor(state)` が返すものをそのまま並べる。**ここでコマンドを組み立て直さない**
+- 「新しい卓」のようにサーバへ送らないボタンは、`Choice` を使わず別に作る
 - 締切までの残りをバーで出す。`deadlineAt - performance.now()` を 100ms ごとに描き直す
 - `notice` があれば帯に出す
 - `phase === "matchOver"` なら最終順位を出す
@@ -1322,17 +1594,15 @@ cargo run -p server --bin serve
 
 1. 配牌 13 枚と親のツモが見える
 2. 自分の番に手牌の牌を押すと切れて、CPU 3人が打ち返してくる
-3. **チーとポンができる**（`call_response` を送る）
-4. **大明槓ができる**（`call_response` の `kan`）
-5. **暗槓と加槓ができる**（`call_response` ではなく `{type:"ankan", kind}` と `{type:"kakan", tile}` を送る。**送り方が違う。**）
-6. 「見送り」で鳴きを流せる
-7. リーチが宣言でき、宣言牌が横向きに見える
-8. **自分でツモとロンが選べて、受理される**（CPU の和了を見るだけでは足りない）
-9. 和了ると点数が動く
-10. **ブラウザを再読み込みしても、同じ局の続きから始まる**
-11. 半荘が終わると順位が出る
+3. 鳴ける場面でボタンが出て、押すと鳴ける（チーかポンのどちらかでよい）
+4. 「見送り」で鳴きを流せる
+5. 和了や流局で点数が動き、次の局が始まる
+6. **ブラウザを再読み込みしても、同じ局の続きから始まる**
+7. 半荘が終わると順位が出る
 
-3〜5 と 8 は、その場面が来るまで何局か打つ必要がある。**出るまで打つこと。**九種九牌は滅多に出ないので、出たら確かめる程度でよい。
+**カン・リーチ・自分のツモとロンは、ここでは確認しない。**滅多に出ないので、偶然を待つ確認は成り立たない。送信の形は Task 4 のテストが固定している。遊んでいて出会ったら見ておく程度でよい。
+
+**どれか1つでもできなければ、このウェーブは目的を果たしていない。**止めて報告すること。
 
 **どれか1つでもできなければ、このウェーブは目的を果たしていない。**止めて報告すること。
 
@@ -1341,7 +1611,7 @@ cargo run -p server --bin serve
 ```bash
 pnpm --dir apps/web typecheck
 pnpm --dir apps/web test
-git add apps/web/src/ui apps/web/src/main.ts apps/web/index.html
+git add apps/web/src/ui/board.ts apps/web/src/ui/board.css apps/web/src/main.ts apps/web/index.html apps/web/src/vite-env.d.ts
 git commit -m "feat(web): 遊べる 2D の卓
 
 **ブラウザを開けば CPU 3人と半荘が打てる。**見た目は作り込まず、
