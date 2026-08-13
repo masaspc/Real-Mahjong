@@ -105,7 +105,7 @@ Wave 3b の `Table` には `drain_for`（取り出したら消える）と `sinc
 
 そこで**有界にしたうえで、Actor は決して待たない。**`try_send` で押し込み、溢れたらその接続を切る。切られた側は `attach(seat, last_seq)` で追いつける。**遅い接続への対処は、既に持っている再接続の経路そのものである。**新しい仕組みを足す必要がない。
 
-容量は半荘1回ぶんの可視イベントより大きくとる。`attach(seat, None)` は最初から全部送り直すので、ここが足りないと正当な再接続が溢れてしまう。実測で1席あたり 1,304 件だったので 4,096 とする。
+容量は半荘1回ぶんの可視イベントより大きくとる。`attach(seat, None)` は最初から全部送り直すので、ここが足りないと**正当な再接続が溢れて切られる。**実測では1席あたり 1,304 / 1,875 / 1,677 件（シード3種）で、ばらつきが4割あった。連荘や流局が重なればさらに伸びるため、4倍の余裕をみて 8,192 とする。tokio の mpsc は容量ぶんを先に確保しないので、健全な接続ではこの数を大きくしても費用はかからない。
 
 入口（接続 → Actor）も bounded にして、壊れたクライアントが Actor を溺れさせないようにする。
 
@@ -679,8 +679,12 @@ const INBOX: usize = 32;
 ///
 /// **半荘1回ぶんの可視イベントより大きくとる。**`attach(seat, None)` は
 /// 最初から全部送り直すので、ここが足りないと正当な再接続が溢れる。
-/// 実測では1席あたり 1,304 件だったので、3倍ほどの余裕をみる。
-const OUTBOX: usize = 4_096;
+///
+/// 実測では1席あたり 1,304 / 1,875 / 1,677 件（シード3種）。ばらつきが
+/// 4割あり、連荘や流局が重なればさらに伸びる。4倍の余裕をみる。
+/// tokio の mpsc は容量ぶんを先に確保しないので、健全な接続では
+/// この数を大きくしても費用はかからない。
+const OUTBOX: usize = 8_192;
 
 /// 接続へイベントを押し出す口。
 ///
@@ -1308,6 +1312,33 @@ mod reconnect_tests {
         assert!(handle.is_closed(), "卓が終わったのに Actor が生きている");
     }
 
+    /// **出口の容量が、半荘1回ぶんの再送に足りている。**
+    ///
+    /// 足りないと `attach(seat, None)` が溢れ、正当な再接続が切られる。
+    /// 実測は 1,304 / 1,875 / 1,677 件（シード3種）だが、ばらつきが4割
+    /// あるので、将来 CPU の打ち方が変わったときに気づけるようにしておく。
+    #[tokio::test(start_paused = true)]
+    async fn a_whole_match_fits_in_one_outbox() {
+        let handle = spawn(rules(), all_cpu(), SeedSource::from_master([2u8; 32]));
+        let (_, mut watcher) = handle
+            .attach(Seat::new(0), None)
+            .await
+            .expect("卓は生きている");
+
+        let mut count = 0usize;
+        loop {
+            let next = tokio::time::timeout(Duration::from_millis(A_VIRTUAL_HOUR_MS), watcher.recv())
+                .await
+                .expect("仮想1時間のうちに終わる");
+            if next.is_none() {
+                break;
+            }
+            count += 1;
+        }
+        assert!(count > 500, "半荘にしてはイベントが少なすぎる: {count}");
+        assert!(count < OUTBOX, "出口の容量が足りない: {count} 件 / {OUTBOX}");
+    }
+
     #[tokio::test(start_paused = true)]
     async fn a_finished_table_refuses_new_connections() {
         let handle = spawn(rules(), all_cpu(), SeedSource::from_master([1u8; 32]));
@@ -1380,12 +1411,12 @@ Expected: いくつか落ちる。Task 2 の実装が正しければ全部通る
 - [ ] **Step 4: 通ることを確かめる**
 
 Run: `cargo test --package server reconnect_tests`
-Expected: 11 passed
+Expected: 12 passed
 
 - [ ] **Step 5: crate 全体を測る**
 
 Run: `cargo test --package server`
-期待: 56 件（table 28 + session_time 7 + session 10 + reconnect 11）
+期待: 57 件（table 28 + session_time 7 + session 10 + reconnect 12）
 
 - [ ] **Step 6: コミット**
 
@@ -1656,7 +1687,7 @@ Expected: 3 passed
 - [ ] **Step 4: workspace 全体を測る**
 
 ```bash
-cargo test --package server     # 59 件（table 28 + session_time 7 + session 10 + reconnect 11 + reaction 3）
+cargo test --package server     # 60 件（table 28 + session_time 7 + session 10 + reconnect 12 + reaction 3）
 cargo test --workspace
 cargo clippy --all-targets -- -D warnings
 cargo fmt --check
