@@ -35,6 +35,10 @@
 | 同じミリ秒にポンで応じたときの成立 | **55,600ms（+400ms）。**最低待機の終わり 55,550ms の次のポーリング |
 | 古い接続の `Detach` | 接続 ID で照合すれば新しい接続を切らない |
 | `TableHandle` | `Send + Sync + Clone + 'static` |
+| 打牌から次のツモまで | **30回すべてちょうど 400ms。**誰も鳴けなくても一律に待っている |
+| 1席あたりの可視イベント（半荘1回） | 1,304 / 1,875 / 1,677 件（シード3種）。ばらつき4割 |
+| 5秒切断したあとの要求の再送 | 25,750ms → **20,750ms。**残り時間が引き直される |
+| 2席以上へ提示されるウィンドウ | 半荘あたり 8〜10 回ある。同じミリ秒の2席の応答は両方受理される |
 
 ---
 
@@ -67,7 +71,7 @@ mod time;
 
 **これを外すと、締切前に押した操作が時間切れになる。**`RoundEngine::apply` は検証より先に `tick(now_ms)` を回し、`now_ms` が締切を過ぎていれば自動打牌してしまう。Actor が `select!` でどちらの枝を選ぶか、入口の待ち行列がどれだけ混んでいたかによって、同じ操作の結果が変わってはならない。
 
-そこで `TableHandle::command` が**入口の席を取ってから**時刻を刻み、Actor はその刻印を `Table::apply` へ渡す。`reserve()` より前に刻んではならない。入口が満杯のあいだ古い刻印を抱えたまま待つことになり、**入口を埋めるだけで締切を伸ばせてしまう。**刻印は Actor が処理する時刻より必ず古いが、エンジンは時刻の巻き戻しを受けつける（実測済み）。締切は絶対時刻なので、古い時刻を渡すことは「まだ切れていない」を意味し、これがまさに求める挙動である。
+そこで `TableHandle::command`（到着時刻を受け取る）, `TableHandle::now_ms` が**入口の席を取ってから**時刻を刻み、Actor はその刻印を `Table::apply` へ渡す。`reserve()` より前に刻んではならない。入口が満杯のあいだ古い刻印を抱えたまま待つことになり、**入口を埋めるだけで締切を伸ばせてしまう。**刻印は Actor が処理する時刻より必ず古いが、エンジンは時刻の巻き戻しを受けつける（実測済み）。締切は絶対時刻なので、古い時刻を渡すことは「まだ切れていない」を意味し、これがまさに求める挙動である。
 
 **しかし刻印だけでは足りない。**`select!` が ticker の枝を先に選び、その `tick` が締切を越えて自動打牌を済ませてしまうと、あとから締切前の刻印で `apply` しても局面は巻き戻らない。実測すると `Err(NotYourTurn)` になる。
 
@@ -99,13 +103,33 @@ Wave 3b の `Table` には `drain_for`（取り出したら消える）と `sinc
 
 だから検めるのは「その席の可視列にその連番が実在するか」でなければならない。
 
+**これが保証するのは「構造的にありえない申告を弾くこと」までである。**その接続が実際にそこまで受け取ったことの証明にはならない。可視列に実在する未受信の連番を申告されれば受理してしまう。嘘の申告で損をするのは申告した本人だけなので v1 はこれで足りるが、**「不正の拒否」ではなく「ありえない値の安全な受け止め」だと理解すること。**署名付きの再開トークンにサーバ側の水位を結びつけるのは Wave 3d の認証設計の一部である。
+
+### 到着時刻は呼び出し側が測る
+
+`command` は `at_ms` を受け取る。**卓の中で刻んではならない。**入口の待ち行列に空きが出た時刻を使うと、他席や再接続の大量投入で枠が埋まっているあいだ、締切前にサーバへ届いた正当な操作まで遅刻扱いになる。他人の混雑が自分の締切を削ってはならない。
+
+Wave 3d は WebSocket の枠を読んだ直後に `TableHandle::now_ms()` を呼び、それを `command` へ渡す。**クライアントが時刻を指定するわけではない。**測るのは常にサーバ側である。
+
+同じ接続からの大量投入そのものは、接続ごとの流量制限で抑える。それは Wave 3d の仕事である。
+
+### 再送する要求は残り時間を引き直す
+
+`ClientEvent::RequestAction` の `deadline_ms` は**発行時点からの残り時間**であって絶対時刻ではない。切断から数秒後に同じ包みをそのまま送り直すと、クライアントは満額の持ち時間で表示するのに、サーバは元の絶対締切で判定する。**表示と判定が食い違う。**
+
+`protocol` は凍結されているので型は変えられない。そこで Actor が、要求を初めて見た時刻に絶対締切を控えておき、送るたびに「いまの残り」へ引き直す。控えるのは**配信先が無い席でも行う。**留守中に出た要求を、戻ってきたときに満額で見せてしまわないためである。
+
+実測では、初回 25,750ms の要求が、5秒切断したあとの再送で 20,750ms になった。
+
 ### 出口は有界にし、溢れたら切る
 
 出口（Actor → 接続）で待つと、1人の遅い接続が Actor ごと止め、他の3人まで巻き添えになる。かといって無制限にすると、遅い接続の数だけ memory が伸びる。
 
 そこで**有界にしたうえで、Actor は決して待たない。**`try_send` で押し込み、溢れたらその接続を切る。切られた側は `attach(seat, last_seq)` で追いつける。**遅い接続への対処は、既に持っている再接続の経路そのものである。**新しい仕組みを足す必要がない。
 
-容量は半荘1回ぶんの可視イベントより大きくとる。`attach(seat, None)` は最初から全部送り直すので、ここが足りないと**正当な再接続が溢れて切られる。**実測では1席あたり 1,304 / 1,875 / 1,677 件（シード3種）で、ばらつきが4割あった。連荘や流局が重なればさらに伸びるため、4倍の余裕をみて 8,192 とする。tokio の mpsc は容量ぶんを先に確保しないので、健全な接続ではこの数を大きくしても費用はかからない。
+容量は**追いつきぶんの件数を見てから決める。**受け口を作るのは卓であり、`attach` の時点で `since` の件数が分かっているので、`backlog + OUTBOX` を容量にする。これで**正当な再接続が容量不足で溢れることが構造的に起きない。**「実測値に余裕を掛けた定数」では、長い半荘や将来のルール値で破れる。
+
+`OUTBOX` は生配信ぶんの余裕である。実測では1席あたりの可視イベントが 1,304 / 1,875 / 1,677 件（シード3種）だったので 8,192 とする。tokio の mpsc は容量ぶんを先に確保しないので、健全な接続ではこの数を大きくしても費用はかからない。
 
 入口（接続 → Actor）も bounded にして、壊れたクライアントが Actor を溺れさせないようにする。
 
@@ -351,7 +375,7 @@ std::time を使わないのは、仮想時間で試験できなくなるため�
   - `pub type Inbound = tokio::sync::mpsc::UnboundedReceiver<ClientEventEnvelope>`
   - `pub struct Gone;`
   - `pub struct ConnectionId(u64);`（中身は非公開）
-  - `pub enum TableMsg { Command { seat, command, at_ms, reply }, Attach { seat, last_seq, out, ack }, Detach { seat, connection } }`
+  - `pub enum TableMsg { Command { seat, command, at_ms, reply }, Attach { seat, last_seq, ack }, Detach { seat, connection } }`
   - `pub struct TableHandle`（`Clone + Send + Sync + 'static`）, `TableHandle::command`, `TableHandle::attach`, `TableHandle::detach`, `TableHandle::is_closed`
   - `pub fn spawn(rules: Ruleset, occupants: [Occupant; 4], seeds: SeedSource) -> TableHandle`
 
@@ -503,7 +527,11 @@ mod tests {
         let _ = take_ready(&mut west);
 
         handle
-            .command(Seat::new(0), Command::Discard { tile, riichi: false })
+            .command(
+                Seat::new(0),
+                Command::Discard { tile, riichi: false },
+                handle.now_ms(),
+            )
             .await
             .expect("卓は生きている")
             .expect("親は打てる");
@@ -534,7 +562,11 @@ mod tests {
 
         let tile = dealt_hand(&take_ready(&mut south))[0];
         let rejected = handle
-            .command(Seat::new(1), Command::Discard { tile, riichi: false })
+            .command(
+                Seat::new(1),
+                Command::Discard { tile, riichi: false },
+                handle.now_ms(),
+            )
             .await
             .expect("卓は生きている");
         assert_eq!(rejected, Err(Reject::NotYourTurn), "親でない席が打てている");
@@ -652,59 +684,26 @@ Expected: コンパイルエラー。`spawn` / `TableHandle` / `Inbound` が無�
 ```rust
 use crate::table::{Occupant, Table};
 use mahjong_engine::match_flow::Reject;
-use protocol::client_event::ClientEventEnvelope;
+use protocol::client_event::{ClientEvent, ClientEventEnvelope};
 use protocol::command::Command;
 use protocol::ruleset::Ruleset;
 use protocol::seat::Seat;
+use std::collections::HashMap;
 use std::sync::Arc;
 use std::time::Duration;
 use tokio::sync::{mpsc, oneshot};
 use tokio::time::MissedTickBehavior;
 
-/// Actor が目を覚ます間隔。
-///
-/// `Table` は「次の締切はいつか」を教えてくれないので、締切ちょうどで
-/// 起きることはできない。基準思考時間は 5,000ms、反応ウィンドウの
-/// 最低待機は 350ms なので、100ms の粒度は人には見えない。
 const POLL_MS: u64 = 100;
-
-/// 入口の容量。
-///
-/// **`tick` の前に片づける件数の上限でもある。**空になるまで回すと、
-/// 受信で空いたスロットへ待機中の送信者が補充するので、コマンドが
-/// 途切れないかぎり `tick` が永久に来ない。
 const INBOX: usize = 32;
-
-/// 1接続ぶんの出口の容量。
-///
-/// **半荘1回ぶんの可視イベントより大きくとる。**`attach(seat, None)` は
-/// 最初から全部送り直すので、ここが足りないと正当な再接続が溢れる。
-///
-/// 実測では1席あたり 1,304 / 1,875 / 1,677 件（シード3種）。ばらつきが
-/// 4割あり、連荘や流局が重なればさらに伸びる。4倍の余裕をみる。
-/// tokio の mpsc は容量ぶんを先に確保しないので、健全な接続では
-/// この数を大きくしても費用はかからない。
 const OUTBOX: usize = 8_192;
 
-/// 接続へイベントを押し出す口。
-///
-/// **有界だが、Actor は決して待たない。**`try_send` で押し込み、溢れたら
-/// その接続を切る。切られた側は `attach(seat, last_seq)` で追いつける。
-/// **遅い接続への対処は、既に持っている再接続の経路そのものである。**
 pub type Outbound = mpsc::Sender<ClientEventEnvelope>;
 pub type Inbound = mpsc::Receiver<ClientEventEnvelope>;
 
-/// 卓が既に畳まれている。
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub struct Gone;
 
-/// 席への接続1本を指す。
-///
-/// **同じ席に2本目が来たら1本目は無効になる。**この ID がないと、
-/// 置き換えられた古い接続の切断が、新しい接続を巻き添えにする。
-///
-/// **中身は非公開。**外から作れないので、Wave 3d で他人の接続 ID を
-/// 騙ることができない。卓が配ったものを返すことしかできない。
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub struct ConnectionId(u64);
 
@@ -712,17 +711,13 @@ pub enum TableMsg {
     Command {
         seat: Seat,
         command: Command,
-        /// **入口へ着いた時刻。**Actor が取り出した時刻ではない。
         at_ms: u64,
         reply: oneshot::Sender<Result<(), Reject>>,
     },
-    /// 接続または再接続。`last_seq` より後を送り直してから生配信へ移る。
     Attach {
         seat: Seat,
         last_seq: Option<u32>,
-        out: Outbound,
-        /// 配り終えてから返す。これが返れば inbox には既に入っている。
-        ack: oneshot::Sender<ConnectionId>,
+        ack: oneshot::Sender<(ConnectionId, Inbound)>,
     },
     Detach {
         seat: Seat,
@@ -733,55 +728,60 @@ pub enum TableMsg {
 #[derive(Clone)]
 pub struct TableHandle {
     tx: mpsc::Sender<TableMsg>,
-    /// **Actor と同じ時計。**別に start すると原点がずれ、刻印が狂う。
     clock: Arc<Clock>,
 }
 
 impl TableHandle {
-    /// 席の操作を送る。
+    /// 卓が生まれてからの経過ミリ秒。
     ///
-    /// **入口の席を取ってから時刻を刻む。**先に刻んでから `send().await` すると、
-    /// 入口が満杯のあいだ古い刻印を抱えたまま待つことになり、入口を埋めるだけで
-    /// 締切を実質的に伸ばせてしまう。`reserve` が返った時点で待ちは終わって
-    /// いるので、そこで刻めば「入口へ着いた時刻」になる。
-    pub async fn command(&self, seat: Seat, command: Command) -> Result<Result<(), Reject>, Gone> {
-        let permit = self.tx.reserve().await.map_err(|_| Gone)?;
-        let at_ms = self.clock.now_ms();
+    /// **Wave 3d は WebSocket の枠を読んだ直後にこれを呼び、`command` へ渡す。**
+    /// 入口の待ち行列に並ぶ前の時刻でなければ、他席の混雑が締切判定に混ざる。
+    pub fn now_ms(&self) -> u64 {
+        self.clock.now_ms()
+    }
+
+    /// 席の操作を送る。`at_ms` は**サーバへ届いた時刻**であり、呼び出し側が
+    /// 測る。クライアントが指定するものではない。
+    pub async fn command(
+        &self,
+        seat: Seat,
+        command: Command,
+        at_ms: u64,
+    ) -> Result<Result<(), Reject>, Gone> {
         let (reply, answer) = oneshot::channel();
-        permit.send(TableMsg::Command {
-            seat,
-            command,
-            at_ms,
-            reply,
-        });
+        self.tx
+            .send(TableMsg::Command {
+                seat,
+                command,
+                at_ms,
+                reply,
+            })
+            .await
+            .map_err(|_| Gone)?;
         answer.await.map_err(|_| Gone)
     }
 
     /// その席の配信を受け取る。
     ///
-    /// **返ってきた時点で、送るべきものは既に受け口に入っている。**
-    /// `last_seq` が卓の知らない連番なら、最初から送り直す。
+    /// **受け口は卓が作る。**追いつきぶんの件数を見てから容量を決めるので、
+    /// 正当な再接続が容量不足で溢れることが構造的に起きない。
     pub async fn attach(
         &self,
         seat: Seat,
         last_seq: Option<u32>,
     ) -> Result<(ConnectionId, Inbound), Gone> {
-        let (out, inbox) = mpsc::channel(OUTBOX);
         let (ack, done) = oneshot::channel();
         self.tx
             .send(TableMsg::Attach {
                 seat,
                 last_seq,
-                out,
                 ack,
             })
             .await
             .map_err(|_| Gone)?;
-        let connection = done.await.map_err(|_| Gone)?;
-        Ok((connection, inbox))
+        done.await.map_err(|_| Gone)
     }
 
-    /// その接続を外す。**既に別の接続へ置き換わっていれば何もしない。**
     pub async fn detach(&self, seat: Seat, connection: ConnectionId) -> Result<(), Gone> {
         self.tx
             .send(TableMsg::Detach { seat, connection })
@@ -800,9 +800,6 @@ impl TableHandle {
 同じファイルの続きに置く。
 
 ```rust
-/// 卓を立ち上げ、ハンドルを返す。
-///
-/// **時計は卓が生まれた瞬間から始まる。**`Table::new` に渡す最初の時刻は 0。
 pub fn spawn(rules: Ruleset, occupants: [Occupant; 4], seeds: SeedSource) -> TableHandle {
     let (tx, rx) = mpsc::channel(INBOX);
     let clock = Arc::new(Clock::start());
@@ -811,12 +808,15 @@ pub fn spawn(rules: Ruleset, occupants: [Occupant; 4], seeds: SeedSource) -> Tab
     TableHandle { tx, clock }
 }
 
-/// 席ごとの配信先と、どこまで送ったか。
 struct Sinks {
     out: [Option<Outbound>; 4],
     sent_upto: [Option<u32>; 4],
     live: [Option<ConnectionId>; 4],
     next_id: u64,
+    /// 締切を控えたところまで。配信先の有無に関わらず進む。
+    noted_upto: [Option<u32>; 4],
+    /// `RequestAction` の**絶対**締切。再送のとき残り時間を引き直す。
+    deadlines: HashMap<u32, u64>,
 }
 
 impl Sinks {
@@ -826,18 +826,11 @@ impl Sinks {
             sent_upto: [None; 4],
             live: [None; 4],
             next_id: 1,
+            noted_upto: [None; 4],
+            deadlines: HashMap::new(),
         }
     }
 
-    /// クライアントの申告した `last_seq` を検める。
-    ///
-    /// **その席の可視列にその連番が実在するかを見る。**「最大値以下か」では
-    /// 足りない。全体のログを絞ってから投影するので、その席に見えない連番が
-    /// 正常に飛び飛びで存在し、それを申告されると未受信の可視イベントが飛ぶ。
-    ///
-    /// 辻褄が合わなければ最初から送り直す。見えている最大値へ丸める手も
-    /// あるが、それだと文脈のないまま途中のイベントだけが届き、
-    /// クライアントは組み立て直せない。
     fn checked(table: &Table, seat: Seat, last_seq: Option<u32>) -> Option<u32> {
         let claimed = last_seq?;
         table
@@ -847,22 +840,54 @@ impl Sinks {
             .then_some(claimed)
     }
 
-    /// まだ送っていない分を席ごとに押し出す。
+    /// 新しく出た `RequestAction` の絶対締切を控える。
     ///
-    /// **`since` だけを使う。**生配信と再接続の再送を1本の経路にまとめる
-    /// ことで、片方だけ視界フィルタを取り違える余地を消す。
-    fn flush(&mut self, table: &Table) {
+    /// **配信先が無い席でも控える。**留守中に出た要求を、戻ってきたときに
+    /// 満額の残り時間で見せてしまわないため。
+    fn note_deadlines(&mut self, table: &Table, now_ms: u64) {
         for index in 0..4 {
-            let Some(out) = &self.out[index] else {
+            let seat = Seat::new(index as u8);
+            let fresh = table.since(seat, self.noted_upto[index]);
+            for envelope in &fresh {
+                if let ClientEvent::RequestAction { deadline_ms, .. } = &envelope.event {
+                    self.deadlines
+                        .entry(envelope.seq)
+                        .or_insert(now_ms + u64::from(*deadline_ms));
+                }
+            }
+            if let Some(last) = fresh.last() {
+                self.noted_upto[index] = Some(last.seq);
+            }
+        }
+    }
+
+    /// 再送のときに残り時間を引き直す。
+    ///
+    /// `deadline_ms` は**発行時点からの残り**であって絶対時刻ではない。
+    /// 切断から数秒後に同じ包みをそのまま送り直すと、とっくに過ぎた要求が
+    /// 満額の持ち時間で表示され、サーバの判定と食い違う。
+    fn retimed(&self, mut envelope: ClientEventEnvelope, now_ms: u64) -> ClientEventEnvelope {
+        if let ClientEvent::RequestAction { deadline_ms, .. } = &mut envelope.event {
+            if let Some(absolute) = self.deadlines.get(&envelope.seq) {
+                *deadline_ms = absolute.saturating_sub(now_ms).min(u64::from(u32::MAX)) as u32;
+            }
+        }
+        envelope
+    }
+
+    fn flush(&mut self, table: &Table, now_ms: u64) {
+        for index in 0..4 {
+            if self.out[index].is_none() {
                 continue;
-            };
+            }
             let seat = Seat::new(index as u8);
             let batch = table.since(seat, self.sent_upto[index]);
             let mut highest = self.sent_upto[index];
             let mut alive = true;
             for envelope in batch {
                 let seq = envelope.seq;
-                // **待たない。**溢れた接続は切り、再接続で追いつかせる。
+                let envelope = self.retimed(envelope, now_ms);
+                let out = self.out[index].as_ref().expect("直前に確かめた");
                 if out.try_send(envelope).is_err() {
                     alive = false;
                     break;
@@ -878,8 +903,7 @@ impl Sinks {
     }
 }
 
-/// 1通を処理する。**`tick` の前にキューを空にするためにも呼ぶ。**
-fn handle(table: &mut Table, sinks: &mut Sinks, message: TableMsg) {
+fn handle(table: &mut Table, sinks: &mut Sinks, message: TableMsg, now_ms: u64) {
     match message {
         TableMsg::Command {
             seat,
@@ -887,30 +911,29 @@ fn handle(table: &mut Table, sinks: &mut Sinks, message: TableMsg) {
             at_ms,
             reply,
         } => {
-            // **入口へ着いた時刻で判定する。**取り出した時刻を使うと、
-            // 締切前に押した操作が時間切れになる。
             let result = table.apply(seat, command, at_ms);
             let _ = reply.send(result);
         }
         TableMsg::Attach {
             seat,
             last_seq,
-            out,
             ack,
         } => {
             let index = seat.index();
-            sinks.sent_upto[index] = Sinks::checked(table, seat, last_seq);
+            let start = Sinks::checked(table, seat, last_seq);
+            // **追いつきぶんが必ず入る容量にする。**足りないと正当な再接続が
+            // 溢れて切られる。OUTBOX は生配信ぶんの余裕として上乗せする。
+            let backlog = table.since(seat, start).len();
+            let (out, inbox) = mpsc::channel(backlog + OUTBOX);
+            sinks.sent_upto[index] = start;
             sinks.out[index] = Some(out);
             let connection = ConnectionId(sinks.next_id);
             sinks.next_id += 1;
             sinks.live[index] = Some(connection);
-            // 登録し、配り、それから返事する。この順序が
-            // 「attach が返れば届いている」を保証する。
-            sinks.flush(table);
-            let _ = ack.send(connection);
+            sinks.flush(table, now_ms);
+            let _ = ack.send((connection, inbox));
         }
         TableMsg::Detach { seat, connection } => {
-            // 置き換えられた古い接続の切断が、新しい接続を切ってはならない。
             if sinks.live[seat.index()] == Some(connection) {
                 sinks.out[seat.index()] = None;
                 sinks.live[seat.index()] = None;
@@ -927,41 +950,29 @@ async fn run(
 ) {
     let mut sinks = Sinks::new();
     let mut ticker = tokio::time::interval(Duration::from_millis(POLL_MS));
-    // 遅れを取り返す意味はない。知りたいのは「いまの時刻」だけ。
     ticker.set_missed_tick_behavior(MissedTickBehavior::Skip);
 
     loop {
-        // 出来ている分を先に配る。**局が終わったことを、次局を立てる前に伝える。**
-        sinks.flush(&table);
+        let now = clock.now_ms();
+        sinks.note_deadlines(&table, now);
+        sinks.flush(&table, now);
         if table.is_over() {
             break;
         }
         if table.needs_seed() {
-            table.begin_round(&seeds.next_seed(), clock.now_ms());
-            // 次局の頭は待たせない。ここで配らないと最大 100ms 遅れる。
-            sinks.flush(&table);
+            table.begin_round(&seeds.next_seed(), now);
+            sinks.note_deadlines(&table, now);
+            sinks.flush(&table, now);
         }
 
         tokio::select! {
-            // **順序を固定する。**既定の `select!` は ready な枝から無作為に
-            // 選ぶので、コマンドが絶え間なく来ると時計が進む時刻に上限が無い。
-            // ticker を先に置けば、100ms が経った時点で必ず時計が進む。
-            // `interval` は撃ったあと次の 100ms までは ready にならないので、
-            // 逆にコマンドが飢えることもない。
             biased;
 
             _ = ticker.tick() => {
-                // **時計を進める前に、既に着いている分を片づける。**
-                // 刻印だけでは足りない。tick が締切を越えて自動打牌したあとでは、
-                // 締切前の刻印で apply しても局面は巻き戻らない。
-                //
-                // **ただし上限を設ける。**空になるまで回すと、受信で空いた
-                // スロットへ待機中の送信者が補充するので、コマンドが途切れない
-                // かぎり tick が永久に来ない。入口の容量ぶんだけ片づけたら、
-                // 残りがあっても必ず時計を進める。
+                let now = clock.now_ms();
                 for _ in 0..INBOX {
                     match rx.try_recv() {
-                        Ok(message) => handle(&mut table, &mut sinks, message),
+                        Ok(message) => handle(&mut table, &mut sinks, message, now),
                         Err(_) => break,
                     }
                 }
@@ -969,13 +980,16 @@ async fn run(
             }
             message = rx.recv() => match message {
                 None => break,
-                Some(message) => handle(&mut table, &mut sinks, message),
+                Some(message) => {
+                    let now = clock.now_ms();
+                    handle(&mut table, &mut sinks, message, now);
+                }
             },
         }
     }
 
-    // 終局のイベントを配ってから閉じる。
-    sinks.flush(&table);
+    let now = clock.now_ms();
+    sinks.flush(&table, now);
 }
 ```
 
@@ -1312,6 +1326,89 @@ mod reconnect_tests {
         assert!(handle.is_closed(), "卓が終わったのに Actor が生きている");
     }
 
+    /// **一度も読まない接続が切られない。**
+    ///
+    /// 受け口の容量は追いつきぶんを見てから決めるので、半荘1回ぶんが
+    /// たまっても溢れない。溢れて切られると、生きている接続が黙る。
+    #[tokio::test(start_paused = true)]
+    async fn a_seat_that_never_reads_still_gets_the_whole_match() {
+        let handle = spawn(rules(), all_cpu(), SeedSource::from_master([2u8; 32]));
+        let (_, mut idle) = handle
+            .attach(Seat::new(1), None)
+            .await
+            .expect("卓は生きている");
+        let (_, mut watcher) = handle
+            .attach(Seat::new(0), None)
+            .await
+            .expect("卓は生きている");
+
+        loop {
+            let next = tokio::time::timeout(Duration::from_millis(A_VIRTUAL_HOUR_MS), watcher.recv())
+                .await
+                .expect("仮想1時間のうちに終わる");
+            if next.is_none() {
+                break;
+            }
+        }
+        let piled = take_ready(&mut idle);
+        assert!(piled.len() > 500, "溢れて切られている: {} 件", piled.len());
+    }
+
+    /// **再送する要求は、いま本当に残っている時間を載せる。**
+    ///
+    /// `deadline_ms` は発行時点からの残りなので、そのまま送り直すと
+    /// クライアントは満額の持ち時間で表示し、サーバは元の絶対締切で
+    /// 判定する。実測では初回 25,750ms が5秒後の再送で 20,750ms になる。
+    #[tokio::test(start_paused = true)]
+    async fn a_resent_request_shows_the_time_that_is_actually_left() {
+        let handle = spawn(
+            rules(),
+            one_human_three_cpus(),
+            SeedSource::from_master([1u8; 32]),
+        );
+        let (id, mut inbox) = handle
+            .attach(Seat::new(0), None)
+            .await
+            .expect("卓は生きている");
+
+        let (seq, original) = take_ready(&mut inbox)
+            .iter()
+            .find_map(|e| match &e.event {
+                ClientEvent::RequestAction { deadline_ms, .. } => Some((e.seq, *deadline_ms)),
+                _ => None,
+            })
+            .expect("要求が届いている");
+
+        handle
+            .detach(Seat::new(0), id)
+            .await
+            .expect("卓は生きている");
+        drop(inbox);
+        tokio::time::sleep(Duration::from_millis(5_000)).await;
+
+        let (_, mut back) = handle
+            .attach(Seat::new(0), None)
+            .await
+            .expect("卓は生きている");
+        let resent = take_ready(&mut back)
+            .iter()
+            .find_map(|e| match &e.event {
+                ClientEvent::RequestAction { deadline_ms, .. } if e.seq == seq => Some(*deadline_ms),
+                _ => None,
+            })
+            .expect("同じ要求が再送されている");
+
+        assert!(
+            resent < original,
+            "再送された要求が満額の残り時間のまま: {resent} / {original}"
+        );
+        let drained = original - resent;
+        assert!(
+            (4_900..=5_100).contains(&drained),
+            "引き方がずれている: {drained}ms 減った"
+        );
+    }
+
     /// **出口の容量が、半荘1回ぶんの再送に足りている。**
     ///
     /// 足りないと `attach(seat, None)` が溢れ、正当な再接続が切られる。
@@ -1411,12 +1508,12 @@ Expected: いくつか落ちる。Task 2 の実装が正しければ全部通る
 - [ ] **Step 4: 通ることを確かめる**
 
 Run: `cargo test --package server reconnect_tests`
-Expected: 12 passed
+Expected: 14 passed
 
 - [ ] **Step 5: crate 全体を測る**
 
 Run: `cargo test --package server`
-期待: 57 件（table 28 + session_time 7 + session 10 + reconnect 12）
+期待: 59 件（table 28 + session_time 7 + session 10 + reconnect 14）
 
 - [ ] **Step 6: コミット**
 
@@ -1477,6 +1574,16 @@ mod reaction_tests {
         std::array::from_fn(|index| Occupant::Cpu(PlayerId(format!("cpu{index}"))))
     }
 
+    fn humans_at(first: usize, second: usize) -> [Occupant; 4] {
+        std::array::from_fn(|index| {
+            if index == first || index == second {
+                Occupant::Human(PlayerId(format!("human{index}")))
+            } else {
+                Occupant::Cpu(PlayerId(format!("cpu{index}")))
+            }
+        })
+    }
+
     /// その席へ最初に届く「鳴きの要求」まで進める。
     /// 打牌の要求（自分の番）は読み飛ばす。
     async fn advance_to_a_call_window(inbox: &mut Inbound) -> (u32, Vec<ActionOption>) {
@@ -1535,6 +1642,7 @@ mod reaction_tests {
                     window_id,
                     response: CallResponse::Pon { tiles },
                 },
+                handle.now_ms(),
             )
             .await
             .expect("卓は生きている");
@@ -1612,6 +1720,84 @@ mod reaction_tests {
         }
     }
 
+    /// **同じミリ秒に2席が同じウィンドウへ応じても、両方が受理される。**
+    ///
+    /// エンジンの判定規則は 298 件のテストが見ているが、「締切前に入口へ
+    /// 着いた応答が、解決の tick より先に全部適用される」のは Actor が
+    /// 新たに担う輸送の保証であり、エンジン単体では確かめられない。
+    #[tokio::test(start_paused = true)]
+    async fn two_seats_answer_the_same_window_before_the_tick() {
+        let handle = spawn(rules(), humans_at(0, 2), SeedSource::from_master([1u8; 32]));
+        let (_, mut east) = handle
+            .attach(Seat::new(0), None)
+            .await
+            .expect("卓は生きている");
+        let (_, mut west) = handle
+            .attach(Seat::new(2), None)
+            .await
+            .expect("卓は生きている");
+
+        let mut seen_east: Vec<u32> = Vec::new();
+        let mut seen_west: Vec<u32> = Vec::new();
+        let mut shared = None;
+        for _ in 0..6_000 {
+            for (inbox, seen) in [(&mut east, &mut seen_east), (&mut west, &mut seen_west)] {
+                while let Ok(envelope) = inbox.try_recv() {
+                    if let ClientEvent::RequestAction {
+                        window_id, options, ..
+                    } = &envelope.event
+                    {
+                        if options
+                            .iter()
+                            .any(|option| !matches!(option, ActionOption::Discard { .. }))
+                        {
+                            seen.push(*window_id);
+                        }
+                    }
+                }
+            }
+            if let Some(window) = seen_east.iter().find(|w| seen_west.contains(w)) {
+                shared = Some(*window);
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(100)).await;
+        }
+        let window_id = shared.expect("2席共通のウィンドウに到達しなかった");
+
+        // **同じ刻印で2席ぶん送る。**片方が tick に追い越されてはならない。
+        let at = handle.now_ms();
+        assert_eq!(
+            handle
+                .command(
+                    Seat::new(0),
+                    Command::CallResponse {
+                        window_id,
+                        response: CallResponse::Pass,
+                    },
+                    at,
+                )
+                .await
+                .expect("卓は生きている"),
+            Ok(()),
+            "先の応答が拒まれた"
+        );
+        assert_eq!(
+            handle
+                .command(
+                    Seat::new(2),
+                    Command::CallResponse {
+                        window_id,
+                        response: CallResponse::Pass,
+                    },
+                    at,
+                )
+                .await
+                .expect("卓は生きている"),
+            Ok(()),
+            "同じミリ秒の2席目の応答が拒まれた"
+        );
+    }
+
     /// `window_id` は再送や遅れた応答を別のウィンドウへ当てないための鍵。
     #[tokio::test(start_paused = true)]
     async fn a_response_to_an_unknown_window_is_refused() {
@@ -1630,6 +1816,7 @@ mod reaction_tests {
                         window_id: window_id + 999,
                         response: CallResponse::Pass,
                     },
+                    handle.now_ms(),
                 )
                 .await
                 .expect("卓は生きている"),
@@ -1645,6 +1832,7 @@ mod reaction_tests {
                         window_id,
                         response: CallResponse::Pass,
                     },
+                    handle.now_ms(),
                 )
                 .await
                 .expect("卓は生きている"),
@@ -1660,6 +1848,7 @@ mod reaction_tests {
                         window_id,
                         response: CallResponse::Pass,
                     },
+                    handle.now_ms(),
                 )
                 .await
                 .expect("卓は生きている"),
@@ -1678,7 +1867,7 @@ Expected: いくつか落ちる。Task 2 の実装が正しければ全部通る
 - [ ] **Step 3: 通ることを確かめる**
 
 Run: `cargo test --package server reaction_tests`
-Expected: 3 passed
+Expected: 4 passed
 
 `the_actor_carries_a_call_across_the_minimum_wait` が「鳴きの要求に到達しなかった」で落ちるなら、`SeedSource` の繰り出し方が計画と違っている。`+350ms` の下限で落ちるなら、Actor が `tick` を呼んでいないか `POLL_MS` が違う。**期待値を書き換える前にそちらを疑う。**
 
@@ -1687,7 +1876,7 @@ Expected: 3 passed
 - [ ] **Step 4: workspace 全体を測る**
 
 ```bash
-cargo test --package server     # 60 件（table 28 + session_time 7 + session 10 + reconnect 12 + reaction 3）
+cargo test --package server     # 63 件（table 28 + session_time 7 + session 10 + reconnect 14 + reaction 4）
 cargo test --workspace
 cargo clippy --all-targets -- -D warnings
 cargo fmt --check
