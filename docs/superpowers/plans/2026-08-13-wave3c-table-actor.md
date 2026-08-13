@@ -111,7 +111,7 @@ Wave 3b の `Table` には `drain_for`（取り出したら消える）と `sinc
 
 Wave 3d は WebSocket の枠を読んだ直後に `TableHandle::now_ms()` を呼び、それを `command` へ渡す。**クライアントが時刻を指定するわけではない。**測るのは常にサーバ側である。
 
-同じ接続からの大量投入そのものは、接続ごとの流量制限で抑える。それは Wave 3d の仕事である。
+**それでも入口が満杯なら、外で待つコマンドは tick に追い越される。**そこは救えない。救えるように見せかけないこと。4人が1手ずつ出す卓で入口に同時に並ぶのは高々4〜5件であり、`INBOX = 32` はその6倍以上ある。ここが埋まるのは濫用のときだけなので、**接続ごとの流量制限で埋めさせない**のが正しい対処であり、それは Wave 3d の仕事である。
 
 ### 再送する要求は残り時間を引き直す
 
@@ -371,13 +371,13 @@ std::time を使わないのは、仮想時間で試験できなくなるため�
 **Interfaces:**
 - Consumes: Task 1 の `Clock`, `SeedSource`。`crate::table::{Table, Occupant}`。`mahjong_engine::match_flow::Reject`。`protocol::client_event::ClientEventEnvelope`、`protocol::command::Command`、`protocol::ruleset::Ruleset`、`protocol::seat::Seat`。
 - Produces:
-  - `pub type Outbound = tokio::sync::mpsc::UnboundedSender<ClientEventEnvelope>`
-  - `pub type Inbound = tokio::sync::mpsc::UnboundedReceiver<ClientEventEnvelope>`
+  - `pub type Outbound = tokio::sync::mpsc::Sender<ClientEventEnvelope>`（有界）
+  - `pub type Inbound = tokio::sync::mpsc::Receiver<ClientEventEnvelope>`
   - `pub struct Gone;`
   - `pub struct ConnectionId(u64);`（中身は非公開）
   - `pub enum TableMsg { Command { seat, command, at_ms, reply }, Attach { seat, last_seq, ack }, Detach { seat, connection } }`
   - `pub struct TableHandle`（`Clone + Send + Sync + 'static`）, `TableHandle::command`, `TableHandle::attach`, `TableHandle::detach`, `TableHandle::is_closed`
-  - `pub fn spawn(rules: Ruleset, occupants: [Occupant; 4], seeds: SeedSource) -> TableHandle`
+  - `pub fn spawn(...) -> (TableHandle, tokio::task::JoinHandle<()>)`
 
 - [ ] **Step 1: 失敗するテストを書く**
 
@@ -433,7 +433,7 @@ mod tests {
 
     #[tokio::test(start_paused = true)]
     async fn attaching_delivers_the_opening_without_waiting() {
-        let handle = spawn(rules(), humans(), SeedSource::from_master([1u8; 32]));
+        let (handle, _actor) = spawn(rules(), humans(), SeedSource::from_master([1u8; 32]));
         // yield_now を呼ばない。ack が返った時点で届いていなければならない。
         let (_, mut inbox) = handle
             .attach(Seat::new(0), None)
@@ -460,7 +460,7 @@ mod tests {
 
     #[tokio::test(start_paused = true)]
     async fn the_actor_deals_a_seed_without_being_asked() {
-        let handle = spawn(rules(), humans(), SeedSource::from_master([1u8; 32]));
+        let (handle, _actor) = spawn(rules(), humans(), SeedSource::from_master([1u8; 32]));
         let (_, mut inbox) = handle
             .attach(Seat::new(1), None)
             .await
@@ -478,7 +478,7 @@ mod tests {
 
     #[tokio::test(start_paused = true)]
     async fn two_seats_are_dealt_different_hands() {
-        let handle = spawn(rules(), humans(), SeedSource::from_master([1u8; 32]));
+        let (handle, _actor) = spawn(rules(), humans(), SeedSource::from_master([1u8; 32]));
         let (_, mut east) = handle
             .attach(Seat::new(0), None)
             .await
@@ -495,7 +495,7 @@ mod tests {
 
     #[tokio::test(start_paused = true)]
     async fn a_seat_never_sees_another_draw() {
-        let handle = spawn(rules(), humans(), SeedSource::from_master([1u8; 32]));
+        let (handle, _actor) = spawn(rules(), humans(), SeedSource::from_master([1u8; 32]));
         let (_, mut south) = handle
             .attach(Seat::new(1), None)
             .await
@@ -513,7 +513,7 @@ mod tests {
 
     #[tokio::test(start_paused = true)]
     async fn a_discard_reaches_the_other_seats() {
-        let handle = spawn(rules(), humans(), SeedSource::from_master([1u8; 32]));
+        let (handle, _actor) = spawn(rules(), humans(), SeedSource::from_master([1u8; 32]));
         let (_, mut east) = handle
             .attach(Seat::new(0), None)
             .await
@@ -554,7 +554,7 @@ mod tests {
 
     #[tokio::test(start_paused = true)]
     async fn a_command_from_the_wrong_seat_is_rejected() {
-        let handle = spawn(rules(), humans(), SeedSource::from_master([1u8; 32]));
+        let (handle, _actor) = spawn(rules(), humans(), SeedSource::from_master([1u8; 32]));
         let (_, mut south) = handle
             .attach(Seat::new(1), None)
             .await
@@ -574,7 +574,7 @@ mod tests {
 
     #[tokio::test(start_paused = true)]
     async fn sequence_numbers_only_go_up() {
-        let handle = spawn(rules(), humans(), SeedSource::from_master([1u8; 32]));
+        let (handle, _actor) = spawn(rules(), humans(), SeedSource::from_master([1u8; 32]));
         let (_, mut inbox) = handle
             .attach(Seat::new(2), None)
             .await
@@ -642,7 +642,7 @@ mod tests {
 
     #[tokio::test(start_paused = true)]
     async fn a_silent_seat_is_made_to_discard_when_its_bank_runs_out() {
-        let handle = spawn(
+        let (handle, _actor) = spawn(
             rules(),
             one_human_three_cpus(),
             SeedSource::from_master([1u8; 32]),
@@ -800,12 +800,21 @@ impl TableHandle {
 同じファイルの続きに置く。
 
 ```rust
-pub fn spawn(rules: Ruleset, occupants: [Occupant; 4], seeds: SeedSource) -> TableHandle {
+/// 卓を立ち上げる。
+///
+/// **`JoinHandle` を返す。**捨てると panic と正常終局が区別できず、どちらも
+/// `Gone` に潰れる。Wave 3d の卓の台帳が障害を記録し、局頭から再開するかを
+/// 判断するには終了理由が要る（仕様 8.3）。
+pub fn spawn(
+    rules: Ruleset,
+    occupants: [Occupant; 4],
+    seeds: SeedSource,
+) -> (TableHandle, tokio::task::JoinHandle<()>) {
     let (tx, rx) = mpsc::channel(INBOX);
     let clock = Arc::new(Clock::start());
     let table = Table::new(rules, occupants, clock.now_ms());
-    tokio::spawn(run(table, seeds, Arc::clone(&clock), rx));
-    TableHandle { tx, clock }
+    let actor = tokio::spawn(run(table, seeds, Arc::clone(&clock), rx));
+    (TableHandle { tx, clock }, actor)
 }
 
 struct Sinks {
@@ -816,6 +825,10 @@ struct Sinks {
     /// 締切を控えたところまで。配信先の有無に関わらず進む。
     noted_upto: [Option<u32>; 4],
     /// `RequestAction` の**絶対**締切。再送のとき残り時間を引き直す。
+    ///
+    /// **消せない。**`attach(seat, None)` は対局の頭から送り直すので、
+    /// 遠い過去の要求も「残り0」に引き直す必要がある。伸び方は卓のログと
+    /// 同じで、延長戦を含めても半荘1回ぶんに収まる。卓が畳まれれば消える。
     deadlines: HashMap<u32, u64>,
 }
 
@@ -842,9 +855,14 @@ impl Sinks {
 
     /// 新しく出た `RequestAction` の絶対締切を控える。
     ///
+    /// **`engine_now_ms` は、そのイベントを生んだ呼び出しへ渡した時刻**で
+    /// なければならない。`deadline_ms` はその時刻からの残りなので、Actor が
+    /// 別に測り直した時刻を足すと、待ち行列の滞留ぶんだけ絶対締切が
+    /// 後ろへずれる。
+    ///
     /// **配信先が無い席でも控える。**留守中に出た要求を、戻ってきたときに
     /// 満額の残り時間で見せてしまわないため。
-    fn note_deadlines(&mut self, table: &Table, now_ms: u64) {
+    fn note_deadlines(&mut self, table: &Table, engine_now_ms: u64) {
         for index in 0..4 {
             let seat = Seat::new(index as u8);
             let fresh = table.since(seat, self.noted_upto[index]);
@@ -852,7 +870,7 @@ impl Sinks {
                 if let ClientEvent::RequestAction { deadline_ms, .. } = &envelope.event {
                     self.deadlines
                         .entry(envelope.seq)
-                        .or_insert(now_ms + u64::from(*deadline_ms));
+                        .or_insert(engine_now_ms + u64::from(*deadline_ms));
                 }
             }
             if let Some(last) = fresh.last() {
@@ -903,7 +921,7 @@ impl Sinks {
     }
 }
 
-fn handle(table: &mut Table, sinks: &mut Sinks, message: TableMsg, now_ms: u64) {
+fn handle(table: &mut Table, sinks: &mut Sinks, message: TableMsg, flush_now_ms: u64) {
     match message {
         TableMsg::Command {
             seat,
@@ -912,6 +930,9 @@ fn handle(table: &mut Table, sinks: &mut Sinks, message: TableMsg, now_ms: u64) 
             reply,
         } => {
             let result = table.apply(seat, command, at_ms);
+            // **渡した時刻で控える。**この apply が生んだ要求の残り時間は
+            // at_ms からの相対値である。
+            sinks.note_deadlines(table, at_ms);
             let _ = reply.send(result);
         }
         TableMsg::Attach {
@@ -930,7 +951,7 @@ fn handle(table: &mut Table, sinks: &mut Sinks, message: TableMsg, now_ms: u64) 
             let connection = ConnectionId(sinks.next_id);
             sinks.next_id += 1;
             sinks.live[index] = Some(connection);
-            sinks.flush(table, now_ms);
+            sinks.flush(table, flush_now_ms);
             let _ = ack.send((connection, inbox));
         }
         TableMsg::Detach { seat, connection } => {
@@ -954,7 +975,6 @@ async fn run(
 
     loop {
         let now = clock.now_ms();
-        sinks.note_deadlines(&table, now);
         sinks.flush(&table, now);
         if table.is_over() {
             break;
@@ -976,7 +996,9 @@ async fn run(
                         Err(_) => break,
                     }
                 }
-                table.tick(clock.now_ms());
+                let ticked_at = clock.now_ms();
+                table.tick(ticked_at);
+                sinks.note_deadlines(&table, ticked_at);
             }
             message = rx.recv() => match message {
                 None => break,
@@ -1063,7 +1085,7 @@ mod reconnect_tests {
     /// 送り直していても気づけない。
     #[tokio::test(start_paused = true)]
     async fn reattaching_from_a_sequence_skips_what_was_already_seen() {
-        let handle = spawn(
+        let (handle, _actor) = spawn(
             rules(),
             one_human_three_cpus(),
             SeedSource::from_master([1u8; 32]),
@@ -1098,7 +1120,7 @@ mod reconnect_tests {
 
     #[tokio::test(start_paused = true)]
     async fn reattaching_from_nothing_replays_the_whole_match() {
-        let handle = spawn(rules(), humans(), SeedSource::from_master([1u8; 32]));
+        let (handle, _actor) = spawn(rules(), humans(), SeedSource::from_master([1u8; 32]));
         let (_, mut first) = handle
             .attach(Seat::new(0), None)
             .await
@@ -1126,7 +1148,7 @@ mod reconnect_tests {
 
     #[tokio::test(start_paused = true)]
     async fn an_impossible_sequence_replays_from_the_beginning() {
-        let handle = spawn(rules(), humans(), SeedSource::from_master([1u8; 32]));
+        let (handle, _actor) = spawn(rules(), humans(), SeedSource::from_master([1u8; 32]));
         let (_, mut inbox) = handle
             .attach(Seat::new(0), Some(u32::MAX))
             .await
@@ -1148,7 +1170,7 @@ mod reconnect_tests {
     /// 見ていない可視イベントが飛ぶ。
     #[tokio::test(start_paused = true)]
     async fn a_sequence_hidden_from_this_seat_is_refused() {
-        let handle = spawn(rules(), all_cpu(), SeedSource::from_master([1u8; 32]));
+        let (handle, _actor) = spawn(rules(), all_cpu(), SeedSource::from_master([1u8; 32]));
         let (_, mut inbox) = handle
             .attach(Seat::new(1), None)
             .await
@@ -1180,7 +1202,7 @@ mod reconnect_tests {
 
     #[tokio::test(start_paused = true)]
     async fn every_connection_gets_its_own_id() {
-        let handle = spawn(rules(), humans(), SeedSource::from_master([1u8; 32]));
+        let (handle, _actor) = spawn(rules(), humans(), SeedSource::from_master([1u8; 32]));
         let (first, _a) = handle
             .attach(Seat::new(0), None)
             .await
@@ -1199,7 +1221,7 @@ mod reconnect_tests {
 
     #[tokio::test(start_paused = true)]
     async fn a_stale_detach_does_not_kill_the_new_connection() {
-        let handle = spawn(
+        let (handle, _actor) = spawn(
             rules(),
             one_human_three_cpus(),
             SeedSource::from_master([1u8; 32]),
@@ -1231,7 +1253,7 @@ mod reconnect_tests {
 
     #[tokio::test(start_paused = true)]
     async fn a_detached_seat_catches_up_when_it_comes_back() {
-        let handle = spawn(
+        let (handle, _actor) = spawn(
             rules(),
             one_human_three_cpus(),
             SeedSource::from_master([1u8; 32]),
@@ -1270,7 +1292,7 @@ mod reconnect_tests {
 
     #[tokio::test(start_paused = true)]
     async fn dropping_a_receiver_does_not_stop_the_table() {
-        let handle = spawn(
+        let (handle, _actor) = spawn(
             rules(),
             one_human_three_cpus(),
             SeedSource::from_master([1u8; 32]),
@@ -1292,7 +1314,7 @@ mod reconnect_tests {
 
     #[tokio::test(start_paused = true)]
     async fn four_cpus_play_a_whole_match_and_the_actor_shuts_down() {
-        let handle = spawn(rules(), all_cpu(), SeedSource::from_master([1u8; 32]));
+        let (handle, _actor) = spawn(rules(), all_cpu(), SeedSource::from_master([1u8; 32]));
         let (_, mut watcher) = handle
             .attach(Seat::new(0), None)
             .await
@@ -1326,13 +1348,68 @@ mod reconnect_tests {
         assert!(handle.is_closed(), "卓が終わったのに Actor が生きている");
     }
 
+    /// **何度繋ぎ直しても、残り時間は同じ一本の絶対締切を指す。**
+    ///
+    /// 絶対締切を Actor が測り直した時刻から作ると、繋ぎ直すたびに
+    /// 指す先がずれる。控えるのは「エンジンへ渡した時刻」でなければ
+    /// ならない。実測では4回の再送がすべて 25,750ms を指した。
+    #[tokio::test(start_paused = true)]
+    async fn the_remaining_time_shrinks_exactly_with_the_clock() {
+        let (handle, _actor) = spawn(
+            rules(),
+            one_human_three_cpus(),
+            SeedSource::from_master([1u8; 32]),
+        );
+        let (_, mut inbox) = handle
+            .attach(Seat::new(0), None)
+            .await
+            .expect("卓は生きている");
+        let seq = take_ready(&mut inbox)
+            .iter()
+            .find_map(|e| match &e.event {
+                ClientEvent::RequestAction { .. } => Some(e.seq),
+                _ => None,
+            })
+            .expect("要求が届いている");
+
+        let mut readings: Vec<(u64, u32)> = Vec::new();
+        for _ in 0..4 {
+            let (_, mut fresh) = handle
+                .attach(Seat::new(0), None)
+                .await
+                .expect("卓は生きている");
+            let now = handle.now_ms();
+            let value = take_ready(&mut fresh)
+                .iter()
+                .find_map(|e| match &e.event {
+                    ClientEvent::RequestAction { deadline_ms, .. } if e.seq == seq => {
+                        Some(*deadline_ms)
+                    }
+                    _ => None,
+                })
+                .expect("同じ要求が再送される");
+            readings.push((now, value));
+            drop(fresh);
+            tokio::time::sleep(Duration::from_millis(3_000)).await;
+        }
+
+        let absolute = readings[0].0 + u64::from(readings[0].1);
+        for (at, value) in &readings {
+            assert_eq!(
+                at + u64::from(*value),
+                absolute,
+                "時刻 {at} の再送が別の絶対締切を指している"
+            );
+        }
+    }
+
     /// **一度も読まない接続が切られない。**
     ///
     /// 受け口の容量は追いつきぶんを見てから決めるので、半荘1回ぶんが
     /// たまっても溢れない。溢れて切られると、生きている接続が黙る。
     #[tokio::test(start_paused = true)]
     async fn a_seat_that_never_reads_still_gets_the_whole_match() {
-        let handle = spawn(rules(), all_cpu(), SeedSource::from_master([2u8; 32]));
+        let (handle, _actor) = spawn(rules(), all_cpu(), SeedSource::from_master([2u8; 32]));
         let (_, mut idle) = handle
             .attach(Seat::new(1), None)
             .await
@@ -1361,7 +1438,7 @@ mod reconnect_tests {
     /// 判定する。実測では初回 25,750ms が5秒後の再送で 20,750ms になる。
     #[tokio::test(start_paused = true)]
     async fn a_resent_request_shows_the_time_that_is_actually_left() {
-        let handle = spawn(
+        let (handle, _actor) = spawn(
             rules(),
             one_human_three_cpus(),
             SeedSource::from_master([1u8; 32]),
@@ -1416,7 +1493,7 @@ mod reconnect_tests {
     /// あるので、将来 CPU の打ち方が変わったときに気づけるようにしておく。
     #[tokio::test(start_paused = true)]
     async fn a_whole_match_fits_in_one_outbox() {
-        let handle = spawn(rules(), all_cpu(), SeedSource::from_master([2u8; 32]));
+        let (handle, _actor) = spawn(rules(), all_cpu(), SeedSource::from_master([2u8; 32]));
         let (_, mut watcher) = handle
             .attach(Seat::new(0), None)
             .await
@@ -1438,7 +1515,7 @@ mod reconnect_tests {
 
     #[tokio::test(start_paused = true)]
     async fn a_finished_table_refuses_new_connections() {
-        let handle = spawn(rules(), all_cpu(), SeedSource::from_master([1u8; 32]));
+        let (handle, _actor) = spawn(rules(), all_cpu(), SeedSource::from_master([1u8; 32]));
         let (_, mut watcher) = handle
             .attach(Seat::new(0), None)
             .await
@@ -1466,7 +1543,7 @@ mod reconnect_tests {
 
     #[tokio::test(start_paused = true)]
     async fn every_round_uses_a_fresh_seed() {
-        let handle = spawn(rules(), all_cpu(), SeedSource::from_master([1u8; 32]));
+        let (handle, _actor) = spawn(rules(), all_cpu(), SeedSource::from_master([1u8; 32]));
         let (_, mut watcher) = handle
             .attach(Seat::new(0), None)
             .await
@@ -1508,12 +1585,12 @@ Expected: いくつか落ちる。Task 2 の実装が正しければ全部通る
 - [ ] **Step 4: 通ることを確かめる**
 
 Run: `cargo test --package server reconnect_tests`
-Expected: 14 passed
+Expected: 15 passed
 
 - [ ] **Step 5: crate 全体を測る**
 
 Run: `cargo test --package server`
-期待: 59 件（table 28 + session_time 7 + session 10 + reconnect 14）
+期待: 60 件（table 28 + session_time 7 + session 10 + reconnect 15）
 
 - [ ] **Step 6: コミット**
 
@@ -1612,7 +1689,7 @@ mod reaction_tests {
     /// **卓は時間を作らない。**最低待機 350ms を越えさせるのは Actor の tick。
     #[tokio::test(start_paused = true)]
     async fn the_actor_carries_a_call_across_the_minimum_wait() {
-        let handle = spawn(rules(), human_at(1), SeedSource::from_master([1u8; 32]));
+        let (handle, _actor) = spawn(rules(), human_at(1), SeedSource::from_master([1u8; 32]));
         let clock = Clock::start();
         let (_, mut inbox) = handle
             .attach(Seat::new(1), None)
@@ -1685,7 +1762,7 @@ mod reaction_tests {
     /// ちょうど 400ms**（最低待機 350ms の直後のポーリング）だった。
     #[tokio::test(start_paused = true)]
     async fn even_an_uncalled_discard_waits_out_the_minimum() {
-        let handle = spawn(rules(), all_cpu(), SeedSource::from_master([1u8; 32]));
+        let (handle, _actor) = spawn(rules(), all_cpu(), SeedSource::from_master([1u8; 32]));
         let clock = Clock::start();
         let (_, mut inbox) = handle
             .attach(Seat::new(0), None)
@@ -1701,6 +1778,11 @@ mod reaction_tests {
             let Some(envelope) = next else { break };
             match &envelope.event {
                 ClientEvent::Discard { .. } => discarded_at = Some(clock.now_ms()),
+                // **鳴きが挟まった区間は数えない。**鳴けた場合の待機と
+                // 混ぜると「誰も鳴けなくても待つ」の検証にならない。
+                ClientEvent::Call { .. } | ClientEvent::RequestAction { .. } => {
+                    discarded_at = None;
+                }
                 ClientEvent::Draw { .. } => {
                     if let Some(at) = discarded_at.take() {
                         gaps.push(clock.now_ms() - at);
@@ -1727,7 +1809,7 @@ mod reaction_tests {
     /// 新たに担う輸送の保証であり、エンジン単体では確かめられない。
     #[tokio::test(start_paused = true)]
     async fn two_seats_answer_the_same_window_before_the_tick() {
-        let handle = spawn(rules(), humans_at(0, 2), SeedSource::from_master([1u8; 32]));
+        let (handle, _actor) = spawn(rules(), humans_at(0, 2), SeedSource::from_master([1u8; 32]));
         let (_, mut east) = handle
             .attach(Seat::new(0), None)
             .await
@@ -1764,35 +1846,30 @@ mod reaction_tests {
         }
         let window_id = shared.expect("2席共通のウィンドウに到達しなかった");
 
-        // **同じ刻印で2席ぶん送る。**片方が tick に追い越されてはならない。
+        // **同時に投入する。**逐次に送ると1件ずつ処理されるだけで、
+        // 「入口に並んだ複数の応答が tick より先に片づく」を試せない。
         let at = handle.now_ms();
-        assert_eq!(
-            handle
-                .command(
-                    Seat::new(0),
-                    Command::CallResponse {
-                        window_id,
-                        response: CallResponse::Pass,
-                    },
-                    at,
-                )
-                .await
-                .expect("卓は生きている"),
-            Ok(()),
-            "先の応答が拒まれた"
+        let (first, second) = tokio::join!(
+            handle.command(
+                Seat::new(0),
+                Command::CallResponse {
+                    window_id,
+                    response: CallResponse::Pass,
+                },
+                at,
+            ),
+            handle.command(
+                Seat::new(2),
+                Command::CallResponse {
+                    window_id,
+                    response: CallResponse::Pass,
+                },
+                at,
+            )
         );
+        assert_eq!(first.expect("卓は生きている"), Ok(()), "先の応答が拒まれた");
         assert_eq!(
-            handle
-                .command(
-                    Seat::new(2),
-                    Command::CallResponse {
-                        window_id,
-                        response: CallResponse::Pass,
-                    },
-                    at,
-                )
-                .await
-                .expect("卓は生きている"),
+            second.expect("卓は生きている"),
             Ok(()),
             "同じミリ秒の2席目の応答が拒まれた"
         );
@@ -1801,7 +1878,7 @@ mod reaction_tests {
     /// `window_id` は再送や遅れた応答を別のウィンドウへ当てないための鍵。
     #[tokio::test(start_paused = true)]
     async fn a_response_to_an_unknown_window_is_refused() {
-        let handle = spawn(rules(), human_at(1), SeedSource::from_master([1u8; 32]));
+        let (handle, _actor) = spawn(rules(), human_at(1), SeedSource::from_master([1u8; 32]));
         let (_, mut inbox) = handle
             .attach(Seat::new(1), None)
             .await
@@ -1876,7 +1953,7 @@ Expected: 4 passed
 - [ ] **Step 4: workspace 全体を測る**
 
 ```bash
-cargo test --package server     # 63 件（table 28 + session_time 7 + session 10 + reconnect 14 + reaction 4）
+cargo test --package server     # 64 件（table 28 + session_time 7 + session 10 + reconnect 15 + reaction 4）
 cargo test --workspace
 cargo clippy --all-targets -- -D warnings
 cargo fmt --check
@@ -1918,6 +1995,14 @@ window_id は再送や遅れた応答を別のウィンドウへ当てないた�
 **反応まわりで Actor 級の試験を書かなかったもの:** ダブロンと複数席の同時応答は、`mahjong-engine` の 298 テスト（Wave 2d・2e）が優先順位・供託分配・頭ハネまで網羅している。Actor が新たに担うのは「最低待機 350ms を越えさせること」と「`window_id` で遅れた応答を弾くこと」の2つであり、Task 4 はそこに絞ってある。**同じ判定を二重に試験しても、壊れたときに二重に落ちるだけで、原因の切り分けは楽にならない。**
 
 **このウェーブがやらないこと:** WebSocket・axum・HTTP・認証は Wave 3d。永続化とマッチングも Wave 3d 以降。ここは「卓が実時間で動く」ところまでで止める。**非同期とネットワークを一度に入れると、失敗したときどちらが原因か切り分けられない。**
+
+**Wave 3d へ渡す宿題（ここで決めておく）:**
+
+**仕様 8.2 の CPU 代打ち切り替えは、いまの凍結境界では誰も所有できない。**「連続して自動打牌が続いた場合は CPU 代打ちへ切り替える」は v1 の要件だが、`Table` は `occupants` を非公開の固定配列で持ち、CPU の代打ちは `Table` の内部だけで判断している。WebSocket 層に牌姿を持たせるわけにはいかないし、Actor 側で作り直せば `Table` の CPU 処理と二重になる。
+
+**したがって切り替えは `Table` が所有する。**Wave 3d で `table.rs` に「その席を CPU に任せる」メソッドを1つ足す。Wave 3c では足さない。切り替えの引き金になる「連続して自動打牌が続いた」の判定には切断の概念が要り、それは WebSocket が入って初めて意味を持つからである。**凍結は並行作業の衝突を防ぐための取り決めであり、マージ済みのファイルへ後から必要な1メソッドを足すことを禁じるものではない。**
+
+`spawn` が返す `JoinHandle` は Wave 3d の卓の台帳が持つ。panic・入口の消滅・正常な終局がすべて `Gone` に潰れると、障害を記録することも局頭から再開すべきかを判断することもできない（仕様 8.3）。
 
 **Wave 3d への引き継ぎで未決なこと:** `Gone` は理由を持たない。WebSocket 層が「認証失敗」「卓が無い」「不正な resume」を区別してクライアントへ返したくなったら、`Gone` を理由付きの enum へ広げる必要がある。いま広げないのは、理由の一覧を決めるのが認証設計の一部であり、それが Wave 3d の仕事だからである。`ConnectionId` と ack はその拡張に耐える形にしてある。
 
