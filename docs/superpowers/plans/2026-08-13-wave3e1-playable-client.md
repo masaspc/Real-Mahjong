@@ -28,6 +28,7 @@
 - サーバは `ws://127.0.0.1:8080/ws?table=<id>&last_seq=<n>` で待つ。下りは `ClientEventEnvelope` の JSON、上りは `Command` の JSON。
 - `RequestAction { window_id, options, deadline_ms }` の `deadline_ms` は**受け取った時点からの残りミリ秒**。再接続で送り直されるときはサーバが引き直してくれる。
 - `ActionOption` は `discard{allowed, riichi_allowed}` / `chi{candidates}` / `pon{candidates}` / `kan{candidates}` / `ron` / `tsumo` / `kyuushu` / `pass`。
+- **`ActionOption::Pass` はエンジンが一度も出さない。**それでも `CallResponse::Pass` は常に受理される（`response_is_offered` が `Pass` だけ無条件に真）。したがって「見送り」は、提示された選択肢ではなく**打牌を求められていないこと**で判断する。押せないと、鳴きたくない席が時間切れまで待つことになり、他の3人まで待たされる。
 - `MeldKind` は `"chi" | "pon" | "ankan" | "minkan" | "kakan"`、`DiscardManner` は `"tedashi" | "tsumogiri"`、`RiichiStep` は `"declare" | "accepted"`、`DrawSource` は `"wall" | "dead_wall"`。
 - **`tsconfig.json` は `strict` と `noUncheckedIndexedAccess` を有効にしている。**配列の添字は `T | undefined` になるので、席や牌を取り出すたびに扱いを決めること。`pnpm typecheck` は容赦なく落ちる。
 - **`Event::Call` の `tiles` は副露の全部であって、手牌から出た分ではない。**暗槓は `from` が自分自身で河を触らない。加槓は元のポンに4枚目を足した形で出るので、河を触らず、手牌から出るのは1枚だけで、元のポンを置き換える。
@@ -1261,7 +1262,8 @@ describe("選べる操作からコマンドを組み立てる", () => {
 
   it("チーは候補ごとにボタンを出し、call_response で送る", () => {
     const choices = actionsFor(offering([{ type: "chi", candidates: [[0, 1], [1, 3]] }]));
-    expect(choices).toHaveLength(2);
+    // 候補2つ + 見送り。
+    expect(choices).toHaveLength(3);
     expect(choices[0]?.command).toEqual({
       type: "call_response",
       window_id: 7,
@@ -1309,7 +1311,12 @@ describe("選べる操作からコマンドを組み立てる", () => {
         },
       ]),
     );
-    expect(choices.map((c) => c.command.type)).toEqual(["call_response", "ankan", "kakan"]);
+    // 末尾の見送りは別のテストで見る。ここは送り方の違いだけを固定する。
+    expect(choices.slice(0, 3).map((c) => c.command.type)).toEqual([
+      "call_response",
+      "ankan",
+      "kakan",
+    ]);
   });
 
   it("ロンは call_response、ツモは専用のコマンド", () => {
@@ -1321,13 +1328,33 @@ describe("選べる操作からコマンドを組み立てる", () => {
     expect(actionsFor(offering([{ type: "tsumo" }]))[0]?.command).toEqual({ type: "tsumo" });
   });
 
-  it("九種九牌と見送り", () => {
+  it("九種九牌", () => {
     expect(actionsFor(offering([{ type: "kyuushu" }]))[0]?.command).toEqual({ type: "kyuushu" });
-    expect(actionsFor(offering([{ type: "pass" }]))[0]?.command).toEqual({
+  });
+
+  it("反応ウィンドウでは必ず見送れる", () => {
+    // **エンジンは ActionOption::Pass を一度も出さない。**それでも
+    // CallResponse::Pass は常に受理される。押せないと、鳴きたくない席が
+    // 時間切れまで待つことになり、他の3人まで待たされる。
+    const choices = actionsFor(offering([{ type: "pon", candidates: [[4, 4]] }]));
+    const last = choices[choices.length - 1];
+    expect(last?.label).toBe("見送り");
+    expect(last?.command).toEqual({
       type: "call_response",
       window_id: 7,
       response: { type: "pass" },
     });
+  });
+
+  it("自分の番には見送りを出さない", () => {
+    // 打牌を求められているのだから、必ず何かを切る。
+    const choices = actionsFor(
+      offering([
+        { type: "discard", allowed: [0], riichi_allowed: [] },
+        { type: "tsumo" },
+      ]),
+    );
+    expect(choices.map((c) => c.label)).toEqual(["ツモ"]);
   });
 
   it("打てる牌は allowed のものだけ", () => {
@@ -1385,6 +1412,10 @@ export function actionsFor(state: GameState): Choice[] {
   const windowId = pending.windowId;
   const choices: Choice[] = [];
 
+  // **打牌を求められていなければ反応ウィンドウ。**そのときだけ見送れる。
+  // 自分の番に「見送り」は意味を持たない。必ず何かを切る。
+  const isReaction = !pending.options.some((option) => option.type === "discard");
+
   for (const option of pending.options) {
     switch (option.type) {
       case "chi":
@@ -1441,16 +1472,20 @@ export function actionsFor(state: GameState): Choice[] {
         choices.push({ label: "九種九牌", command: { type: "kyuushu" } });
         break;
 
-      case "pass":
-        choices.push({
-          label: "見送り",
-          command: { type: "call_response", window_id: windowId, response: { type: "pass" } },
-        });
-        break;
-
       default:
         break;
     }
+  }
+
+  // **`ActionOption::Pass` はエンジンが一度も出さない。**それでも
+  // `CallResponse::Pass` はいつでも受理される（`response_is_offered` が
+  // Pass だけ無条件に真）。見送りが押せないと、鳴きたくない席は
+  // 時間切れまで待つことになり、他の3人まで待たされる。
+  if (isReaction && choices.length > 0) {
+    choices.push({
+      label: "見送り",
+      command: { type: "call_response", window_id: windowId, response: { type: "pass" } },
+    });
   }
   return choices;
 }
@@ -1479,7 +1514,7 @@ export function canDeclareRiichi(state: GameState): boolean {
 - [ ] **Step 3: 通ることを確かめる**
 
 Run: `pnpm --dir apps/web test actions`
-Expected: 12 passed
+Expected: 14 passed
 
 - [ ] **Step 4: コミット**
 
