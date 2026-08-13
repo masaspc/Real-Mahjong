@@ -8,10 +8,12 @@ use crate::round::{chankan_options, discard_options, reaction_options, TurnStart
 use crate::state::{charge_bank, deadline_for, lead_in_of, remaining_for_event, RoundState};
 use crate::wall::Seed;
 use protocol::command::{ActionOption, CallResponse, Command, KanCandidate};
-use protocol::event::{DiscardManner, DrawSource, Event, Liability, LiabilityMode, RiichiStep};
+use protocol::event::{
+    DiscardManner, DrawSource, Event, Liability, LiabilityMode, NextRound, PlayerId, RiichiStep,
+};
 use protocol::meld::{Meld, MeldKind};
-use protocol::ruleset::Ruleset;
-use protocol::seat::{Round, Seat};
+use protocol::ruleset::{MatchLength, Ruleset};
+use protocol::seat::{Round, Seat, Wind};
 use protocol::tile::{Tile, TileKind};
 use protocol::yaku::YakuId;
 
@@ -93,7 +95,7 @@ mod abortive_tests {
     fn nine_terminals_can_be_declared() {
         let mut engine = start_at(0);
         engine.drain_events();
-        set_dealer_hand(&mut engine, "19m19p19s12345677z");
+        set_dealer_hand(engine.state_mut(), "19m19p19s12345677z");
         engine
             .apply(Seat::new(0), Command::Kyuushu, 1_000)
             .expect("九種九牌を宣言できる");
@@ -111,7 +113,7 @@ mod abortive_tests {
     fn nine_terminals_reveals_only_the_declarer() {
         let mut engine = start_at(0);
         engine.drain_events();
-        set_dealer_hand(&mut engine, "19m19p19s12345677z");
+        set_dealer_hand(engine.state_mut(), "19m19p19s12345677z");
         engine
             .apply(Seat::new(0), Command::Kyuushu, 1_000)
             .expect("九種九牌を宣言できる");
@@ -133,7 +135,7 @@ mod abortive_tests {
     fn eight_kinds_cannot_declare_nine_terminals() {
         let mut engine = start_at(0);
         engine.drain_events();
-        set_dealer_hand(&mut engine, "19m345556m19p19s12z");
+        set_dealer_hand(engine.state_mut(), "19m345556m19p19s12z");
         assert_eq!(
             engine.apply(Seat::new(0), Command::Kyuushu, 1_000),
             Err(Reject::NotOffered)
@@ -245,7 +247,7 @@ mod abortive_tests {
     fn four_riichi_abort_the_round() {
         let mut engine = start_at(0);
         engine.drain_events();
-        set_dealer_hand(&mut engine, "234567m23478p22s1z");
+        set_dealer_hand(engine.state_mut(), "234567m23478p22s1z");
         for seat in [Seat::new(1), Seat::new(2), Seat::new(3)] {
             set_tenpai(&mut engine, seat);
         }
@@ -285,7 +287,7 @@ mod abortive_tests {
     fn three_riichi_do_not_abort() {
         let mut engine = start_at(0);
         engine.drain_events();
-        set_dealer_hand(&mut engine, "234567m23478p22s1z");
+        set_dealer_hand(engine.state_mut(), "234567m23478p22s1z");
         for seat in [Seat::new(1), Seat::new(2)] {
             set_tenpai(&mut engine, seat);
         }
@@ -432,7 +434,7 @@ mod abortive_tests {
     fn an_abortive_draw_moves_no_points() {
         let mut engine = start_at(0);
         engine.drain_events();
-        set_dealer_hand(&mut engine, "19m19p19s12345677z");
+        set_dealer_hand(engine.state_mut(), "19m19p19s12345677z");
         engine
             .apply(Seat::new(0), Command::Kyuushu, 1_000)
             .expect("九種九牌を宣言できる");
@@ -448,7 +450,7 @@ mod abortive_tests {
     fn an_abortive_draw_repeats_the_dealership() {
         let mut engine = start_at(0);
         engine.drain_events();
-        set_dealer_hand(&mut engine, "19m19p19s12345677z");
+        set_dealer_hand(engine.state_mut(), "19m19p19s12345677z");
         engine
             .apply(Seat::new(0), Command::Kyuushu, 1_000)
             .expect("九種九牌を宣言できる");
@@ -464,7 +466,7 @@ mod abortive_tests {
     fn an_abortive_draw_conserves_every_tile() {
         let mut engine = start_at(0);
         engine.drain_events();
-        set_dealer_hand(&mut engine, "19m19p19s12345677z");
+        set_dealer_hand(engine.state_mut(), "19m19p19s12345677z");
         engine
             .apply(Seat::new(0), Command::Kyuushu, 1_000)
             .expect("九種九牌を宣言できる");
@@ -476,7 +478,7 @@ mod abortive_tests {
     fn an_aborted_round_rejects_further_commands() {
         let mut engine = start_at(0);
         engine.drain_events();
-        set_dealer_hand(&mut engine, "19m19p19s12345677z");
+        set_dealer_hand(engine.state_mut(), "19m19p19s12345677z");
         engine
             .apply(Seat::new(0), Command::Kyuushu, 1_000)
             .expect("九種九牌を宣言できる");
@@ -2399,7 +2401,7 @@ mod riichi_tests {
 
     /// 親に 6p/9p 待ちのテンパイを持たせ、1z でリーチ宣言する。
     fn declare_riichi(engine: &mut RoundEngine, now_ms: u64) -> Tile {
-        set_dealer_hand(engine, "234567m23478p22s1z");
+        set_dealer_hand(engine.state_mut(), "234567m23478p22s1z");
         let tile = parse_tile("1z").expect("正しい記法");
         engine
             .apply(
@@ -2603,7 +2605,7 @@ mod riichi_tests {
     fn a_discard_that_breaks_tenpai_cannot_declare_riichi() {
         let mut engine = start_at(0);
         engine.drain_events();
-        set_dealer_hand(&mut engine, "234567m23478p22s1z");
+        set_dealer_hand(engine.state_mut(), "234567m23478p22s1z");
         // 2m を切るとテンパイが崩れる。
         assert_eq!(
             engine.apply(
@@ -2687,7 +2689,7 @@ mod riichi_tests {
     fn a_winner_without_riichi_gets_no_ura() {
         let mut engine = start_at(0);
         engine.drain_events();
-        make_tenpai(&mut engine, Seat::new(0));
+        make_tenpai(engine.state_mut(), Seat::new(0));
         engine.force_draw_turn(Seat::new(0), parse_tile("6p").expect("正しい記法"));
         engine
             .apply(Seat::new(0), Command::Tsumo, 1_000)
@@ -3098,7 +3100,7 @@ mod kan_tests {
     fn an_ankan_runs_through_its_whole_sequence() {
         let mut engine = start_at(0);
         engine.drain_events();
-        set_dealer_hand(&mut engine, "1111m234p567p22s78s");
+        set_dealer_hand(engine.state_mut(), "1111m234p567p22s78s");
         engine
             .apply(
                 Seat::new(0),
@@ -3123,7 +3125,7 @@ mod kan_tests {
     fn an_ankan_moves_four_tiles_into_a_concealed_meld() {
         let mut engine = start_at(0);
         engine.drain_events();
-        set_dealer_hand(&mut engine, "1111m234p567p22s78s");
+        set_dealer_hand(engine.state_mut(), "1111m234p567p22s78s");
         engine
             .apply(
                 Seat::new(0),
@@ -3151,7 +3153,7 @@ mod kan_tests {
     fn an_ankan_keeps_the_hand_closed() {
         let mut engine = start_at(0);
         engine.drain_events();
-        set_dealer_hand(&mut engine, "1111m234p567p22s78s");
+        set_dealer_hand(engine.state_mut(), "1111m234p567p22s78s");
         engine
             .apply(
                 Seat::new(0),
@@ -3170,7 +3172,7 @@ mod kan_tests {
     fn a_kan_marks_the_round_as_opened() {
         let mut engine = start_at(0);
         engine.drain_events();
-        set_dealer_hand(&mut engine, "1111m234p567p22s78s");
+        set_dealer_hand(engine.state_mut(), "1111m234p567p22s78s");
         assert!(!engine.state().any_call_made);
         engine
             .apply(
@@ -3191,7 +3193,7 @@ mod kan_tests {
         let mut engine = start_at(0);
         engine.drain_events();
         assert_eq!(engine.state().wall.dora_indicators().len(), 1);
-        set_dealer_hand(&mut engine, "1111m234p567p22s78s");
+        set_dealer_hand(engine.state_mut(), "1111m234p567p22s78s");
         engine
             .apply(
                 Seat::new(0),
@@ -3210,7 +3212,7 @@ mod kan_tests {
     fn the_replacement_comes_from_the_dead_wall() {
         let mut engine = start_at(0);
         engine.drain_events();
-        set_dealer_hand(&mut engine, "1111m234p567p22s78s");
+        set_dealer_hand(engine.state_mut(), "1111m234p567p22s78s");
         let live_before = engine.state().wall.live_remaining();
         engine
             .apply(
@@ -3243,7 +3245,7 @@ mod kan_tests {
     fn a_kan_is_counted_for_its_seat() {
         let mut engine = start_at(0);
         engine.drain_events();
-        set_dealer_hand(&mut engine, "1111m234p567p22s78s");
+        set_dealer_hand(engine.state_mut(), "1111m234p567p22s78s");
         engine
             .apply(
                 Seat::new(0),
@@ -3262,7 +3264,7 @@ mod kan_tests {
     fn an_unoffered_ankan_is_rejected() {
         let mut engine = start_at(0);
         engine.drain_events();
-        set_dealer_hand(&mut engine, "234567m23478p22s1z");
+        set_dealer_hand(engine.state_mut(), "234567m23478p22s1z");
         assert_eq!(
             engine.apply(
                 Seat::new(0),
@@ -3454,7 +3456,7 @@ mod kan_tests {
         // 席1は 1m でも和了れないが、待ちがあっても暗槓は槍槓できない。
         engine.state_mut().seat_mut(Seat::new(1)).hand =
             parse_hand("234567m23478p22s").expect("正しい記法");
-        set_dealer_hand(&mut engine, "1111m234p567p22s78s");
+        set_dealer_hand(engine.state_mut(), "1111m234p567p22s78s");
         engine
             .apply(
                 Seat::new(0),
@@ -3476,7 +3478,7 @@ mod kan_tests {
     fn winning_on_the_replacement_scores_rinshan() {
         let mut engine = start_at(0);
         engine.drain_events();
-        set_dealer_hand(&mut engine, "1111m234p567p22s78s");
+        set_dealer_hand(engine.state_mut(), "1111m234p567p22s78s");
         engine
             .apply(
                 Seat::new(0),
@@ -3525,7 +3527,7 @@ mod kan_tests {
             ippatsu: true,
             double: false,
         });
-        set_dealer_hand(&mut engine, "1111m234p567p22s78s");
+        set_dealer_hand(engine.state_mut(), "1111m234p567p22s78s");
         engine
             .apply(
                 Seat::new(0),
@@ -3736,6 +3738,8 @@ pub struct RoundOutcome {
     /// Wave 2e が `RoundEnd.reason` を組み立てるのに使う。
     /// 流し満貫は荒牌平局と区別しなければ牌譜から復元できない。
     pub reason: ContinuationReason,
+    /// 流局で終わったか。本場の進み方が和了と違う。
+    pub was_draw: bool,
 }
 
 impl RoundEngine {
@@ -3817,6 +3821,7 @@ impl RoundEngine {
             } else {
                 ContinuationReason::DealerLoss
             },
+            false,
         );
     }
 
@@ -3889,6 +3894,7 @@ impl RoundEngine {
             } else {
                 ContinuationReason::DealerLoss
             },
+            false,
         );
     }
 
@@ -3996,7 +4002,13 @@ impl RoundEngine {
         } else {
             ContinuationReason::DealerLoss
         };
-        self.finish(scores, self.state.riichi_sticks, dealer_repeats, reason);
+        self.finish(
+            scores,
+            self.state.riichi_sticks,
+            dealer_repeats,
+            reason,
+            true,
+        );
     }
 
     /// 途中流局で局を閉じる。点棒は動かず、供託は持ち越す。
@@ -4020,7 +4032,7 @@ impl RoundEngine {
         });
         let scores = self.state.scores;
         let sticks = self.state.riichi_sticks;
-        self.finish(scores, sticks, true, ContinuationReason::AbortiveDraw);
+        self.finish(scores, sticks, true, ContinuationReason::AbortiveDraw, true);
     }
 
     /// 局を閉じる。
@@ -4030,6 +4042,7 @@ impl RoundEngine {
         riichi_sticks: u8,
         dealer_repeats: bool,
         reason: ContinuationReason,
+        was_draw: bool,
     ) {
         let before = self.state.scores;
         let sticks_delta =
@@ -4051,6 +4064,7 @@ impl RoundEngine {
             riichi_sticks,
             dealer_repeats,
             reason,
+            was_draw,
         });
     }
 }
@@ -4135,6 +4149,1236 @@ impl RoundEngine {
     }
 }
 
+/// 半荘の進行。局を並べ、連荘と本場と終局を決める。
+///
+/// **乱数を持たない。**シードは局ごとに外から受け取る。局が何回あるかは
+/// 連荘で伸びるため事前に決まらない。
+pub struct MatchEngine {
+    rules: Ruleset,
+    round: Round,
+    dealer: Seat,
+    honba: u8,
+    riichi_sticks: u8,
+    scores: [i32; 4],
+    next_window_id: u32,
+    engine: Option<RoundEngine>,
+    last_outcome: Option<RoundOutcome>,
+    pending: Vec<Event>,
+    /// 局ごとのシード。半荘の終わりにまとめて開示する。
+    seeds: Vec<Seed>,
+    over: bool,
+    /// 直前の局の終わり方。`finish_match` が `RoundEnd` に載せる。
+    last_reason: ContinuationReason,
+}
+
+impl MatchEngine {
+    pub fn start(rules: Ruleset, players: [PlayerId; 4], now_ms: u64) -> Self {
+        let mut game = MatchEngine {
+            rules,
+            round: Round {
+                wind: Wind::East,
+                number: 1,
+            },
+            dealer: Seat::new(0),
+            honba: 0,
+            riichi_sticks: 0,
+            scores: [rules.start_score; 4],
+            next_window_id: 1,
+            engine: None,
+            last_outcome: None,
+            pending: Vec::new(),
+            seeds: Vec::new(),
+            over: false,
+            last_reason: ContinuationReason::DealerLoss,
+        };
+        game.pending.push(Event::MatchStart { players, rules });
+        let _ = now_ms;
+        game
+    }
+
+    pub fn round(&self) -> Round {
+        self.round
+    }
+
+    pub fn scores(&self) -> [i32; 4] {
+        self.scores
+    }
+
+    pub fn last_outcome(&self) -> Option<&RoundOutcome> {
+        self.last_outcome.as_ref()
+    }
+
+    pub fn is_over(&self) -> bool {
+        self.over
+    }
+
+    /// 次の局を始めるためのシードが要るか。
+    pub fn needs_seed(&self) -> bool {
+        self.engine.is_none() && !self.over
+    }
+
+    pub fn begin_round(&mut self, seed: &Seed, now_ms: u64) {
+        assert!(self.needs_seed(), "局が動いている間は始められない");
+        self.seeds.push(*seed);
+        let mut engine = RoundEngine::start(
+            self.rules,
+            self.round,
+            self.dealer,
+            self.honba,
+            self.riichi_sticks,
+            self.scores,
+            seed,
+            self.next_window_id,
+            now_ms,
+        );
+        self.pending.extend(engine.drain_events());
+        self.engine = Some(engine);
+    }
+
+    pub fn apply(&mut self, seat: Seat, command: Command, now_ms: u64) -> Result<(), Reject> {
+        let Some(engine) = self.engine.as_mut() else {
+            return Err(Reject::NotYourTurn);
+        };
+        let result = engine.apply(seat, command, now_ms);
+        self.collect(now_ms);
+        result
+    }
+
+    pub fn tick(&mut self, now_ms: u64) {
+        if let Some(engine) = self.engine.as_mut() {
+            engine.tick(now_ms);
+        }
+        self.collect(now_ms);
+    }
+
+    pub fn drain_events(&mut self) -> Vec<Event> {
+        std::mem::take(&mut self.pending)
+    }
+
+    /// 局のイベントを取り込み、終わっていれば局を閉じる。
+    fn collect(&mut self, now_ms: u64) {
+        let Some(engine) = self.engine.as_mut() else {
+            return;
+        };
+        self.pending.extend(engine.drain_events());
+        if engine.outcome().is_none() {
+            return;
+        }
+        let engine = self.engine.take().expect("直前に確認した");
+        let outcome = engine.outcome().cloned().expect("終わっている");
+        self.next_window_id = engine.next_window_id();
+        self.close_round(outcome, now_ms);
+    }
+
+    /// 局の結果を半荘へ取り込み、`RoundEnd` を出す。
+    fn close_round(&mut self, outcome: RoundOutcome, now_ms: u64) {
+        self.scores = outcome.scores;
+        self.riichi_sticks = outcome.riichi_sticks;
+        self.honba = if outcome.was_draw || outcome.dealer_repeats {
+            self.honba + 1
+        } else {
+            0
+        };
+        self.last_reason = outcome.reason;
+
+        // 終局判定は、まだ終わった局の round と dealer を指しているここで行う。
+        if self.should_end(&outcome) {
+            self.finish_match();
+            self.last_outcome = Some(outcome);
+            let _ = now_ms;
+            return;
+        }
+
+        self.advance_seat_and_round(&outcome);
+        self.pending.push(Event::RoundEnd {
+            scores: self.scores,
+            next: NextRound::Next {
+                round: self.round,
+                dealer: self.dealer,
+                honba: self.honba,
+                riichi_sticks: self.riichi_sticks,
+            },
+            reason: outcome.reason,
+        });
+        self.last_outcome = Some(outcome);
+        let _ = now_ms;
+    }
+
+    /// 親と局を次へ進める。
+    fn advance_seat_and_round(&mut self, outcome: &RoundOutcome) {
+        // 本来の最終局で誰も返し点へ届かなければ、親が続く結果でも
+        // 次の風へ延長する。終局判定を通過した直後なので、この条件を
+        // `dealer_repeats` より先に扱う。
+        if self.is_last_round() && !self.reached_return_score() {
+            self.dealer = Seat::new(((self.dealer.index() + 1) % 4) as u8);
+            self.round = Round {
+                wind: next_wind(self.round.wind),
+                number: 1,
+            };
+            return;
+        }
+        if outcome.dealer_repeats {
+            return;
+        }
+        self.dealer = Seat::new(((self.dealer.index() + 1) % 4) as u8);
+        if self.round.number < 4 {
+            self.round.number += 1;
+            return;
+        }
+        self.round = Round {
+            wind: next_wind(self.round.wind),
+            number: 1,
+        };
+    }
+
+    /// 終局するか。
+    fn should_end(&self, outcome: &RoundOutcome) -> bool {
+        if self.rules.busted_ends_match && self.scores.iter().any(|s| *s < 0) {
+            return true;
+        }
+        if self.round.wind == extension_wind(self.rules.length) {
+            return self.round.number == 4 || self.reached_return_score();
+        }
+        if !self.is_last_round() {
+            return false;
+        }
+        if !self.reached_return_score() {
+            return false;
+        }
+        if !outcome.dealer_repeats {
+            return true;
+        }
+        let can_stop = matches!(
+            outcome.reason,
+            ContinuationReason::DealerWin
+                | ContinuationReason::DealerTenpai
+                | ContinuationReason::NagashiMangan
+        );
+        can_stop && placements_of(&self.scores)[self.dealer.index()] == 1
+    }
+
+    fn reached_return_score(&self) -> bool {
+        self.scores.iter().any(|s| *s >= self.rules.return_score)
+    }
+
+    fn is_last_round(&self) -> bool {
+        self.round.number == 4 && self.round.wind == last_wind(self.rules.length)
+    }
+
+    /// 半荘を閉じる。
+    fn finish_match(&mut self) {
+        self.over = true;
+        self.engine = None;
+        self.pending.push(Event::RoundEnd {
+            scores: self.scores,
+            next: NextRound::MatchOver,
+            reason: self.last_reason,
+        });
+        self.pending.push(Event::MatchEnd {
+            final_scores: self.scores,
+            placements: placements_of(&self.scores),
+        });
+        self.pending.push(Event::SeedReveal {
+            seeds: self.seeds.iter().map(|s| s.to_hex()).collect(),
+        });
+    }
+
+    #[cfg(test)]
+    pub(crate) fn round_state(&self) -> &RoundState {
+        self.engine.as_ref().expect("局が動いている").state()
+    }
+
+    #[cfg(test)]
+    pub(crate) fn round_state_mut(&mut self) -> &mut RoundState {
+        self.engine.as_mut().expect("局が動いている").state_mut()
+    }
+
+    #[cfg(test)]
+    pub(crate) fn force_draw_turn(&mut self, seat: Seat, tile: Tile) {
+        self.engine
+            .as_mut()
+            .expect("局が動いている")
+            .force_draw_turn(seat, tile);
+    }
+
+    #[cfg(test)]
+    pub(crate) fn round_dealer(&self) -> Seat {
+        self.dealer
+    }
+
+    /// テストが持ち点を直接置くための入口。半荘側と局側の両方へ書く。
+    #[cfg(test)]
+    pub(crate) fn force_scores(&mut self, scores: [i32; 4]) {
+        self.scores = scores;
+        self.engine
+            .as_mut()
+            .expect("局が動いている")
+            .state_mut()
+            .scores = scores;
+    }
+
+    #[cfg(test)]
+    pub(crate) fn current_window_id(&self) -> u32 {
+        self.next_window_id
+    }
+
+    #[cfg(test)]
+    pub(crate) fn carried_sticks(&self) -> u8 {
+        self.riichi_sticks
+    }
+}
+
+/// 場風の順。東 → 南 → 西 → 北。
+fn next_wind(wind: Wind) -> Wind {
+    match wind {
+        Wind::East => Wind::South,
+        Wind::South => Wind::West,
+        Wind::West => Wind::North,
+        Wind::North => Wind::East,
+    }
+}
+
+/// 最終局の場風。半荘は南、東風戦は東。
+fn last_wind(length: MatchLength) -> Wind {
+    match length {
+        MatchLength::Hanchan => Wind::South,
+        MatchLength::Tonpuu => Wind::East,
+    }
+}
+
+/// 延長した場合の場風。半荘は西、東風戦は南。
+fn extension_wind(length: MatchLength) -> Wind {
+    next_wind(last_wind(length))
+}
+
+/// 順位。持ち点の多い順で、同点は席順が上位。
+fn placements_of(scores: &[i32; 4]) -> [u8; 4] {
+    let mut order: Vec<usize> = (0..4).collect();
+    order.sort_by(|a, b| scores[*b].cmp(&scores[*a]).then(a.cmp(b)));
+    let mut placements = [0u8; 4];
+    for (rank, seat) in order.into_iter().enumerate() {
+        placements[seat] = rank as u8 + 1;
+    }
+    placements
+}
+
+#[cfg(test)]
+mod match_tests {
+    use super::ending_tests::{make_tenpai, set_dealer_hand};
+    use super::*;
+    use protocol::command::Command;
+    use protocol::event::PlayerId;
+    use protocol::notation::parse_tile;
+    use protocol::ruleset::MatchLength;
+    use protocol::seat::Wind;
+
+    pub(super) fn players() -> [PlayerId; 4] {
+        [
+            PlayerId("p0".to_owned()),
+            PlayerId("p1".to_owned()),
+            PlayerId("p2".to_owned()),
+            PlayerId("p3".to_owned()),
+        ]
+    }
+
+    pub(super) fn seed_of(index: u8) -> Seed {
+        Seed::from_hex(&format!("{index:02x}").repeat(32)).expect("正しい hex")
+    }
+
+    pub(super) fn hanchan() -> MatchEngine {
+        MatchEngine::start(Ruleset::kin_no_ma(MatchLength::Hanchan), players(), 0)
+    }
+
+    /// 半荘は MatchStart から始まる。まだ局は始まっていない。
+    #[test]
+    fn a_match_opens_with_its_own_event() {
+        let mut game = hanchan();
+        let events = game.drain_events();
+        assert_eq!(events.len(), 1);
+        assert!(matches!(events[0], Event::MatchStart { .. }));
+        assert!(game.needs_seed());
+    }
+
+    /// 東1局から始まる。親は起家。
+    #[test]
+    fn the_first_round_is_east_one() {
+        let game = hanchan();
+        assert_eq!(
+            game.round(),
+            Round {
+                wind: Wind::East,
+                number: 1
+            }
+        );
+        assert_eq!(game.scores(), [25_000; 4]);
+    }
+
+    /// シードを渡すと局が始まる。
+    #[test]
+    fn giving_a_seed_starts_the_round() {
+        let mut game = hanchan();
+        game.drain_events();
+        game.begin_round(&seed_of(1), 0);
+
+        let events = game.drain_events();
+        assert!(matches!(events[0], Event::RoundStart { .. }));
+        assert!(!game.needs_seed(), "局が動いている間は要らない");
+    }
+
+    /// 局のイベントはそのまま流れてくる。
+    #[test]
+    fn round_events_pass_through() {
+        let mut game = hanchan();
+        game.drain_events();
+        game.begin_round(&seed_of(1), 0);
+        let events = game.drain_events();
+        // RoundStart / Deal / Draw / RequestAction
+        assert_eq!(events.len(), 4);
+        assert!(matches!(events[3], Event::RequestAction { .. }));
+    }
+
+    /// コマンドは動いている局へ委譲される。
+    #[test]
+    fn commands_reach_the_running_round() {
+        let mut game = hanchan();
+        game.drain_events();
+        game.begin_round(&seed_of(1), 0);
+        game.drain_events();
+
+        let tile = game.round_state().seat(Seat::new(0)).hand[0];
+        game.apply(
+            Seat::new(0),
+            Command::Discard {
+                tile,
+                riichi: false,
+            },
+            1_000,
+        )
+        .expect("切れる");
+        let events = game.drain_events();
+        assert!(events.iter().any(|e| matches!(e, Event::Discard { .. })));
+        // 打牌のあとは反応の待ちに入るので、局はまだ終わっていない。
+        assert!(!game.needs_seed());
+    }
+
+    /// 局が始まっていなければコマンドは受け付けない。
+    #[test]
+    fn commands_before_the_round_are_rejected() {
+        let mut game = hanchan();
+        assert_eq!(
+            game.apply(Seat::new(0), Command::Tsumo, 1_000),
+            Err(Reject::NotYourTurn)
+        );
+    }
+
+    /// 局が終わると RoundEnd が出る。
+    #[test]
+    fn a_finished_round_emits_its_end() {
+        let mut game = hanchan();
+        game.drain_events();
+        game.begin_round(&seed_of(1), 0);
+        game.drain_events();
+        finish_with_a_dealer_tsumo(&mut game);
+
+        let events = game.drain_events();
+        let Some(Event::RoundEnd { scores, reason, .. }) = events
+            .iter()
+            .find(|e| matches!(e, Event::RoundEnd { .. }))
+            .cloned()
+        else {
+            panic!("RoundEnd が出ていない: {events:?}");
+        };
+        assert_eq!(reason, ContinuationReason::DealerWin);
+        assert_eq!(scores.iter().sum::<i32>(), 100_000);
+    }
+
+    /// RoundEnd のあとは次のシードを待つ。
+    #[test]
+    fn the_match_waits_for_the_next_seed() {
+        let mut game = hanchan();
+        game.drain_events();
+        game.begin_round(&seed_of(1), 0);
+        game.drain_events();
+        finish_with_a_dealer_tsumo(&mut game);
+        game.drain_events();
+        assert!(game.needs_seed());
+    }
+
+    /// 局の結果が半荘の持ち点に反映される。
+    #[test]
+    fn the_match_takes_over_the_round_scores() {
+        let mut game = hanchan();
+        game.drain_events();
+        game.begin_round(&seed_of(1), 0);
+        game.drain_events();
+        finish_with_a_dealer_tsumo(&mut game);
+        game.drain_events();
+
+        assert!(game.scores()[0] > 25_000, "親が和了した");
+        assert_eq!(game.scores().iter().sum::<i32>(), 100_000);
+    }
+
+    /// 流局かどうかを局が伝える。本場の進み方が和了と違うためである。
+    #[test]
+    fn the_round_reports_whether_it_was_a_draw() {
+        let mut game = hanchan();
+        game.drain_events();
+        game.begin_round(&seed_of(1), 0);
+        game.drain_events();
+        finish_with_a_dealer_tsumo(&mut game);
+        assert!(!game.last_outcome().expect("終わっている").was_draw);
+    }
+
+    /// 途中流局は was_draw が立つ。
+    #[test]
+    fn an_abortive_draw_reports_itself_as_a_draw() {
+        let mut game = hanchan();
+        game.drain_events();
+        game.begin_round(&seed_of(1), 0);
+        game.drain_events();
+        set_dealer_hand(game.round_state_mut(), "19m19p19s12345677z");
+        game.apply(Seat::new(0), Command::Kyuushu, 1_000)
+            .expect("九種九牌を宣言できる");
+        assert!(game.last_outcome().expect("終わっている").was_draw);
+    }
+
+    /// いまの親にツモ和了させて局を終わらせる。
+    ///
+    /// **席0を決め打ちしない。**局が進むと親は移る。
+    /// イベントは drain しない。呼び出し側が `RoundEnd` を読むためである。
+    pub(super) fn finish_with_a_dealer_tsumo(game: &mut MatchEngine) {
+        let dealer = game.round_state().dealer;
+        make_tenpai(game.round_state_mut(), dealer);
+        game.force_draw_turn(dealer, parse_tile("6p").expect("正しい記法"));
+        game.apply(dealer, Command::Tsumo, 2_000)
+            .expect("ツモ和了できる");
+    }
+
+    /// いまの親の下家にツモ和了させる。親が流れる。
+    ///
+    /// こちらもイベントは drain しない。
+    pub(super) fn finish_with_a_child_tsumo(game: &mut MatchEngine) {
+        let dealer = game.round_state().dealer;
+        let child = Seat::new(((dealer.index() + 1) % 4) as u8);
+        make_tenpai(game.round_state_mut(), child);
+        game.force_draw_turn(child, parse_tile("6p").expect("正しい記法"));
+        game.apply(child, Command::Tsumo, 2_000)
+            .expect("ツモ和了できる");
+    }
+}
+
+#[cfg(test)]
+mod progression_tests {
+    use super::discard_tests::WAY_PAST_ANY_DEADLINE_MS;
+    use super::ending_tests::{clear_nagashi, drain_the_wall, set_dealer_hand};
+    use super::match_tests::{
+        finish_with_a_child_tsumo, finish_with_a_dealer_tsumo, hanchan, seed_of,
+    };
+    use super::*;
+    use protocol::command::Command;
+    use protocol::notation::{parse_hand, parse_tile};
+    use protocol::seat::Wind;
+
+    /// 局を1つ始める。
+    fn begin(game: &mut MatchEngine, index: u8) {
+        game.begin_round(&seed_of(index), 0);
+        game.drain_events();
+    }
+
+    fn next_of(game: &mut MatchEngine) -> NextRound {
+        let events = game.drain_events();
+        let Some(Event::RoundEnd { next, .. }) = events
+            .iter()
+            .find(|e| matches!(e, Event::RoundEnd { .. }))
+            .cloned()
+        else {
+            panic!("RoundEnd が出ていない: {events:?}");
+        };
+        next
+    }
+
+    /// 全員ノーテンの荒牌平局で局を終える。
+    ///
+    /// **和了で局を送ると点棒が動く。**その額はドラ次第で変わるので、
+    /// 「誰も返し点へ届かないまま何局も進める」テストが配牌に依存する。
+    /// 全員ノーテンの流局なら点棒はまったく動かない。
+    pub(super) fn finish_with_a_noten_draw(game: &mut MatchEngine) {
+        let dealer = game.round_state().dealer;
+        // 親は14枚、子は13枚。どちらも対子も塔子も無い散らばった形にする。
+        game.round_state_mut().seat_mut(dealer).hand =
+            parse_hand("147m258p369s12345z").expect("正しい記法");
+        for seat in Seat::ALL {
+            if seat == dealer {
+                continue;
+            }
+            game.round_state_mut().seat_mut(seat).hand =
+                parse_hand("147m258p369s1234z").expect("正しい記法");
+        }
+        clear_nagashi(game.round_state_mut());
+        drain_the_wall(game.round_state_mut());
+        game.apply(
+            dealer,
+            Command::Discard {
+                tile: parse_tile("5z").expect("正しい記法"),
+                riichi: false,
+            },
+            1_000,
+        )
+        .expect("切れる");
+        game.tick(WAY_PAST_ANY_DEADLINE_MS);
+        game.drain_events();
+    }
+
+    /// 親の和了は連荘。局は進まず本場が増える。
+    #[test]
+    fn a_dealer_win_repeats_the_round_with_one_more_honba() {
+        let mut game = hanchan();
+        game.drain_events();
+        begin(&mut game, 1);
+        finish_with_a_dealer_tsumo(&mut game);
+
+        assert_eq!(
+            next_of(&mut game),
+            NextRound::Next {
+                round: Round {
+                    wind: Wind::East,
+                    number: 1
+                },
+                dealer: Seat::new(0),
+                honba: 1,
+                riichi_sticks: 0,
+            }
+        );
+    }
+
+    /// 子の和了は親流れ。局が進み本場は0に戻る。
+    #[test]
+    fn a_child_win_moves_the_dealership_and_clears_the_honba() {
+        let mut game = hanchan();
+        game.drain_events();
+        begin(&mut game, 1);
+        finish_with_a_dealer_tsumo(&mut game);
+        next_of(&mut game);
+        begin(&mut game, 2);
+        finish_with_a_child_tsumo(&mut game);
+
+        assert_eq!(
+            next_of(&mut game),
+            NextRound::Next {
+                round: Round {
+                    wind: Wind::East,
+                    number: 2
+                },
+                dealer: Seat::new(1),
+                honba: 0,
+                riichi_sticks: 0,
+            }
+        );
+    }
+
+    /// 流局は親が流れても本場が増える。
+    #[test]
+    fn a_draw_adds_a_honba_even_when_the_dealership_moves() {
+        let mut game = hanchan();
+        game.drain_events();
+        begin(&mut game, 1);
+        // 親をノーテンにして荒牌平局へ持ち込む。
+        set_dealer_hand(game.round_state_mut(), "147m258p369s12345z");
+        clear_nagashi(game.round_state_mut());
+        drain_the_wall(game.round_state_mut());
+        game.apply(
+            Seat::new(0),
+            Command::Discard {
+                tile: parse_tile("5z").expect("正しい記法"),
+                riichi: false,
+            },
+            1_000,
+        )
+        .expect("切れる");
+        game.tick(WAY_PAST_ANY_DEADLINE_MS);
+
+        let NextRound::Next { honba, dealer, .. } = next_of(&mut game) else {
+            panic!("次局が決まっていない");
+        };
+        assert_eq!(honba, 1, "流局は本場が増える");
+        assert_eq!(dealer, Seat::new(1), "親ノーテンなので流れる");
+    }
+
+    /// 途中流局は親が続き、本場も増える。
+    #[test]
+    fn an_abortive_draw_repeats_with_one_more_honba() {
+        let mut game = hanchan();
+        game.drain_events();
+        begin(&mut game, 1);
+        set_dealer_hand(game.round_state_mut(), "19m19p19s12345677z");
+        game.apply(Seat::new(0), Command::Kyuushu, 1_000)
+            .expect("九種九牌を宣言できる");
+
+        assert_eq!(
+            next_of(&mut game),
+            NextRound::Next {
+                round: Round {
+                    wind: Wind::East,
+                    number: 1
+                },
+                dealer: Seat::new(0),
+                honba: 1,
+                riichi_sticks: 0,
+            }
+        );
+    }
+
+    /// 東4局で親が流れると南1局になる。
+    #[test]
+    fn the_round_wind_turns_after_the_fourth_round() {
+        let mut game = hanchan();
+        game.drain_events();
+        for index in 1..=4u8 {
+            begin(&mut game, index);
+            finish_with_a_noten_draw(&mut game);
+        }
+        assert_eq!(
+            game.round(),
+            Round {
+                wind: Wind::South,
+                number: 1
+            }
+        );
+        assert_eq!(game.round_dealer(), Seat::new(0), "一周して起家へ戻る");
+    }
+
+    /// 供託は局をまたいで持ち越される。
+    #[test]
+    fn riichi_sticks_carry_into_the_next_round() {
+        let mut game = hanchan();
+        game.drain_events();
+        begin(&mut game, 1);
+        // 親がリーチしてから流局させる。供託1本が残る。
+        set_dealer_hand(game.round_state_mut(), "234567m23478p22s1z");
+        game.apply(
+            Seat::new(0),
+            Command::Discard {
+                tile: parse_tile("1z").expect("正しい記法"),
+                riichi: true,
+            },
+            1_000,
+        )
+        .expect("リーチできる");
+        game.tick(WAY_PAST_ANY_DEADLINE_MS);
+        game.drain_events();
+        clear_nagashi(game.round_state_mut());
+        drain_the_wall(game.round_state_mut());
+        let tile = game.round_state().seat(Seat::new(1)).hand[0];
+        game.apply(
+            Seat::new(1),
+            Command::Discard {
+                tile,
+                riichi: false,
+            },
+            WAY_PAST_ANY_DEADLINE_MS + 1_000,
+        )
+        .expect("切れる");
+        game.tick(WAY_PAST_ANY_DEADLINE_MS * 2);
+
+        let NextRound::Next { riichi_sticks, .. } = next_of(&mut game) else {
+            panic!("次局が決まっていない");
+        };
+        assert_eq!(riichi_sticks, 1);
+    }
+
+    /// 次局は前局の続きの window_id から始まる。
+    #[test]
+    fn the_window_id_keeps_increasing_across_rounds() {
+        let mut game = hanchan();
+        game.drain_events();
+        begin(&mut game, 1);
+        finish_with_a_dealer_tsumo(&mut game);
+        next_of(&mut game);
+        let first_end = game.current_window_id();
+
+        // **`begin` は使わない。**開始イベントを捨ててしまうと、
+        // このテストが読みたい `RequestAction` が消える。
+        game.begin_round(&seed_of(2), 0);
+        let events = game.drain_events();
+        let Some(Event::RequestAction { window_id, .. }) = events
+            .iter()
+            .find(|e| matches!(e, Event::RequestAction { .. }))
+            .cloned()
+        else {
+            panic!("要求が出ていない: {events:?}");
+        };
+        assert_eq!(window_id, first_end, "採番が続いている");
+    }
+
+    /// 南4局を終えても誰も返し点に届かなければ西入する。
+    #[test]
+    fn nobody_reaching_the_return_score_forces_an_extension() {
+        let mut game = hanchan();
+        game.drain_events();
+        // 8局ぶん親を流して南4局まで進める。
+        // 全員ノーテンの流局なので点棒は動かない。
+        for index in 1..=8u8 {
+            begin(&mut game, index);
+            finish_with_a_noten_draw(&mut game);
+        }
+        assert_eq!(game.round().wind, Wind::West, "西入した");
+        assert_eq!(game.round().number, 1);
+    }
+}
+
+#[cfg(test)]
+mod ending_match_tests {
+    use super::discard_tests::WAY_PAST_ANY_DEADLINE_MS;
+    use super::ending_tests::{clear_nagashi, drain_the_wall, set_dealer_hand};
+    use super::match_tests::{
+        finish_with_a_child_tsumo, finish_with_a_dealer_tsumo, players, seed_of,
+    };
+    use super::progression_tests::finish_with_a_noten_draw;
+    use super::*;
+    use protocol::command::Command;
+    use protocol::notation::{parse_hand, parse_tile};
+    use protocol::ruleset::MatchLength;
+    use protocol::seat::Wind;
+
+    /// 東風戦。4局で終わるので終局まで回しやすい。
+    fn tonpuu() -> MatchEngine {
+        MatchEngine::start(Ruleset::kin_no_ma(MatchLength::Tonpuu), players(), 0)
+    }
+
+    fn match_end_of(events: &[Event]) -> ([i32; 4], [u8; 4]) {
+        let Some(Event::MatchEnd {
+            final_scores,
+            placements,
+        }) = events
+            .iter()
+            .find(|e| matches!(e, Event::MatchEnd { .. }))
+            .cloned()
+        else {
+            panic!("MatchEnd が出ていない: {events:?}");
+        };
+        (final_scores, placements)
+    }
+
+    /// 東4局まで進め、親をトップにしてから親に和了らせる。
+    ///
+    /// **持ち点を毎局そろえる。**配牌任せにすると、途中で誰かが返し点へ
+    /// 届いて予定より早く終局し、テストがシードに依存する。
+    fn run_to_the_end(game: &mut MatchEngine) {
+        for index in 1..=3u8 {
+            game.begin_round(&seed_of(index), 0);
+            game.drain_events();
+            finish_with_a_noten_draw(game);
+        }
+        game.begin_round(&seed_of(4), 0);
+        game.drain_events();
+        // 3回親が流れたので、東4局の親は席3。トップにしてアガリ止めを起こす。
+        assert_eq!(game.round_dealer(), Seat::new(3));
+        game.force_scores([20_000, 20_000, 20_000, 40_000]);
+        finish_with_a_dealer_tsumo(game);
+    }
+
+    /// 東4局で親がトップのまま和了れば終局する。
+    #[test]
+    fn the_match_ends_after_its_last_round() {
+        let mut game = tonpuu();
+        game.drain_events();
+        run_to_the_end(&mut game);
+        let events = game.drain_events();
+
+        assert!(game.is_over());
+        let (scores, _) = match_end_of(&events);
+        assert_eq!(scores.iter().sum::<i32>(), 100_000);
+    }
+
+    /// 終局すればシードをまとめて開示する。
+    #[test]
+    fn the_seeds_are_revealed_only_at_the_end() {
+        let mut game = tonpuu();
+        game.drain_events();
+        for index in 1..=3u8 {
+            game.begin_round(&seed_of(index), 0);
+            let events = game.drain_events();
+            assert!(
+                !events.iter().any(|e| matches!(e, Event::SeedReveal { .. })),
+                "局の途中で開示してはならない"
+            );
+            finish_with_a_noten_draw(&mut game);
+            let ended = game.drain_events();
+            assert!(
+                ended.is_empty() || !ended.iter().any(|e| matches!(e, Event::SeedReveal { .. })),
+                "局の終わりにも開示してはならない"
+            );
+        }
+        game.begin_round(&seed_of(4), 0);
+        game.drain_events();
+        game.force_scores([20_000, 20_000, 20_000, 40_000]);
+        finish_with_a_dealer_tsumo(&mut game);
+
+        let events = game.drain_events();
+        let Some(Event::SeedReveal { seeds }) = events
+            .iter()
+            .find(|e| matches!(e, Event::SeedReveal { .. }))
+            .cloned()
+        else {
+            panic!("SeedReveal が出ていない");
+        };
+        assert_eq!(seeds.len(), 4, "4局ぶん");
+        assert_eq!(seeds[0], seed_of(1).to_hex());
+    }
+
+    /// 終局後はコマンドもシードも受け付けない。
+    #[test]
+    fn a_finished_match_takes_nothing_more() {
+        let mut game = tonpuu();
+        game.drain_events();
+        run_to_the_end(&mut game);
+        game.drain_events();
+
+        assert!(!game.needs_seed(), "終局したのでシードは要らない");
+        assert_eq!(
+            game.apply(Seat::new(0), Command::Tsumo, 9_000),
+            Err(Reject::NotYourTurn)
+        );
+    }
+
+    /// 順位は持ち点の多い順。
+    #[test]
+    fn placements_follow_the_scores() {
+        let mut game = tonpuu();
+        game.drain_events();
+        run_to_the_end(&mut game);
+        let events = game.drain_events();
+
+        let (scores, placements) = match_end_of(&events);
+        let mut sorted = placements;
+        sorted.sort_unstable();
+        assert_eq!(sorted, [1, 2, 3, 4], "順位は1から4まで1つずつ");
+        for a in 0..4 {
+            for b in 0..4 {
+                if scores[a] > scores[b] {
+                    assert!(placements[a] < placements[b], "{scores:?} {placements:?}");
+                }
+            }
+        }
+    }
+
+    /// 同点は席順で決まる。起家に近いほうが上位。
+    ///
+    /// `run_to_the_end` は親を40,000点にしてから和了らせるので、
+    /// 和了額がドラで変わっても親は単独トップのまま終局する。
+    /// 子3人は同じ20,000点から同じ額を払うので同点になる。
+    #[test]
+    fn a_tie_is_broken_by_seat_order() {
+        let mut game = tonpuu();
+        game.drain_events();
+        run_to_the_end(&mut game);
+        let events = game.drain_events();
+
+        let (scores, placements) = match_end_of(&events);
+        assert_eq!(placements[3], 1, "和了した親が単独トップ");
+        assert_eq!(scores[0], scores[1], "子は同点");
+        assert_eq!(scores[1], scores[2]);
+        // 同点なので席順。
+        assert_eq!(placements[0], 2);
+        assert_eq!(placements[1], 3);
+        assert_eq!(placements[2], 4);
+    }
+
+    /// 誰かが0点未満になったら即終局する。
+    #[test]
+    fn a_busted_seat_ends_the_match_immediately() {
+        let mut game = tonpuu();
+        game.drain_events();
+        game.begin_round(&seed_of(1), 0);
+        game.drain_events();
+        // 席1を大きく減らしてから親に和了らせる。
+        // 親のツモは最低でも子から1300点ずつ取る。額はドラで増えるが、
+        // 500点しかない席1が負になることは変わらない。
+        game.force_scores([25_000, 500, 25_000, 49_500]);
+        finish_with_a_dealer_tsumo(&mut game);
+        let events = game.drain_events();
+
+        assert!(game.is_over(), "飛びで終局する");
+        assert!(events.iter().any(|e| matches!(e, Event::MatchEnd { .. })));
+        assert!(game.scores()[1] < 0);
+    }
+
+    /// 飛びを切っていれば続行する。
+    #[test]
+    fn a_ruleset_without_busting_keeps_playing() {
+        let mut game = MatchEngine::start(
+            Ruleset {
+                busted_ends_match: false,
+                ..Ruleset::kin_no_ma(MatchLength::Tonpuu)
+            },
+            players(),
+            0,
+        );
+        game.drain_events();
+        game.begin_round(&seed_of(1), 0);
+        game.drain_events();
+        game.force_scores([25_000, 500, 25_000, 49_500]);
+        finish_with_a_dealer_tsumo(&mut game);
+        game.drain_events();
+        assert!(!game.is_over());
+    }
+
+    /// 最終局で親が和了ってもトップでなければ続行する。
+    #[test]
+    fn a_dealer_win_without_the_lead_keeps_the_match_going() {
+        let mut game = tonpuu();
+        game.drain_events();
+        run_to_the_last_round(&mut game, 4);
+        // 親（席3）を最下位にしてから和了らせる。小さな手ではトップに届かない。
+        game.force_scores([15_000, 50_000, 20_000, 15_000]);
+        finish_with_a_dealer_tsumo(&mut game);
+        game.drain_events();
+        assert!(!game.is_over(), "アガリ止めはトップのときだけ");
+    }
+
+    /// 延長は無限に伸びない。
+    ///
+    /// 点棒を動かさない流局だけで送るので、誰も返し点へ届かない。
+    /// それでも東風戦は南4局で打ち切られる。
+    #[test]
+    fn the_extension_does_not_go_on_forever() {
+        let mut game = tonpuu();
+        game.drain_events();
+        let mut rounds = 0u32;
+        while !game.is_over() {
+            rounds += 1;
+            assert!(rounds < 40, "終局しない");
+            game.begin_round(&seed_of((rounds % 200) as u8), 0);
+            game.drain_events();
+            finish_with_a_noten_draw(&mut game);
+        }
+        assert_eq!(rounds, 8, "東4局＋南4局で打ち切る");
+        assert_eq!(game.round().wind, Wind::South);
+        assert_eq!(game.scores(), [25_000; 4], "点棒は動いていない");
+    }
+
+    /// 3局を点棒の動かない流局で送り、東4局へ入る。親は席3になる。
+    fn run_to_the_last_round(game: &mut MatchEngine, seed_index: u8) {
+        for index in 1..=3u8 {
+            game.begin_round(&seed_of(index), 0);
+            game.drain_events();
+            finish_with_a_noten_draw(game);
+        }
+        game.begin_round(&seed_of(seed_index), 0);
+        game.drain_events();
+        assert_eq!(game.round_dealer(), Seat::new(3));
+        assert_eq!(game.round().number, 4);
+    }
+
+    /// 最終局で親がテンパイの荒牌平局なら、親がトップのとき終局する。
+    #[test]
+    fn a_tenpai_dealer_on_top_stops_the_match() {
+        let mut game = tonpuu();
+        game.drain_events();
+        run_to_the_last_round(&mut game, 4);
+
+        set_dealer_hand(game.round_state_mut(), "234567m23478p22s1z");
+        for child in [Seat::new(0), Seat::new(1), Seat::new(2)] {
+            game.round_state_mut().seat_mut(child).hand =
+                parse_hand("147m258p369s1234z").expect("正しい記法");
+        }
+        game.force_scores([20_000, 20_000, 20_000, 40_000]);
+        clear_nagashi(game.round_state_mut());
+        drain_the_wall(game.round_state_mut());
+        game.apply(
+            Seat::new(3),
+            Command::Discard {
+                tile: parse_tile("1z").expect("正しい記法"),
+                riichi: false,
+            },
+            1_000,
+        )
+        .expect("切れる");
+        game.tick(WAY_PAST_ANY_DEADLINE_MS);
+        game.drain_events();
+        assert!(game.is_over(), "テンパイ止め");
+    }
+
+    /// 誰も返し点へ届いていなければ、親がトップでも延長する。
+    ///
+    /// アガリ止めは「半荘が終わる場面で親が連荘を選ばない」規則である。
+    /// 延長するなら終わらないので、止める場面ではない。
+    ///
+    /// **和了ではなく荒牌平局で作る。**和了の点数はドラ次第で変わるので、
+    /// 「30000点に届かない」という境界を置けない。テンパイ料なら
+    /// 親 +3000 / 子 各 -1000 と決まる。
+    #[test]
+    fn a_top_dealer_below_the_return_score_still_extends() {
+        let mut game = tonpuu();
+        game.drain_events();
+        run_to_the_last_round(&mut game, 4);
+
+        set_dealer_hand(game.round_state_mut(), "234567m23478p22s1z");
+        for child in [Seat::new(0), Seat::new(1), Seat::new(2)] {
+            game.round_state_mut().seat_mut(child).hand =
+                parse_hand("147m258p369s1234z").expect("正しい記法");
+        }
+        game.force_scores([25_000; 4]);
+        clear_nagashi(game.round_state_mut());
+        drain_the_wall(game.round_state_mut());
+        game.apply(
+            Seat::new(3),
+            Command::Discard {
+                tile: parse_tile("1z").expect("正しい記法"),
+                riichi: false,
+            },
+            1_000,
+        )
+        .expect("切れる");
+        game.tick(WAY_PAST_ANY_DEADLINE_MS);
+        game.drain_events();
+
+        assert_eq!(game.scores(), [24_000, 24_000, 24_000, 28_000]);
+        assert!(!game.is_over(), "誰も返し点へ届いていないので延長する");
+        assert_eq!(game.round().wind, Wind::South, "南入した");
+    }
+
+    /// 途中流局では止まらない。親が続いてもアガリ止めではない。
+    #[test]
+    fn an_abortive_draw_never_stops_the_match() {
+        let mut game = tonpuu();
+        game.drain_events();
+        run_to_the_last_round(&mut game, 4);
+
+        set_dealer_hand(game.round_state_mut(), "19m19p19s12345677z");
+        game.force_scores([20_000, 20_000, 20_000, 40_000]);
+        game.apply(Seat::new(3), Command::Kyuushu, 1_000)
+            .expect("九種九牌を宣言できる");
+        game.drain_events();
+        assert!(!game.is_over(), "途中流局は止めない");
+    }
+
+    /// 最終局で親が流れれば、その時点で終局する。
+    #[test]
+    fn the_dealership_moving_on_the_last_round_ends_the_match() {
+        let mut game = tonpuu();
+        game.drain_events();
+        run_to_the_last_round(&mut game, 4);
+
+        game.force_scores([40_000, 20_000, 20_000, 20_000]);
+        finish_with_a_child_tsumo(&mut game);
+        game.drain_events();
+        assert!(game.is_over(), "最終局で親が流れたら終わり");
+    }
+
+    /// 延長の途中でも、誰かが返し点へ届けばその局で終わる。
+    #[test]
+    fn reaching_the_return_score_ends_the_extension_early() {
+        let mut game = tonpuu();
+        game.drain_events();
+        for index in 1..=4u8 {
+            game.begin_round(&seed_of(index), 0);
+            game.drain_events();
+            finish_with_a_noten_draw(&mut game);
+        }
+        assert_eq!(
+            game.round(),
+            Round {
+                wind: Wind::South,
+                number: 1
+            },
+            "南入している"
+        );
+
+        game.begin_round(&seed_of(5), 0);
+        game.drain_events();
+        game.force_scores([40_000, 20_000, 20_000, 20_000]);
+        finish_with_a_child_tsumo(&mut game);
+        game.drain_events();
+        assert!(game.is_over(), "南1局でも返し点に届いていれば終わる");
+    }
+
+    /// 延長した風の4局目は、親が連荘しても打ち切る。
+    #[test]
+    fn the_extension_stops_even_on_a_dealer_repeat() {
+        let mut game = tonpuu();
+        game.drain_events();
+        for index in 1..=7u8 {
+            game.begin_round(&seed_of(index), 0);
+            game.drain_events();
+            finish_with_a_noten_draw(&mut game);
+        }
+        assert_eq!(
+            game.round(),
+            Round {
+                wind: Wind::South,
+                number: 4
+            }
+        );
+        assert_eq!(game.round_dealer(), Seat::new(3));
+
+        game.begin_round(&seed_of(8), 0);
+        game.drain_events();
+        // 親をトップにしない。アガリ止めの条件は満たさないが、
+        // 延長の4局目なので打ち切られる。
+        game.force_scores([40_000, 20_000, 20_000, 20_000]);
+        finish_with_a_dealer_tsumo(&mut game);
+        game.drain_events();
+        assert!(game.is_over(), "延長の4局目は連荘でも打ち切る");
+    }
+
+    /// 半荘でも同じ条件で終局する。最終局の場風が違うだけである。
+    #[test]
+    fn a_hanchan_ends_on_its_own_last_round() {
+        let mut game = MatchEngine::start(Ruleset::kin_no_ma(MatchLength::Hanchan), players(), 0);
+        game.drain_events();
+        for index in 1..=7u8 {
+            game.begin_round(&seed_of(index), 0);
+            game.drain_events();
+            finish_with_a_noten_draw(&mut game);
+        }
+        assert_eq!(
+            game.round(),
+            Round {
+                wind: Wind::South,
+                number: 4
+            }
+        );
+
+        game.begin_round(&seed_of(8), 0);
+        game.drain_events();
+        game.force_scores([40_000, 20_000, 20_000, 20_000]);
+        finish_with_a_child_tsumo(&mut game);
+        game.drain_events();
+        assert!(game.is_over(), "南4局で誰かが届いていれば終わる");
+    }
+
+    /// 東1局から終局まで、ツモ切りだけで通せる。
+    #[test]
+    fn a_whole_match_runs_on_tsumogiri() {
+        let mut game = tonpuu();
+        game.drain_events();
+        let mut now = 1_000u64;
+        let mut seed_index = 1u8;
+        // 1局は最大で 70 ツモ前後あり、`tick` は打牌と反応を別々に進める。
+        // 東風戦が延長まで伸びると8局になるので、余裕をもって上限を置く。
+        for _ in 0..5_000 {
+            if game.is_over() {
+                break;
+            }
+            if game.needs_seed() {
+                game.begin_round(&seed_of(seed_index), now);
+                seed_index = seed_index.wrapping_add(1);
+                game.drain_events();
+                continue;
+            }
+            now += WAY_PAST_ANY_DEADLINE_MS;
+            game.tick(now);
+            game.drain_events();
+        }
+        assert!(game.is_over(), "終局しなかった");
+        assert_eq!(
+            game.scores().iter().sum::<i32>() + game.carried_sticks() as i32 * 1_000,
+            100_000
+        );
+    }
+}
+
 #[cfg(test)]
 mod ending_tests {
     // 兄弟モジュールの項目は use super::*; では入らない。明示して取り込む。
@@ -4150,14 +5394,12 @@ mod ending_tests {
     /// **枚数を保つ。**親は配牌のあとツモ済みなので14枚である。13枚の形へ
     /// 差し替えると1枚消えるので、あふれた分は捨て台の河へ移す。
     /// 河の牌も `assert_tiles_conserved` の数え上げに入る。
-    pub(super) fn make_tenpai(engine: &mut RoundEngine, seat: Seat) {
-        assert_ne!(seat, sink(), "捨て台の席は書き換えられない");
+    pub(super) fn make_tenpai(state: &mut RoundState, seat: Seat) {
         let target = parse_hand("234567m23478p22s").expect("正しい記法");
-        let old = std::mem::replace(&mut engine.state_mut().seat_mut(seat).hand, target);
+        let old = std::mem::replace(&mut state.seat_mut(seat).hand, target);
         for tile in old.into_iter().skip(13) {
-            engine
-                .state_mut()
-                .seat_mut(sink())
+            state
+                .seat_mut(sink_for(seat))
                 .river
                 .push(crate::state::Discarded {
                     tile,
@@ -4166,7 +5408,7 @@ mod ending_tests {
                     riichi_declaration: false,
                 });
         }
-        crate::invariant::assert_tiles_conserved(engine.state());
+        crate::invariant::assert_tiles_conserved(state);
     }
 
     /// 流し満貫の資格を全席から落とす。
@@ -4175,9 +5417,9 @@ mod ending_tests {
     /// 資格が消えるのは中張牌を切ったときと、自分の捨て牌を鳴かれたときだけ。
     /// テストでは誰もほとんど打牌しないので、明示的に落とさないと全員が
     /// 流し満貫になり、荒牌平局のテンパイ料が発生しない。
-    fn clear_nagashi(engine: &mut RoundEngine) {
+    pub(super) fn clear_nagashi(state: &mut RoundState) {
         for seat in Seat::ALL {
-            engine.state_mut().seat_mut(seat).nagashi_alive = false;
+            state.seat_mut(seat).nagashi_alive = false;
         }
     }
 
@@ -4187,21 +5429,17 @@ mod ending_tests {
     /// 手牌 + 副露 + 鳴かれていない河 + 山 の合計が136であることを要求する
     /// （`invariant.rs`）。山から引いた分は、どこかの河へ入れて数を保つ。
     /// 捨て台には席3を使う。テスト対象にしない席である。
-    fn drain_the_wall(engine: &mut RoundEngine) {
-        while engine.state().wall.live_remaining() > 0 {
-            let tile = engine.state_mut().wall.draw().expect("残っている");
-            engine
-                .state_mut()
-                .seat_mut(sink())
-                .river
-                .push(crate::state::Discarded {
-                    tile,
-                    manner: DiscardManner::Tsumogiri,
-                    called_by: None,
-                    riichi_declaration: false,
-                });
+    pub(super) fn drain_the_wall(state: &mut RoundState) {
+        while state.wall.live_remaining() > 0 {
+            let tile = state.wall.draw().expect("残っている");
+            state.seat_mut(sink()).river.push(crate::state::Discarded {
+                tile,
+                manner: DiscardManner::Tsumogiri,
+                called_by: None,
+                riichi_declaration: false,
+            });
         }
-        crate::invariant::assert_tiles_conserved(engine.state());
+        crate::invariant::assert_tiles_conserved(state);
     }
 
     /// 捨て台の席。牌の総数を保つための行き先に使う。
@@ -4209,12 +5447,17 @@ mod ending_tests {
         Seat::new(3)
     }
 
+    /// 牌の退避先。対象の席とは必ず別になる。
+    fn sink_for(seat: Seat) -> Seat {
+        Seat::new(((seat.index() + 1) % 4) as u8)
+    }
+
     /// ロンすると Agari が出て、局が終わる。
     #[test]
     fn a_ron_ends_the_round() {
         let mut engine = start_at(0);
         engine.drain_events();
-        make_tenpai(&mut engine, Seat::new(1));
+        make_tenpai(engine.state_mut(), Seat::new(1));
         let winning = parse_tile("6p").expect("正しい記法");
         engine.state_mut().seat_mut(Seat::new(0)).hand[0] = winning;
 
@@ -4267,7 +5510,7 @@ mod ending_tests {
     fn a_ron_moves_points_without_creating_any() {
         let mut engine = start_at(0);
         engine.drain_events();
-        make_tenpai(&mut engine, Seat::new(1));
+        make_tenpai(engine.state_mut(), Seat::new(1));
         let winning = parse_tile("6p").expect("正しい記法");
         engine.state_mut().seat_mut(Seat::new(0)).hand[0] = winning;
         engine
@@ -4318,7 +5561,7 @@ mod ending_tests {
             0,
         );
         engine.drain_events();
-        make_tenpai(&mut engine, Seat::new(1));
+        make_tenpai(engine.state_mut(), Seat::new(1));
         let winning = parse_tile("6p").expect("正しい記法");
         engine.state_mut().seat_mut(Seat::new(0)).hand[0] = winning;
         engine
@@ -4359,7 +5602,7 @@ mod ending_tests {
     fn a_tsumo_ends_the_round() {
         let mut engine = start_at(0);
         engine.drain_events();
-        make_tenpai(&mut engine, Seat::new(0));
+        make_tenpai(engine.state_mut(), Seat::new(0));
         engine.force_draw_turn(Seat::new(0), parse_tile("6p").expect("正しい記法"));
 
         engine
@@ -4383,7 +5626,7 @@ mod ending_tests {
     fn a_dealer_win_repeats_the_dealership() {
         let mut engine = start_at(0);
         engine.drain_events();
-        make_tenpai(&mut engine, Seat::new(0));
+        make_tenpai(engine.state_mut(), Seat::new(0));
         engine.force_draw_turn(Seat::new(0), parse_tile("6p").expect("正しい記法"));
         engine
             .apply(Seat::new(0), Command::Tsumo, 1_000)
@@ -4398,7 +5641,7 @@ mod ending_tests {
     fn an_unanswered_turn_wins_when_it_can() {
         let mut engine = start_at(0);
         engine.drain_events();
-        make_tenpai(&mut engine, Seat::new(0));
+        make_tenpai(engine.state_mut(), Seat::new(0));
         engine.force_draw_turn(Seat::new(0), parse_tile("6p").expect("正しい記法"));
 
         engine.tick(WAY_PAST_ANY_DEADLINE_MS);
@@ -4419,7 +5662,7 @@ mod ending_tests {
     fn a_seat_without_a_winning_hand_cannot_declare_tsumo() {
         let mut engine = start_at(0);
         engine.drain_events();
-        make_tenpai(&mut engine, Seat::new(0));
+        make_tenpai(engine.state_mut(), Seat::new(0));
         engine.force_draw_turn(Seat::new(0), parse_tile("1z").expect("正しい記法"));
         assert_eq!(
             engine.apply(Seat::new(0), Command::Tsumo, 1_000),
@@ -4432,7 +5675,7 @@ mod ending_tests {
     fn a_non_dealer_win_moves_the_dealership() {
         let mut engine = start_at(0);
         engine.drain_events();
-        make_tenpai(&mut engine, Seat::new(1));
+        make_tenpai(engine.state_mut(), Seat::new(1));
         let winning = parse_tile("6p").expect("正しい記法");
         engine.state_mut().seat_mut(Seat::new(0)).hand[0] = winning;
         engine
@@ -4466,8 +5709,8 @@ mod ending_tests {
     fn an_empty_wall_ends_the_round_in_a_draw() {
         let mut engine = start_at(0);
         engine.drain_events();
-        clear_nagashi(&mut engine);
-        drain_the_wall(&mut engine);
+        clear_nagashi(engine.state_mut());
+        drain_the_wall(engine.state_mut());
 
         let seat = Seat::new(0);
         let tile = engine.state().seat(seat).hand[0];
@@ -4502,9 +5745,9 @@ mod ending_tests {
     fn the_noten_penalty_balances() {
         let mut engine = start_at(0);
         engine.drain_events();
-        make_tenpai(&mut engine, Seat::new(1));
-        clear_nagashi(&mut engine);
-        drain_the_wall(&mut engine);
+        make_tenpai(engine.state_mut(), Seat::new(1));
+        clear_nagashi(engine.state_mut());
+        drain_the_wall(engine.state_mut());
 
         let seat = Seat::new(0);
         let tile = engine.state().seat(seat).hand[0];
@@ -4544,8 +5787,8 @@ mod ending_tests {
             0,
         );
         engine.drain_events();
-        clear_nagashi(&mut engine);
-        drain_the_wall(&mut engine);
+        clear_nagashi(engine.state_mut());
+        drain_the_wall(engine.state_mut());
         let seat = Seat::new(0);
         let tile = engine.state().seat(seat).hand[0];
         engine
@@ -4570,9 +5813,9 @@ mod ending_tests {
     fn a_ron_on_the_last_discard_beats_the_draw() {
         let mut engine = start_at(0);
         engine.drain_events();
-        make_tenpai(&mut engine, Seat::new(1));
-        clear_nagashi(&mut engine);
-        drain_the_wall(&mut engine);
+        make_tenpai(engine.state_mut(), Seat::new(1));
+        clear_nagashi(engine.state_mut());
+        drain_the_wall(engine.state_mut());
 
         let winning = parse_tile("6p").expect("正しい記法");
         engine.state_mut().seat_mut(Seat::new(0)).hand[0] = winning;
@@ -4610,9 +5853,9 @@ mod ending_tests {
         let mut engine = start_at(0);
         engine.drain_events();
         // 席2だけ幺九牌しか切っていないことにする。
-        clear_nagashi(&mut engine);
+        clear_nagashi(engine.state_mut());
         engine.state_mut().seat_mut(Seat::new(2)).nagashi_alive = true;
-        drain_the_wall(&mut engine);
+        drain_the_wall(engine.state_mut());
         let seat = Seat::new(0);
         let tile = engine.state().seat(seat).hand[0];
         engine
@@ -4649,8 +5892,8 @@ mod ending_tests {
     ///
     /// 切る牌を引数で受けるのは、テンパイを保つかどうかを狙って決めるためである。
     fn run_to_exhaustive_draw(engine: &mut RoundEngine, discard: Tile) {
-        clear_nagashi(engine);
-        drain_the_wall(engine);
+        clear_nagashi(engine.state_mut());
+        drain_the_wall(engine.state_mut());
         engine
             .apply(
                 Seat::new(0),
@@ -4668,11 +5911,12 @@ mod ending_tests {
 
     /// 親の手を14枚の指定した形にする。親は配牌後にツモ済みなので14枚であり、
     /// 14枚を14枚に差し替えるだけなら牌の総数は変わらない。
-    pub(super) fn set_dealer_hand(engine: &mut RoundEngine, notation: &str) {
+    pub(super) fn set_dealer_hand(state: &mut RoundState, notation: &str) {
         let hand = parse_hand(notation).expect("正しい記法");
         assert_eq!(hand.len(), 14, "親の手は14枚である");
-        assert_eq!(engine.state().seat(Seat::new(0)).hand.len(), 14);
-        engine.state_mut().seat_mut(Seat::new(0)).hand = hand;
+        let dealer = state.dealer;
+        assert_eq!(state.seat(dealer).hand.len(), 14);
+        state.seat_mut(dealer).hand = hand;
     }
 
     /// 親がテンパイなら連荘する。
@@ -4681,7 +5925,7 @@ mod ending_tests {
         let mut engine = start_at(0);
         engine.drain_events();
         // 1z を切れば 234567m 23478p 22s の 6p/9p 待ちが残る。
-        set_dealer_hand(&mut engine, "234567m23478p22s1z");
+        set_dealer_hand(engine.state_mut(), "234567m23478p22s1z");
         run_to_exhaustive_draw(&mut engine, parse_tile("1z").expect("正しい記法"));
 
         let outcome = engine.outcome().expect("終わっている");
@@ -4695,7 +5939,7 @@ mod ending_tests {
         let mut engine = start_at(0);
         engine.drain_events();
         // 対子も塔子も無い散らばった形。5z を切っても向聴数は変わらない。
-        set_dealer_hand(&mut engine, "147m258p369s12345z");
+        set_dealer_hand(engine.state_mut(), "147m258p369s12345z");
         run_to_exhaustive_draw(&mut engine, parse_tile("5z").expect("正しい記法"));
 
         let outcome = engine.outcome().expect("終わっている");
@@ -4708,8 +5952,8 @@ mod ending_tests {
     fn a_nagashi_reports_its_own_reason() {
         let mut engine = start_at(0);
         engine.drain_events();
-        clear_nagashi(&mut engine);
-        drain_the_wall(&mut engine);
+        clear_nagashi(engine.state_mut());
+        drain_the_wall(engine.state_mut());
         engine.state_mut().seat_mut(Seat::new(2)).nagashi_alive = true;
         let seat = Seat::new(0);
         let tile = engine.state().seat(seat).hand[0];
@@ -4755,8 +5999,8 @@ mod ending_tests {
         );
         engine.drain_events();
         // 席1と席2の両方が 6p でロンできる形にする。
-        make_tenpai(&mut engine, Seat::new(1));
-        make_tenpai(&mut engine, Seat::new(2));
+        make_tenpai(engine.state_mut(), Seat::new(1));
+        make_tenpai(engine.state_mut(), Seat::new(2));
         let winning = parse_tile("6p").expect("正しい記法");
         engine.state_mut().seat_mut(Seat::new(0)).hand[0] = winning;
         engine
@@ -4824,7 +6068,7 @@ mod ending_tests {
     fn a_response_after_its_own_deadline_is_rejected() {
         let mut engine = start_at(0);
         engine.drain_events();
-        make_tenpai(&mut engine, Seat::new(1));
+        make_tenpai(engine.state_mut(), Seat::new(1));
         let winning = parse_tile("6p").expect("正しい記法");
         engine.state_mut().seat_mut(Seat::new(0)).hand[0] = winning;
         engine
@@ -4888,7 +6132,7 @@ mod ending_tests {
     fn a_response_for_another_window_is_rejected() {
         let mut engine = start_at(0);
         engine.drain_events();
-        make_tenpai(&mut engine, Seat::new(1));
+        make_tenpai(engine.state_mut(), Seat::new(1));
         let winning = parse_tile("6p").expect("正しい記法");
         engine.state_mut().seat_mut(Seat::new(0)).hand[0] = winning;
         engine
@@ -4934,8 +6178,8 @@ mod ending_tests {
     fn a_declined_ron_is_recorded_even_when_someone_else_wins() {
         let mut engine = start_at(0);
         engine.drain_events();
-        make_tenpai(&mut engine, Seat::new(1));
-        make_tenpai(&mut engine, Seat::new(2));
+        make_tenpai(engine.state_mut(), Seat::new(1));
+        make_tenpai(engine.state_mut(), Seat::new(2));
         let winning = parse_tile("6p").expect("正しい記法");
         engine.state_mut().seat_mut(Seat::new(0)).hand[0] = winning;
         engine
@@ -5005,7 +6249,7 @@ mod ending_tests {
             0,
         );
         engine.drain_events();
-        make_tenpai(&mut engine, Seat::new(1));
+        make_tenpai(engine.state_mut(), Seat::new(1));
         let winning = parse_tile("6p").expect("正しい記法");
         engine.state_mut().seat_mut(Seat::new(0)).hand[0] = winning;
         engine
@@ -5040,7 +6284,7 @@ mod ending_tests {
     fn a_finished_round_rejects_further_commands() {
         let mut engine = start_at(0);
         engine.drain_events();
-        make_tenpai(&mut engine, Seat::new(1));
+        make_tenpai(engine.state_mut(), Seat::new(1));
         let winning = parse_tile("6p").expect("正しい記法");
         engine.state_mut().seat_mut(Seat::new(0)).hand[0] = winning;
         engine
