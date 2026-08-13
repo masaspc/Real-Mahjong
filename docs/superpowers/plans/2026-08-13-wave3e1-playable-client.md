@@ -569,6 +569,51 @@ describe("盤面の組み立て", () => {
     expect(state.finalScores).toEqual([30000, 25000, 24000, 21000]);
   });
 
+  it("カンの宣言だけでは盤面が動かない", () => {
+    // **KanDeclared は宣言。**成立は直後の Call が運ぶ。ここで手牌を
+    // 減らすと、槍槓で不成立になったときに戻せない。
+    const before = fold([roundStart, deal]);
+    const after = fold([
+      roundStart,
+      deal,
+      { type: "kan_declared", seat: 0, kind: "ankan", tile: 5 },
+    ]);
+    expect(after.hand).toEqual(before.hand);
+    expect(after.seats[0]?.melds).toHaveLength(0);
+    expect(after.seats[0]?.river).toHaveLength(0);
+  });
+
+  it("シードの開示では盤面が動かない", () => {
+    const before = fold([roundStart, deal]);
+    const after = fold([roundStart, deal, { type: "seed_reveal", seeds: ["abc"] }]);
+    expect(after.hand).toEqual(before.hand);
+    expect(after.scores).toEqual(before.scores);
+  });
+
+  it("リーチ後の局終了でサーバの確定点に揃う", () => {
+    // **accepted で一時的に動かした点数は、round_end が上書きする。**
+    // 二重に引かないことをここで固定する。
+    const state = fold([
+      roundStart,
+      deal,
+      { type: "riichi", seat: 2, step: "declare" },
+      { type: "riichi", seat: 2, step: "accepted" },
+      {
+        type: "round_end",
+        scores: [25000, 25000, 24000, 26000],
+        next: {
+          type: "next",
+          round: { wind: "East", number: 2 },
+          dealer: 1,
+          honba: 0,
+          riichi_sticks: 0,
+        },
+        reason: "dealer_loss",
+      },
+    ]);
+    expect(state.scores).toEqual([25000, 25000, 24000, 26000]);
+  });
+
   it("連番を覚える", () => {
     const state = fold([roundStart, deal]);
     expect(state.lastSeq).not.toBeNull();
@@ -922,13 +967,97 @@ export function apply(
 - [ ] **Step 4: 通ることを確かめる**
 
 Run: `pnpm --dir apps/web test state`
-Expected: 23 passed
+Expected: 26 passed
 
-- [ ] **Step 5: コミット**
+- [ ] **Step 5: 本物の半荘で畳んで確かめる**
+
+`apps/web/src/game/__fixtures__/` に、実エンジンが吐いた半荘2回ぶんの
+イベント列（席0の視点、1,304件と1,677件）が既に置いてある。
+`crates/server/examples/dump_match.rs` が生成したものである。
+
+**作った例だけでは、組み合わせで壊れる誤りが残る。**通しで畳んで、
+全ステップで枚数が整合することを確かめる。
+
+`apps/web/src/game/replay.test.ts`:
+
+```typescript
+import { describe, expect, it } from "vitest";
+
+// **`?raw` で読む。**`node:fs` を使うと `@types/node` が要る。
+import seed1 from "./__fixtures__/match-seed1.jsonl?raw";
+import seed3 from "./__fixtures__/match-seed3.jsonl?raw";
+import type { ClientEventEnvelope } from "../protocol/ClientEventEnvelope";
+import { apply, emptyState } from "./state";
+
+const FIXTURES: Record<string, string> = {
+  "match-seed1.jsonl": seed1,
+  "match-seed3.jsonl": seed3,
+};
+
+function load(name: string): ClientEventEnvelope[] {
+  const text = FIXTURES[name];
+  if (text === undefined) {
+    throw new Error(`牌譜が無い: ${name}`);
+  }
+  return text
+    .trim()
+    .split("\n")
+    .map((line: string) => JSON.parse(line) as ClientEventEnvelope);
+}
+
+/** 副露1つにつき手の中の3枚ぶんが外へ出る。 */
+function concealedTarget(melds: number): number {
+  return 13 - melds * 3;
+}
+
+describe.each(["match-seed1.jsonl", "match-seed3.jsonl"])("実際の半荘 %s を畳む", (file) => {
+  it("自分の持ち牌が常に整合する", () => {
+    const events = load(file);
+    let state = emptyState(0);
+    const problems: string[] = [];
+
+    for (const envelope of events) {
+      state = apply(state, envelope, 0);
+      if (state.hand.length === 0) continue;
+      const concealed = state.hand.length + (state.drawn === null ? 0 : 1);
+      const target = concealedTarget(state.seats[0]?.melds.length ?? 0);
+      // ツモってから切るまでは1枚多い。
+      if (concealed !== target && concealed !== target + 1) {
+        problems.push(`seq=${envelope.seq} ${envelope.event.type}: 持ち牌${concealed} 期待${target}か${target + 1}`);
+      }
+    }
+    expect(problems.slice(0, 5)).toEqual([]);
+  });
+
+  it("他家の枚数が常に整合する", () => {
+    const events = load(file);
+    let state = emptyState(0);
+    const problems: string[] = [];
+
+    for (const envelope of events) {
+      state = apply(state, envelope, 0);
+      for (let i = 1; i < 4; i += 1) {
+        const seat = state.seats[i];
+        if (!seat || seat.handSize === 0) continue;
+        const target = concealedTarget(seat.melds.length);
+        if (seat.handSize !== target && seat.handSize !== target + 1) {
+          problems.push(`seq=${envelope.seq} ${envelope.event.type}: 席${i} ${seat.handSize}枚 期待${target}か${target + 1}`);
+        }
+      }
+    }
+    expect(problems.slice(0, 5)).toEqual([]);
+  });
+});
+```
+
+Run: `pnpm --dir apps/web test replay`
+Expected: 4 passed
+
+- [ ] **Step 6: コミット**
 
 ```bash
 pnpm --dir apps/web typecheck
-git add apps/web/src/game/state.ts apps/web/src/game/state.test.ts
+git add apps/web/src/game/state.ts apps/web/src/game/state.test.ts apps/web/src/game/replay.test.ts
 git commit -m "feat(web): ClientEvent から盤面を組み立てる
 
 描画と状態を分ける。**状態の組み立てはブラウザに依存しない純粋な
@@ -936,6 +1065,17 @@ git commit -m "feat(web): ClientEvent から盤面を組み立てる
 
 自分のツモ牌を手牌と分けて持つのは、ツモ切りと手出しを描き分ける
 ため。鳴かれた牌は打った席の河から取り除く。"
+```
+
+---
+
+**`?raw` の型宣言を足す。**`apps/web/src/vite-env.d.ts` を作る。
+
+```typescript
+declare module "*.jsonl?raw" {
+  const content: string;
+  export default content;
+}
 ```
 
 ---
@@ -1177,11 +1317,17 @@ cargo run -p server --bin serve
 
 1. 配牌 13 枚と親のツモが見える
 2. 自分の番に手牌の牌を押すと切れて、CPU 3人が打ち返してくる
-3. 鳴ける場面でボタンが出て、押すと鳴ける
-4. リーチが宣言でき、宣言牌が横向きに見える
-5. 和了ると点数が動く
-6. **ブラウザを再読み込みしても、同じ局の続きから始まる**
-7. 半荘が終わると順位が出る
+3. **チーとポンができる**（`call_response` を送る）
+4. **大明槓ができる**（`call_response` の `kan`）
+5. **暗槓と加槓ができる**（`call_response` ではなく `{type:"ankan", kind}` と `{type:"kakan", tile}` を送る。**送り方が違う。**）
+6. 「見送り」で鳴きを流せる
+7. リーチが宣言でき、宣言牌が横向きに見える
+8. **自分でツモとロンが選べて、受理される**（CPU の和了を見るだけでは足りない）
+9. 和了ると点数が動く
+10. **ブラウザを再読み込みしても、同じ局の続きから始まる**
+11. 半荘が終わると順位が出る
+
+3〜5 と 8 は、その場面が来るまで何局か打つ必要がある。**出るまで打つこと。**九種九牌は滅多に出ないので、出たら確かめる程度でよい。
 
 **どれか1つでもできなければ、このウェーブは目的を果たしていない。**止めて報告すること。
 
