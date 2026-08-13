@@ -1213,7 +1213,11 @@ mod ending_match_tests {
         game.drain_events();
         run_to_the_last_round(&mut game, 4);
         // 親（席3）を最下位にしてから和了らせる。小さな手ではトップに届かない。
-        game.force_scores([1_000, 50_000, 25_000, 24_000]);
+        // **どの席も和了の支払いで飛ばない額にする。**1,000点の席を置くと、
+        // 親のツモで必ず0点未満になり、飛びの判定が先に効いて終局する。
+        // 見たいのは「親がトップでなければ止めない」ことなので、
+        // 飛びが起きない配分にする。
+        game.force_scores([15_000, 50_000, 20_000, 15_000]);
         finish_with_a_dealer_tsumo(&mut game);
         game.drain_events();
         assert!(!game.is_over(), "アガリ止めはトップのときだけ");
