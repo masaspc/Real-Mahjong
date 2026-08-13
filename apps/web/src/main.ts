@@ -1,33 +1,39 @@
-import type { ClientEvent } from "./protocol/ClientEvent";
-import type { Command } from "./protocol/Command";
-import type { Tile } from "./protocol/Tile";
+import { apply, emptyState } from "./game/state";
+import type { GameState } from "./game/state";
+import { connect } from "./net/connection";
+import { renderBoard } from "./ui/board";
+import "./ui/board.css";
 
-/**
- * 生成された型が期待どおりの形であることを、コンパイル時に確かめるための足場。
- * protocol 側の変更で形が崩れたら typecheck が落ちる。
- */
-export function describeEvent(event: ClientEvent): string {
-  return event.type;
+function tableId(): string {
+  const key = "real-mahjong.table";
+  let id = localStorage.getItem(key);
+  if (!id) {
+    id = Math.random().toString(36).slice(2, 10);
+    localStorage.setItem(key, id);
+  }
+  return id;
 }
 
-export function discardCommand(tile: Tile, riichi: boolean): Command {
-  return { type: "discard", tile, riichi };
-}
+const root = document.querySelector<HTMLElement>("#app");
+if (!root) throw new Error("#app が無い");
 
-export function respondPass(windowId: number): Command {
-  return {
-    type: "call_response",
-    window_id: windowId,
-    response: { type: "pass" },
-  };
-}
+let state: GameState = emptyState(0);
+const connection = connect({
+  base: `ws://${location.host}/ws`,
+  table: tableId(),
+  lastSeq: () => state.lastSeq,
+  onEvent(envelope) {
+    state = apply(state, envelope, performance.now());
+    renderBoard(root, state, (command) => connection.send(command));
+  },
+  onStatus(text) {
+    document.title = `麻雀 — ${text}`;
+  },
+});
 
-/**
- * 自席のツモ牌のみが Some になる。他家のツモは null で届く。
- * この形が崩れたら、視界フィルタの前提が壊れているということ。
- */
-export function drawnTile(event: ClientEvent): Tile | null {
-  return event.type === "draw" ? event.tile : null;
-}
+setInterval(() => renderBoard(root, state, (command) => connection.send(command)), 100);
 
-document.querySelector("#app")!.textContent = "Real Mahjong";
+(globalThis as unknown as { newTable: () => void }).newTable = () => {
+  localStorage.removeItem("real-mahjong.table");
+  location.reload();
+};

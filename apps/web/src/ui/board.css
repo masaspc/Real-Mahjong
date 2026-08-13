@@ -1,0 +1,30 @@
+:root { font-family: system-ui, sans-serif; color: #f7f4df; background: #153e2d; }
+* { box-sizing: border-box; }
+body { margin: 0; }
+button { font: inherit; }
+.board { max-width: 1180px; min-height: 100vh; margin: auto; padding: 16px; display: grid; gap: 14px; }
+.summary, .opponents, .hand-row, .actions, .melds { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; }
+.summary { padding: 10px; background: #102a20; }
+.summary .action { margin-left: auto; }
+.opponents { align-items: stretch; }
+.seat { flex: 1 1 280px; min-width: 0; padding: 10px; border: 1px solid #8db09b; background: #1c513b; }
+.seat h2, .my-hand h2 { margin: 0 0 8px; font-size: 1rem; }
+.concealed { margin: 4px 0; }
+.river { display: grid; grid-template-columns: repeat(6, 2.2rem); gap: 4px; min-height: 2.8rem; margin-top: 8px; }
+.tile { display: inline-grid; place-items: center; min-width: 2.2rem; min-height: 2.8rem; padding: 3px; color: #171717; background: #fff9df; border: 1px solid #c9b989; border-radius: 3px; }
+.tiles { display: inline-flex; gap: 2px; }
+.meld { display: inline-flex; align-items: end; gap: 3px; }
+.meld small { color: #d8e6dc; }
+.riichi-discard { transform: rotate(90deg); margin: 0 4px; }
+.my-hand { padding: 12px; background: #102a20; }
+.hand-row { flex-wrap: nowrap; overflow-x: auto; padding: 5px 0; }
+.hand-tile { cursor: pointer; font-weight: 700; }
+.hand-tile:disabled { cursor: default; opacity: .45; }
+.drawn { margin-left: 12px; }
+.actions { min-height: 44px; margin-top: 8px; }
+.action { padding: 7px 12px; border: 1px solid #d5c45d; border-radius: 4px; color: #fff; background: #674d13; cursor: pointer; }
+.action.selected { outline: 3px solid #ffdf33; }
+.timer { height: 8px; overflow: hidden; background: #0a2118; }
+.timer-fill { display: block; height: 100%; background: #f0d34f; transition: width .1s linear; }
+.notice, .ranking { padding: 12px; text-align: center; font-weight: 700; background: #7a2d24; }
+@media (max-width: 700px) { .board { padding: 8px; } .opponents { display: grid; } .river { grid-template-columns: repeat(9, 2.2rem); } }
