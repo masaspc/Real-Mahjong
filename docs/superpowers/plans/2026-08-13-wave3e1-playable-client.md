@@ -1051,7 +1051,12 @@ describe.each(["match-seed1.jsonl", "match-seed3.jsonl"])("実際の半荘 %s �
 ```
 
 Run: `pnpm --dir apps/web test replay`
-Expected: 4 passed
+期待: 4 件（牌譜2つ × 2項目）
+
+そのうえで Task 2 の全体を測る。
+
+Run: `pnpm --dir apps/web test game`
+Expected: 28 passed
 
 - [ ] **Step 6: コミット**
 
