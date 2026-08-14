@@ -1,8 +1,8 @@
-import { apply, emptyState } from "./game/state";
-import type { GameState } from "./game/state";
+import { Presentation } from "./game/presentation";
 import { connect } from "./net/connection";
 import { placementsFor } from "./scene/placement";
 import { TableScene } from "./scene/table";
+import { systemClock } from "./timeline/clock";
 import { discardChoices } from "./ui/actions";
 import {
   clearRiichiReady,
@@ -21,6 +21,14 @@ function tableId(): string {
   return id;
 }
 
+/**
+ * 演出を切って遊ぶ口。
+ *
+ * **間の長さが妥当かは、入れた場合と切った場合を並べないと決められない。**
+ * `?effects=off` で受信した端から見せる。
+ */
+const effectsOff = new URLSearchParams(location.search).get("effects") === "off";
+
 const root = document.querySelector<HTMLElement>("#app");
 if (!root) throw new Error("#app が無い");
 
@@ -33,9 +41,10 @@ tableRoot.append(canvas);
 root.replaceChildren(tableRoot, uiRoot);
 
 const scene = new TableScene(canvas);
-let state: GameState = emptyState(0);
+const presentation = new Presentation(0, systemClock);
 
 const draw = (): void => {
+  const state = presentation.state;
   scene.sync(placementsFor(state));
   renderBoard(uiRoot, state, (command) => connection.send(command));
 };
@@ -43,12 +52,18 @@ const draw = (): void => {
 const connection = connect({
   base: `ws://${location.host}/ws`,
   table: tableId(),
-  lastSeq: () => state.lastSeq,
+  // **表示ではなく受信に従う。**演出待ちのぶんを取り直すと二重に積む。
+  lastSeq: () => presentation.receivedSeq,
   onEvent(envelope) {
-    state = apply(state, envelope, performance.now());
-    draw();
+    presentation.receive(envelope);
+    if (effectsOff) {
+      presentation.skip();
+    }
   },
   onStatus(text) {
+    // **ここで jumpToLatest を呼んではならない。**取り直した backlog は
+    // EffectPlayer の方針に任せる。溜まりが 1,500ms を超えれば勝手に速まり、
+    // 6,000ms を超えれば勝手に飛ぶ。判断を二重に持たない。
     document.title = `麻雀 — ${text}`;
   },
 });
@@ -56,9 +71,16 @@ const connection = connect({
 canvas.addEventListener("click", (event) => {
   const rect = canvas.getBoundingClientRect();
   const tile = scene.pickHandTile(event.clientX - rect.left, event.clientY - rect.top);
-  if (tile === null) return;
-  const command = discardChoices(state, isRiichiReady()).get(tile);
-  if (command === undefined) return;
+  const command = tile === null
+    ? undefined
+    : discardChoices(presentation.state, isRiichiReady()).get(tile);
+  if (command === undefined) {
+    // **牌を選んでいない叩きは早送りにする。**締切は動かないので、
+    // 速く見終わるだけで有利にも不利にもならない。
+    presentation.skip();
+    draw();
+    return;
+  }
   connection.send(command);
   clearRiichiReady();
   draw();
@@ -71,13 +93,23 @@ addEventListener("resize", resize);
 resize();
 
 const renderFrame = (): void => {
+  presentation.update();
+  draw();
   scene.render();
   requestAnimationFrame(renderFrame);
 };
 requestAnimationFrame(renderFrame);
 
+document.addEventListener("visibilitychange", () => {
+  // 裏に回っている間 requestAnimationFrame は止まり、演出が溜まる。
+  // **ここでも飛ばすと決めつけない。**溜まりが少なければ普通に見せる。
+  if (!document.hidden) {
+    presentation.update();
+    draw();
+  }
+});
+
 draw();
-setInterval(draw, 100);
 
 (globalThis as unknown as { newTable: () => void }).newTable = () => {
   localStorage.removeItem("real-mahjong.table");
