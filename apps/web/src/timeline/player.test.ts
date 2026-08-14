@@ -168,4 +168,82 @@ describe("EffectPlayer", () => {
     expect(player.presented).toHaveLength(0);
     expect(player.pendingMs).toBe(0);
   });
+  describe("現在の再生位置", () => {
+    it("再生中のイベントと経過時刻を問える", () => {
+      const clock = new ManualClock();
+      const player = new EffectPlayer(clock);
+      player.push(discard(0));
+
+      clock.advance(100);
+      player.update();
+
+      const current = player.current;
+      expect(current?.event).toEqual(discard(0));
+      expect(current?.durationMs).toBe(350);
+      expect(current?.elapsedMs).toBe(100);
+    });
+
+    it("再生し終えたら現在のイベントは無い", () => {
+      const clock = new ManualClock();
+      const player = new EffectPlayer(clock);
+      player.push(discard(0));
+
+      clock.advance(350);
+      player.update();
+
+      expect(player.current).toBeNull();
+    });
+
+    it("経過時刻は演出の長さで頭打ちになる", () => {
+      const clock = new ManualClock();
+      const player = new EffectPlayer(clock);
+      player.push(discard(0));
+      player.push(discard(1));
+
+      // 1件目を終え、2件目へ 100ms 入ったところ。
+      clock.advance(450);
+      player.update();
+
+      // **超過分を返してはならない。**`seek` に渡すと終端を越える。
+      expect(player.current?.elapsedMs).toBe(100);
+    });
+
+    it("演出の長さを越えた経過は切り詰める", () => {
+      const clock = new ManualClock();
+      const player = new EffectPlayer(clock);
+      player.push(discard(0));
+
+      // **update を挟まずに越えさせる。**畳み込みが追いつく前のフレームでも
+      // 終端を越えた値を返してはならない。弧の頂点を過ぎた牌が戻って見える。
+      clock.advance(500);
+
+      expect(player.current?.elapsedMs).toBe(350);
+    });
+
+    it("追いつきで速めているとき、経過も同じ倍率で進む", () => {
+      const clock = new ManualClock();
+      const player = new EffectPlayer(clock);
+      // 350ms x 5 = 1,750ms。既定の speedUpAfterMs は 1,500 なので速まる。
+      for (let i = 0; i < 5; i += 1) {
+        player.push(discard(0));
+      }
+
+      clock.advance(100);
+      player.update();
+
+      expect(player.playbackRate).toBeGreaterThan(1);
+      // **倍率を掛け忘れると 100 のままになる。**待ち時間だけ先に終わって
+      // 牌が空中に残るのはこれが原因になる。
+      expect(player.current?.elapsedMs).toBeGreaterThan(100);
+    });
+
+    it("早送りすると現在のイベントは無くなる", () => {
+      const clock = new ManualClock();
+      const player = new EffectPlayer(clock);
+      player.push(discard(0));
+      player.skip();
+
+      expect(player.current).toBeNull();
+    });
+  });
 });

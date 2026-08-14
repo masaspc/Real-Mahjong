@@ -58,6 +58,35 @@ export class EffectPlayer {
     return this.#rate;
   }
 
+  /**
+   * いま再生中の演出と、その経過時刻。
+   *
+   * **牌の動きはこれを唯一の進捗の根拠にする。**描画側で経過を数え直すと、
+   * 早送り（最大4倍）や切り捨てとずれ、牌が空中に取り残される。
+   *
+   * 経過は演出の長さで頭打ちにする。`Timeline.seek` は範囲外を丸めるが、
+   * 越えた値を渡すと弧の頂点を過ぎた牌が戻って見える実装を誘発する。
+   */
+  get current(): {
+    event: ClientEvent;
+    durationMs: number;
+    elapsedMs: number;
+  } | null {
+    const head = this.#queue[0];
+    if (head === undefined || head.durationMs === 0) {
+      return null;
+    }
+    if (this.#startedAt === null) {
+      return null;
+    }
+    const elapsed = (this.#clock.now() - this.#startedAt) * this.#rate;
+    return {
+      event: head.event,
+      durationMs: head.durationMs,
+      elapsedMs: Math.max(0, Math.min(elapsed, head.durationMs)),
+    };
+  }
+
   push(event: ClientEvent): void {
     const kind = effectOf(event);
     const wasIdle = this.#queue.length === 0;
