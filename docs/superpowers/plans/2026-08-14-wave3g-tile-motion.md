@@ -318,10 +318,27 @@ git commit -m "feat(web): 再生中のイベントと適用後の盤面を出す
 - Consumes: `Placement`（`scene/placement.ts`）、`Vec3`（`scene/layout.ts`）
 - Produces: `motionsFor(before: Placement[], after: Placement[], event: ClientEvent, viewer: Seat): Motion[]`
 - Produces: `poseAt(motion: Motion, progress: number): Pose`
+- Produces: `reconcileMoving(currentIds: string[], motions: Motion[]): { keep: string[]; drop: string[]; create: string[] }`
 
-**補間そのものも純粋関数にする。**`TableScene` の中で計算すると、WebGL 抜きでは
-試せないので**目で見るしかなくなる。**弧の高さも回転の向きも、ここで機械的に
-確かめられる形にしておく。
+**補間そのものも、代理の出し入れの判断も、純粋関数にする。**`TableScene` の中で
+計算すると WebGL 抜きでは試せず、**目で見るしかなくなる。**弧の高さも回転の
+向きも、どの代理を残しどれを捨てるかも、ここで機械的に確かめられる形にする。
+
+`poseAt` は次のとおり実装する。**Task 4 はこれを呼ぶだけで、計算し直さない。**
+
+- 位置は `from + (to - from) * easeOutCubic(t)`
+- `y` にはさらに `lift * 4t(1-t)` を足す（`t=0` と `t=1` で 0 になる）
+- 回転は `from + shortestDelta(from, to) * easeOutCubic(t)`
+
+```ts
+/** 角度の差を [-π, π] へ畳む。**畳まないと牌が大回りする。** */
+function shortestDelta(from: number, to: number): number {
+  let d = (to - from) % (Math.PI * 2);
+  if (d > Math.PI) d -= Math.PI * 2;
+  if (d < -Math.PI) d += Math.PI * 2;
+  return d;
+}
+```
 
 **同一性はイベントから決める。配置の見た目で突き合わせない。**
 他家の手牌は伏せ牌で `encoded` が 0 なので、見た目で突き合わせると同じ点数の解が
@@ -335,11 +352,17 @@ git commit -m "feat(web): 再生中のイベントと適用後の盤面を出す
 | イベント | 起点 | 着地 |
 |---|---|---|
 | ツモ（自分） | 消えた山の牌 | `drawn-${席}` |
+| ツモ（自分）で**すでにツモ牌がある**とき | 前の `drawn-${自分}` | 前のツモ牌が入った `hand-${自分}-${j}` |
 | ツモ（他家） | 消えた山の牌 | その席の手牌の**添字が最大**の牌 |
 | 打牌（自分・ツモ切り） | `drawn-${自分}` | 新しくできた河の牌 |
 | 打牌（自分・手出し） | `hand-${自分}-${i}`（`encoded` が一致する最初のもの） | 新しくできた河の牌 |
 | 打牌（自分・手出し）の**ツモ牌** | `drawn-${自分}` | ツモ牌が入った `hand-${自分}-${j}` |
 | 打牌（他家） | その席の手牌の添字が最大の牌 | 新しくできた河の牌 |
+
+**ツモでも牌が2枚動くことがある。**`state.ts` の `draw` は、すでに `drawn` が
+在れば**それを手牌へ入れてから**新しいツモ牌を置く。暗槓のあとの嶺上ツモなどで
+実際に通る経路である。このとき前のツモ牌は `drawn-0` から `hand-0-j` へ鍵が
+変わるので、第2段も第3段も拾えない。**手出しのときと同じ形で第1段に入れる。**
 
 **手出しでは牌が2枚動く。**手出しをすると、それまで手牌から離れて置かれていた
 ツモ牌が手牌へ吸収される（`state.ts:203` の `state.hand.push(state.drawn)`）。
@@ -376,7 +399,7 @@ git commit -m "feat(web): 再生中のイベントと適用後の盤面を出す
 ```ts
 import { describe, expect, it } from "vitest";
 
-import { motionsFor, poseAt } from "./motion";
+import { motionsFor, poseAt, reconcileMoving } from "./motion";
 import type { Motion } from "./motion";
 import { placementsFor } from "./placement";
 import { apply, emptyState } from "../game/state";
@@ -453,6 +476,20 @@ function step(state: GameState, event: ClientEvent): {
   return { before: state, after: apply(state, envelope(1, event), 0) };
 }
 
+/** 出し入れの判断だけを見る試験のための、中身が空の動き。 */
+function motionOf(id: string): Motion {
+  return {
+    id,
+    fromKey: `${id}-from`,
+    toKey: `${id}-to`,
+    encoded: 0,
+    faceUp: false,
+    from: { position: { x: 0, y: 0, z: 0 }, rotationX: 0, rotationY: 0 },
+    to: { position: { x: 0, y: 0, z: 0 }, rotationX: 0, rotationY: 0 },
+    lift: 0,
+  };
+}
+
 describe("motionsFor", () => {
   it("自分のツモは山から手元へ動く", () => {
     const event: ClientEvent = {
@@ -514,6 +551,11 @@ describe("motionsFor", () => {
         name: "自分のツモ",
         from: started(),
         event: { type: "draw", seat: 0, tile: 4, source: "wall", wall_remaining: 69 },
+      },
+      {
+        name: "ツモ牌を持ったままの自分のツモ",
+        from: drawnMine(),
+        event: { type: "draw", seat: 0, tile: 8, source: "dead_wall", wall_remaining: 68 },
       },
       {
         name: "他家のツモ",
@@ -581,6 +623,30 @@ describe("motionsFor", () => {
     expect(poseAt(motion, 1).position.y).toBeCloseTo(0.3);
     // 途中は両端のどちらより高い。
     expect(poseAt(motion, 0.5).position.y).toBeGreaterThan(0.6);
+  });
+
+  it("代理は、続いている動きだけ残して他は捨てる", () => {
+    const a = motionOf("a");
+    const b = motionOf("b");
+
+    // 何も無いところへ2件。両方作る。
+    const first = reconcileMoving([], [a, b]);
+    expect(first.create.sort()).toEqual(["a", "b"]);
+    expect(first.drop).toEqual([]);
+
+    // 片方が続き、片方が消え、新しいものが1件。
+    const next = reconcileMoving(["a", "b"], [a, motionOf("c")]);
+    expect(next.keep).toEqual(["a"]);
+    expect(next.drop).toEqual(["b"]);
+    expect(next.create).toEqual(["c"]);
+  });
+
+  it("動きが無くなったら代理を全部捨てる", () => {
+    // **1枚でも残ると、牌が空中で止まったままになる。**
+    const plan = reconcileMoving(["a", "b"], []);
+    expect(plan.drop.sort()).toEqual(["a", "b"]);
+    expect(plan.keep).toEqual([]);
+    expect(plan.create).toEqual([]);
   });
 
   it("回転は最短の向きへ回る", () => {
@@ -688,10 +754,10 @@ Expected: FAIL（`motion.ts` が無い）
 - [ ] **Step 4: 試験が通ることを確かめる**
 
 Run: `pnpm --dir apps/web test src/scene/motion.test.ts`
-Expected: 8 passed
+Expected: 10 passed
 
 Run: `pnpm --dir apps/web test`
-Expected: 198 passed
+Expected: 200 passed
 
 - [ ] **Step 5: コミット**
 
@@ -728,10 +794,10 @@ git commit -m "feat(web): どの牌がどこへ動くかをイベントから決
 - `syncWithMotion(placements, motions, progress)` は
   1. 動きの**着地の鍵**を集める
   2. その鍵を除いた `placements` を `sync` に渡して確定ぶんを置く
-  3. 動きごとに代理のメッシュを1つ持ち、`from` と `to` を `progress` で補間して置く
-  4. 補間は `from + easeOutCubic(t)×(to-from)`。**位置を足し込まない**
-  5. 弧は `y` に `lift × 4t(1-t)` を足す（t=0 と t=1 で 0 になる）
-  6. 代理のメッシュは `pickHandTile` の対象から外す
+  3. 動きごとに代理のメッシュを1つ持ち、姿勢は **`poseAt(motion, progress)` から得る**
+  4. **ここで補間を書き直さない。**弧も回転の向きも Task 3 で試験してある。
+     二重に持つと、片方だけ直したときに静かにずれる
+  5. 代理のメッシュは `pickHandTile` の対象から外す
 - 動きが空なら `sync` と同じ結果になること
 
 **確定ぶんを置く処理を、公開の `sync` から切り出す。**
@@ -748,8 +814,8 @@ git commit -m "feat(web): どの牌がどこへ動くかをイベントから決
 
   /** 動きがあるときの入口。**今回の動きに無い代理だけを捨てる。** */
   syncWithMotion(placements: Placement[], motions: Motion[], progress: number): void {
-    const alive = new Set(motions.map((m) => m.id));
-    this.#dropMoving((id) => !alive.has(id));
+    const plan = reconcileMoving([...this.#moving.keys()], motions);
+    for (const id of plan.drop) this.#dropMovingOne(id);
     const landing = new Set(motions.map((m) => m.toKey));
     this.#place(placements.filter((p) => !landing.has(p.key)));
     // ...代理を progress で置く
@@ -782,21 +848,12 @@ git commit -m "feat(web): どの牌がどこへ動くかをイベントから決
 `applyFaceUv(...)` を毎回呼んでいる（`table.ts:157`）のと同じ理由である。
 `from` と `to` も毎回入れ直す。**使い回すのはメッシュだけで、中身ではない。**
 
-**回転は最短の向きへ回す。**`rotationX` と `rotationY` をそのまま線形に
-補間すると、たとえば `π` から `-π` へ回すときに一周して見える。差を
-`[-π, π]` へ畳んでから補間する。
+**この上書きに条件分岐を付けないこと。**「変わったときだけ」にすると、
+WebGL 抜きでは試せない場所に判断が生まれる。無条件に書けば、目で読んで
+正しさが分かる。
 
-```ts
-/** 角度の差を [-π, π] へ畳む。**畳まないと牌が大回りする。** */
-function shortestDelta(from: number, to: number): number {
-  let d = (to - from) % (Math.PI * 2);
-  if (d > Math.PI) d -= Math.PI * 2;
-  if (d < -Math.PI) d += Math.PI * 2;
-  return d;
-}
-```
+**回転も弧も Task 3 の `poseAt` が持つ。**ここでは呼ぶだけである。
 
-補間は `from + shortestDelta(from, to) * easeOutCubic(t)` とする。
 
 `main.ts` の描画ループを次のようにする。
 
@@ -828,7 +885,7 @@ Expected: エラー0件でビルド成功
 - [ ] **Step 3: 既存の試験が壊れていないことを確かめる**
 
 Run: `pnpm --dir apps/web test`
-Expected: 198 passed
+Expected: 200 passed
 
 - [ ] **Step 4: 人が見るための口を足す（合否判定には使わない）**
 
@@ -959,7 +1016,7 @@ Expected: 3 passed
 - [ ] **Step 3: 全体を確かめる**
 
 Run: `pnpm --dir apps/web test`
-Expected: 201 passed
+Expected: 203 passed
 
 Run: `pnpm --dir apps/web typecheck && pnpm --dir apps/web build`
 Expected: エラー0件でビルド成功
