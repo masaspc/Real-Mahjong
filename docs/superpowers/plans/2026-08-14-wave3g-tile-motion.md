@@ -707,7 +707,7 @@ describe("motionsFor", () => {
       tile: 7,
       manner: "tsumogiri",
     };
-    const { before, after } = step(started(), event);
+    const { before, after } = step(drawnOther(), event);
     const motions = motionsFor(
       placementsFor(before, 0),
       placementsFor(after, 0),
