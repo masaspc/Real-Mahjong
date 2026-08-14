@@ -899,20 +899,31 @@ Expected: 200 passed
 
 撮り方だけ残しておく。人間が見るときに使う。
 
+**リポジトリの中に画像を落とさないこと。**未追跡のファイルが残ると
+「未コミットがゼロ」を満たせず、**次のタスクをループへ投入できなくなる。**
+出力は一時ディレクトリへ置き、サーバも必ず止める。
+
 ```bash
 pnpm --dir apps/web build
+OUT=$(mktemp -d)
 cargo run -p server --bin serve &
+SERVER=$!
+trap 'kill $SERVER 2>/dev/null' EXIT
 sleep 5
 for t in 0 0.5 1; do
 "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome" \
   --headless=new --disable-gpu --use-angle=swiftshader --enable-unsafe-swiftshader \
   --window-size=1280,720 --virtual-time-budget=20000 \
-  --screenshot=motion-$t.png "http://127.0.0.1:8080/preview.html?motion=$t"
+  --screenshot="$OUT/motion-$t.png" "http://127.0.0.1:8080/preview.html?motion=$t"
 done
+echo "画像: $OUT"
 ```
 
-Expected: 3枚の png が書き出される。**中身の良し悪しは判定しない。**
-書き出しに失敗した場合のみ、この手順の失敗とする。
+撮り終えたら `git status --porcelain` が空であることを確かめる。
+
+Expected: `$OUT` に3枚の png が書き出され、`git status --porcelain` が空である。
+**中身の良し悪しは判定しない。**書き出しに失敗した場合と、リポジトリに
+ファイルが残った場合のみ、この手順の失敗とする。
 
 - [ ] **Step 5: コミット**
 
