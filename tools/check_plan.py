@@ -362,7 +362,10 @@ def check_test_counts(text):
         # 書き手に `期待:` へ逃げさせない。
         claims = [int(m.group(1)) for m in re.finditer(r"Expected: (\d+)テスト PASS", section)]
         claims += [int(m.group(1)) for m in re.finditer(r"Expected: (\d+) passed", section)]
-        if claims and actual not in claims:
+        # 新しい試験を1件も書かないタスク（結線だけ、退行確認だけ）は、
+        # 全体の累計しか書けない。**0 と累計が合わないのは当たり前**なので
+        # 咎めない。試験を書くタスクには、そのタスクぶんの件数を必ず求める。
+        if actual and claims and actual not in claims:
             problems.append(f"Task {index + 1}: 実数 {actual} / 記述 {claims}")
     return problems
 
