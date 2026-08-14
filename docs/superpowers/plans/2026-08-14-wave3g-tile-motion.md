@@ -39,52 +39,83 @@
 `apps/web/src/timeline/player.test.ts` の末尾（最後の `});` の直前）へ足す。
 
 ```ts
-  it("再生中のイベントと経過時刻を問える", () => {
-    const clock = new ManualClock();
-    const player = new EffectPlayer(clock);
-    player.push(discardEvent());
+  describe("現在の再生位置", () => {
+    it("再生中のイベントと経過時刻を問える", () => {
+      const clock = new ManualClock();
+      const player = new EffectPlayer(clock);
+      player.push(discardEvent());
 
-    clock.advance(100);
-    player.update();
+      clock.advance(100);
+      player.update();
 
-    const current = player.current;
-    expect(current?.event).toEqual(discardEvent());
-    expect(current?.durationMs).toBe(350);
-    expect(current?.elapsedMs).toBe(100);
-  });
+      const current = player.current;
+      expect(current?.event).toEqual(discardEvent());
+      expect(current?.durationMs).toBe(350);
+      expect(current?.elapsedMs).toBe(100);
+    });
 
-  it("再生し終えたら現在のイベントは無い", () => {
-    const clock = new ManualClock();
-    const player = new EffectPlayer(clock);
-    player.push(discardEvent());
+    it("再生し終えたら現在のイベントは無い", () => {
+      const clock = new ManualClock();
+      const player = new EffectPlayer(clock);
+      player.push(discardEvent());
 
-    clock.advance(350);
-    player.update();
+      clock.advance(350);
+      player.update();
 
-    expect(player.current).toBeNull();
-  });
+      expect(player.current).toBeNull();
+    });
 
-  it("経過時刻は演出の長さで頭打ちになる", () => {
-    const clock = new ManualClock();
-    const player = new EffectPlayer(clock);
-    player.push(discardEvent());
-    player.push(discardEvent());
+    it("経過時刻は演出の長さで頭打ちになる", () => {
+      const clock = new ManualClock();
+      const player = new EffectPlayer(clock);
+      player.push(discardEvent());
+      player.push(discardEvent());
 
-    // 1件目を終え、2件目へ 100ms 入ったところ。
-    clock.advance(450);
-    player.update();
+      // 1件目を終え、2件目へ 100ms 入ったところ。
+      clock.advance(450);
+      player.update();
 
-    // **超過分を返してはならない。**`seek` に渡すと終端を越える。
-    expect(player.current?.elapsedMs).toBe(100);
-  });
+      // **超過分を返してはならない。**`seek` に渡すと終端を越える。
+      expect(player.current?.elapsedMs).toBe(100);
+    });
 
-  it("早送りすると現在のイベントは無くなる", () => {
-    const clock = new ManualClock();
-    const player = new EffectPlayer(clock);
-    player.push(discardEvent());
-    player.skip();
+    it("演出の長さを越えた経過は切り詰める", () => {
+      const clock = new ManualClock();
+      const player = new EffectPlayer(clock);
+      player.push(discardEvent());
 
-    expect(player.current).toBeNull();
+      // **update を挟まずに越えさせる。**「頭打ちになる」を繰り越しの試験で
+      // 済ませると、切り詰めを外しても落ちない。
+      clock.advance(500);
+
+      expect(player.current?.elapsedMs).toBe(350);
+    });
+
+    it("追いつきで速めているとき、経過も同じ倍率で進む", () => {
+      const clock = new ManualClock();
+      const player = new EffectPlayer(clock);
+      // 350ms x 5 = 1,750ms。既定の speedUpAfterMs は 1,500 なので速まる。
+      for (let i = 0; i < 5; i += 1) {
+        player.push(discardEvent());
+      }
+
+      clock.advance(100);
+      player.update();
+
+      expect(player.playbackRate).toBeGreaterThan(1);
+      // **倍率を掛け忘れると 100 のままになる。**溜まりが少ない試験だけでは
+      // rate が常に 1 なので、掛け忘れを検出できない。
+      expect(player.current?.elapsedMs).toBeGreaterThan(100);
+    });
+
+    it("早送りすると現在のイベントは無くなる", () => {
+      const clock = new ManualClock();
+      const player = new EffectPlayer(clock);
+      player.push(discardEvent());
+      player.skip();
+
+      expect(player.current).toBeNull();
+    });
   });
 ```
 
@@ -138,11 +169,18 @@ Expected: FAIL（`current` が無い）
 
 - [ ] **Step 4: 試験が通り、既存の挙動が変わっていないことを確かめる**
 
+このタスクで足した6件だけを見る。
+
+Run: `pnpm --dir apps/web test src/timeline/player.test.ts -t 現在の再生位置`
+Expected: 6 passed
+
+ファイル全体と、全体の退行も見る。
+
 Run: `pnpm --dir apps/web test src/timeline/player.test.ts`
-Expected: 4 passed 以上（既存の試験がすべて通ったうえで新しい4件が通る）
+Expected: 17 passed（既存11件 + 新しい6件）
 
 Run: `pnpm --dir apps/web test`
-Expected: 187 passed
+Expected: 189 passed
 
 - [ ] **Step 5: コミット**
 
@@ -290,7 +328,7 @@ Run: `pnpm --dir apps/web test src/game/presentation.test.ts`
 Expected: 12 passed
 
 Run: `pnpm --dir apps/web test`
-Expected: 190 passed
+Expected: 192 passed
 
 - [ ] **Step 5: コミット**
 
@@ -757,7 +795,7 @@ Run: `pnpm --dir apps/web test src/scene/motion.test.ts`
 Expected: 10 passed
 
 Run: `pnpm --dir apps/web test`
-Expected: 200 passed
+Expected: 202 passed
 
 - [ ] **Step 5: コミット**
 
@@ -885,7 +923,7 @@ Expected: エラー0件でビルド成功
 - [ ] **Step 3: 既存の試験が壊れていないことを確かめる**
 
 Run: `pnpm --dir apps/web test`
-Expected: 200 passed
+Expected: 202 passed
 
 - [ ] **Step 4: 人が見るための口を足す（合否判定には使わない）**
 
@@ -1027,7 +1065,7 @@ Expected: 3 passed
 - [ ] **Step 3: 全体を確かめる**
 
 Run: `pnpm --dir apps/web test`
-Expected: 203 passed
+Expected: 205 passed
 
 Run: `pnpm --dir apps/web typecheck && pnpm --dir apps/web build`
 Expected: エラー0件でビルド成功
