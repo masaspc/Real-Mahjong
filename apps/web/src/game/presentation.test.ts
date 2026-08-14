@@ -1,0 +1,166 @@
+import { describe, expect, it } from "vitest";
+
+import { Presentation } from "./presentation";
+import { ManualClock } from "../timeline/clock";
+import type { ClientEventEnvelope } from "../protocol/ClientEventEnvelope";
+import type { Seat } from "../protocol/Seat";
+import type { Tile } from "../protocol/Tile";
+
+/**
+ * **`as unknown as` で型検査を黙らせてはならない。**
+ *
+ * 通してしまうと、実在しない欄（`discard` の `riichi`）や無い値
+ * （`manner: "tegiri"`。正しくは `tedashi` か `tsumogiri`）に気付けない。
+ * ここは素直に型を満たす。`Seat` も `Tile` も素の `number` なので
+ * キャストは要らない。
+ */
+
+/** 打牌。演出は 350ms。 */
+function discard(seq: number, seat: Seat, tile: Tile): ClientEventEnvelope {
+  return { seq, event: { type: "discard", seat, tile, manner: "tedashi" } };
+}
+
+/** ツモ。演出は 250ms。他家のツモ牌は見えないので `tile` は null。 */
+function draw(seq: number, seat: Seat, wallRemaining = 69): ClientEventEnvelope {
+  return {
+    seq,
+    event: {
+      type: "draw",
+      seat,
+      tile: seat === 0 ? 4 : null,
+      source: "wall",
+      wall_remaining: wallRemaining,
+    },
+  };
+}
+
+/** 演出を持たないイベント。リーチの成立は点棒が動くだけで場は止まらない。 */
+function riichiAccepted(seq: number, seat: Seat): ClientEventEnvelope {
+  return { seq, event: { type: "riichi", seat, step: "accepted" } };
+}
+
+/** 行動要求。締切が受信時刻を基準にしているかを見るために使う。 */
+function requestAction(seq: number, deadlineMs: number): ClientEventEnvelope {
+  return {
+    seq,
+    event: { type: "request_action", window_id: 1, options: [], deadline_ms: deadlineMs },
+  };
+}
+
+describe("Presentation", () => {
+  it("演出が終わるまで盤面へ出さない", () => {
+    const clock = new ManualClock();
+    const p = new Presentation(0, clock);
+    p.receive(discard(1, 1, 5));
+
+    p.update();
+    expect(p.state.seats[1].river).toHaveLength(0);
+
+    clock.advance(349);
+    p.update();
+    expect(p.state.seats[1].river).toHaveLength(0);
+
+    clock.advance(1);
+    p.update();
+    expect(p.state.seats[1].river).toHaveLength(1);
+  });
+
+  it("受信した seq は演出を待たずに進む", () => {
+    const clock = new ManualClock();
+    const p = new Presentation(0, clock);
+    p.receive(discard(7, 1, 5));
+
+    // **再接続はここを見る。**表示に合わせて遅らせると、演出中に切れた
+    // ときに同じイベントを取り直して二重に積む。
+    expect(p.receivedSeq).toBe(7);
+    expect(p.state.lastSeq).toBeNull();
+  });
+
+  it("溜まった演出を早送りできる", () => {
+    const clock = new ManualClock();
+    const p = new Presentation(0, clock);
+    p.receive(discard(1, 1, 5));
+    p.receive(discard(2, 2, 6));
+
+    p.skip();
+    p.update();
+    expect(p.state.seats[1].river).toHaveLength(1);
+    expect(p.state.seats[2].river).toHaveLength(1);
+    expect(p.pendingMs).toBe(0);
+  });
+
+  it("復帰は演出を捨てて最新へ飛ぶ", () => {
+    const clock = new ManualClock();
+    const p = new Presentation(0, clock);
+    p.receive(draw(1, 0));
+    p.receive(discard(2, 0, 5));
+
+    p.jumpToLatest();
+    p.update();
+    expect(p.state.lastSeq).toBe(2);
+    expect(p.pendingMs).toBe(0);
+  });
+
+  it("大きく遅れたら演出を捨てて追いつく", () => {
+    const clock = new ManualClock();
+    const p = new Presentation(0, clock);
+    // 350ms × 20 = 7,000ms ぶん積む。既定の skipAfterMs は 6,000。
+    for (let i = 1; i <= 20; i += 1) {
+      p.receive(discard(i, 1, 5));
+    }
+    p.update();
+    expect(p.state.seats[1].river).toHaveLength(20);
+  });
+
+  it("同じイベントを二度畳まない", () => {
+    const clock = new ManualClock();
+    const p = new Presentation(0, clock);
+    p.receive(discard(1, 1, 5));
+    clock.advance(350);
+
+    p.update();
+    p.update();
+    p.update();
+    expect(p.state.seats[1].river).toHaveLength(1);
+  });
+
+  it("締切は受信した時刻を基準にする", () => {
+    const clock = new ManualClock();
+    const p = new Presentation(0, clock);
+    // 打牌の演出（350ms）を挟んでから行動要求が届く。
+    p.receive(discard(1, 1, 5));
+    clock.advance(1_000);
+    p.receive(requestAction(2, 20_000));
+
+    // 受信は 1,000ms の時点。表示はここから更に遅れる。
+    clock.advance(5_000);
+    p.update();
+
+    // **表示時刻（6,000）を基準にすると 26,000 になる。**演出を見ている間に
+    // 締切が後ろへずれ、実際には切れているのに時間が残って見える。
+    expect(p.state.pending?.deadlineAt).toBe(21_000);
+  });
+
+  it("演出を持たないイベントは待たせない", () => {
+    const clock = new ManualClock();
+    const p = new Presentation(0, clock);
+    // リーチの成立は effectOf が null を返すので 0ms。
+    p.receive(riichiAccepted(0, 1));
+
+    p.update();
+    expect(p.state.lastSeq).toBe(0);
+  });
+
+  it("先頭が待っている間は後ろも出さない", () => {
+    const clock = new ManualClock();
+    const p = new Presentation(0, clock);
+    p.receive(discard(1, 1, 5));
+    p.receive(draw(2, 2));
+
+    clock.advance(300);
+    p.update();
+    // **順序が入れ替わってはいけない。**ツモは 250ms だが、前の打牌が
+    // 終わっていないので出せない。
+    expect(p.state.lastSeq).toBeNull();
+  });
+});
