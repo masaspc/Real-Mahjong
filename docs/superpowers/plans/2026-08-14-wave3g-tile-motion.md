@@ -317,6 +317,11 @@ git commit -m "feat(web): 再生中のイベントと適用後の盤面を出す
 **Interfaces:**
 - Consumes: `Placement`（`scene/placement.ts`）、`Vec3`（`scene/layout.ts`）
 - Produces: `motionsFor(before: Placement[], after: Placement[], event: ClientEvent, viewer: Seat): Motion[]`
+- Produces: `poseAt(motion: Motion, progress: number): Pose`
+
+**補間そのものも純粋関数にする。**`TableScene` の中で計算すると、WebGL 抜きでは
+試せないので**目で見るしかなくなる。**弧の高さも回転の向きも、ここで機械的に
+確かめられる形にしておく。
 
 **同一性はイベントから決める。配置の見た目で突き合わせない。**
 他家の手牌は伏せ牌で `encoded` が 0 なので、見た目で突き合わせると同じ点数の解が
@@ -371,7 +376,8 @@ git commit -m "feat(web): 再生中のイベントと適用後の盤面を出す
 ```ts
 import { describe, expect, it } from "vitest";
 
-import { motionsFor } from "./motion";
+import { motionsFor, poseAt } from "./motion";
+import type { Motion } from "./motion";
 import { placementsFor } from "./placement";
 import { apply, emptyState } from "../game/state";
 import type { GameState } from "../game/state";
@@ -558,6 +564,43 @@ describe("motionsFor", () => {
     }
   });
 
+  it("弧の頂点は両端より高い", () => {
+    const motion: Motion = {
+      id: "x",
+      fromKey: "hand-0-0",
+      toKey: "river-0-0",
+      encoded: 4,
+      faceUp: true,
+      from: { position: { x: 0, y: 0.6, z: 10 }, rotationX: 0, rotationY: 0 },
+      to: { position: { x: 0, y: 0.3, z: 7 }, rotationX: -Math.PI / 2, rotationY: 0 },
+      lift: 1.2,
+    };
+
+    // **両端では弧が 0 になる。**ここが 0 でないと、置いた瞬間に牌が沈む。
+    expect(poseAt(motion, 0).position.y).toBeCloseTo(0.6);
+    expect(poseAt(motion, 1).position.y).toBeCloseTo(0.3);
+    // 途中は両端のどちらより高い。
+    expect(poseAt(motion, 0.5).position.y).toBeGreaterThan(0.6);
+  });
+
+  it("回転は最短の向きへ回る", () => {
+    const motion: Motion = {
+      id: "y",
+      fromKey: "a",
+      toKey: "b",
+      encoded: 0,
+      faceUp: false,
+      from: { position: { x: 0, y: 0, z: 0 }, rotationX: 0, rotationY: Math.PI * 0.9 },
+      to: { position: { x: 0, y: 0, z: 0 }, rotationX: 0, rotationY: -Math.PI * 0.9 },
+      lift: 0,
+    };
+
+    // 0.9π から -0.9π へは、0 を通る 1.8π ではなく π を跨ぐ 0.2π が近い。
+    // **素直に線形補間すると牌が一周する。**
+    const mid = poseAt(motion, 0.5).rotationY;
+    expect(Math.abs(mid)).toBeGreaterThan(Math.PI * 0.9);
+  });
+
   it("他家の打牌は手牌の端から河へ動く", () => {
     const event: ClientEvent = {
       type: "discard",
@@ -645,10 +688,10 @@ Expected: FAIL（`motion.ts` が無い）
 - [ ] **Step 4: 試験が通ることを確かめる**
 
 Run: `pnpm --dir apps/web test src/scene/motion.test.ts`
-Expected: 6 passed
+Expected: 8 passed
 
 Run: `pnpm --dir apps/web test`
-Expected: 196 passed
+Expected: 198 passed
 
 - [ ] **Step 5: コミット**
 
@@ -733,6 +776,12 @@ git commit -m "feat(web): どの牌がどこへ動くかをイベントから決
 - `syncWithMotion` は今回の動きに無い id だけを捨てる
 - `dispose` で代理もすべて捨てる
 
+**残した代理は、毎回 `encoded` `faceUp` と UV を上書きする。**id は
+`${fromKey}->${toKey}` なので、局が変わって同じ鍵の組み合わせが再び現れると
+**前のイベントの牌面と表裏が residue として残る。**確定ぶんが
+`applyFaceUv(...)` を毎回呼んでいる（`table.ts:157`）のと同じ理由である。
+`from` と `to` も毎回入れ直す。**使い回すのはメッシュだけで、中身ではない。**
+
 **回転は最短の向きへ回す。**`rotationX` と `rotationY` をそのまま線形に
 補間すると、たとえば `π` から `-π` へ回すときに一周して見える。差を
 `[-π, π]` へ畳んでから補間する。
@@ -779,12 +828,19 @@ Expected: エラー0件でビルド成功
 - [ ] **Step 3: 既存の試験が壊れていないことを確かめる**
 
 Run: `pnpm --dir apps/web test`
-Expected: 196 passed
+Expected: 198 passed
 
-- [ ] **Step 4: 動いていることを絵で確かめる**
+- [ ] **Step 4: 人が見るための口を足す（合否判定には使わない）**
 
-**遊んで確かめてはいけない。**`preview.html` に、動きの途中を止めて描く口を足す。
-`?motion=0.5` のように進捗を与えると、打牌の動きをその進捗で止めた絵を出す。
+`preview.html` に、動きの途中を止めて描く口を足す。`?motion=0.5` のように
+進捗を与えると、打牌の動きをその進捗で止めた絵を出す。
+
+**この絵の良し悪しはループの合否にしない。**「自然に見えるか」は主観であり、
+規約どおり `【要確認】` で人間へ上げる。**ループが判定するのは
+`poseAt` の試験（Task 3）までである。**弧の高さも回転の向きも、そこで
+機械的に確かめてある。
+
+撮り方だけ残しておく。人間が見るときに使う。
 
 ```bash
 pnpm --dir apps/web build
@@ -798,9 +854,8 @@ for t in 0 0.5 1; do
 done
 ```
 
-Expected: 3枚の絵で牌の位置が違う。`motion=0` は手牌の位置、`motion=1` は河の位置、
-`motion=0.5` は**その中間で、かつ卓面より高い**（弧を描いているため）。
-3枚とも同じ位置なら失敗。補間が効いていない。
+Expected: 3枚の png が書き出される。**中身の良し悪しは判定しない。**
+書き出しに失敗した場合のみ、この手順の失敗とする。
 
 - [ ] **Step 5: コミット**
 
@@ -904,7 +959,7 @@ Expected: 3 passed
 - [ ] **Step 3: 全体を確かめる**
 
 Run: `pnpm --dir apps/web test`
-Expected: 199 passed
+Expected: 201 passed
 
 Run: `pnpm --dir apps/web typecheck && pnpm --dir apps/web build`
 Expected: エラー0件でビルド成功
@@ -912,7 +967,7 @@ Expected: エラー0件でビルド成功
 - [ ] **Step 4: コミット**
 
 ```bash
-git add apps/web/src/game/settle.test.ts apps/web/src/main.ts
+git add apps/web/src/game/settle.test.ts apps/web/src/game/presentation.ts
 git commit -m "test(web): 演出を畳む経路が牌を空中に残さないことを固定する
 
 ?effects=off・手で叩いた早送り・6秒超の自動切り捨ての3つが、いずれも
@@ -954,5 +1009,9 @@ active を null にすることを見る。**残ると代理の牌が空中で�
 
 このウェーブが終わったら `【要確認】` を付けて次を問う。**ループには乗せない。**
 
-- 動きの速さと弧の高さが自然か
+- 動きの速さと弧の高さが自然か（`preview.html?motion=0/0.5/1` の3枚を見る）
 - ツモ・打牌以外がまだ瞬間移動であることが、次のウェーブまで許容できるか
+
+**このウェーブでも瞬間移動が残る場面**（Codex が実コードから挙げたもの）:
+鳴き（手牌→副露、河→副露）、加槓による既存副露の組み替え、ドラ表示の追加、
+局の開始と終了。いずれも Wave 3h 以降の範囲である。
