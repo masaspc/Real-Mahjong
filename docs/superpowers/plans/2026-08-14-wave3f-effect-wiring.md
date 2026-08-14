@@ -28,7 +28,15 @@
 
 **Interfaces:**
 - Consumes: `apply(previous, envelope, nowMs)` と `emptyState(you)`（`game/state.ts`）、`EffectPlayer` `defaultCatchUp`（`timeline/player.ts`）、`Clock` `ManualClock`（`timeline/clock.ts`）
-- Produces: `class Presentation` — `receive(envelope)` / `update(nowMs)` / `state` / `receivedSeq` / `skip()` / `jumpToLatest()` / `pendingMs`
+- Produces: `class Presentation` — `receive(envelope)` / `update()` / `state` / `receivedSeq` / `skip()` / `jumpToLatest()` / `pendingMs` / `playbackRate`
+
+**時刻の扱い（ここを外すと締切がずれる）:**
+
+`apply` の第3引数は `request_action` の相対締切を絶対時刻へ直すのに使われる
+（`apps/web/src/game/state.ts:292` の `deadlineAt: nowMs + event.deadline_ms`）。
+**渡すのは「受信した時刻」であって「表示した時刻」ではない。**表示時刻を渡すと
+演出待ちのぶんだけ締切が後ろへずれ、**実際には切れているのに時間が残って見える。**
+`receive()` で `clock.now()` を控え、畳むときにその値を渡すこと。
 
 - [ ] **Step 1: 失敗する試験を書く**
 
@@ -40,18 +48,48 @@ import { describe, expect, it } from "vitest";
 import { Presentation } from "./presentation";
 import { ManualClock } from "../timeline/clock";
 import type { ClientEventEnvelope } from "../protocol/ClientEventEnvelope";
+import type { Seat } from "../protocol/Seat";
+import type { Tile } from "../protocol/Tile";
 
-/** 打牌のイベント1件。演出は 350ms。 */
-function discard(seq: number, seat: 0 | 1 | 2 | 3, tile: number): ClientEventEnvelope {
-  return {
-    seq,
-    event: { type: "discard", seat, tile, manner: "tegiri", riichi: false },
-  } as unknown as ClientEventEnvelope;
+/**
+ * **`as unknown as` で型検査を黙らせてはならない。**
+ *
+ * 通してしまうと、実在しない欄（`discard` の `riichi`）や無い値
+ * （`manner: "tegiri"`。正しくは `tedashi` か `tsumogiri`）に気付けない。
+ * ここは素直に型を満たす。`Seat` も `Tile` も素の `number` なので
+ * キャストは要らない。
+ */
+
+/** 打牌。演出は 350ms。 */
+function discard(seq: number, seat: Seat, tile: Tile): ClientEventEnvelope {
+  return { seq, event: { type: "discard", seat, tile, manner: "tedashi" } };
 }
 
-/** ツモのイベント1件。演出は 250ms。 */
-function draw(seq: number, seat: 0 | 1 | 2 | 3): ClientEventEnvelope {
-  return { seq, event: { type: "draw", seat } } as unknown as ClientEventEnvelope;
+/** ツモ。演出は 250ms。他家のツモ牌は見えないので `tile` は null。 */
+function draw(seq: number, seat: Seat, wallRemaining = 69): ClientEventEnvelope {
+  return {
+    seq,
+    event: {
+      type: "draw",
+      seat,
+      tile: seat === 0 ? 4 : null,
+      source: "wall",
+      wall_remaining: wallRemaining,
+    },
+  };
+}
+
+/** 演出を持たないイベント。リーチの成立は点棒が動くだけで場は止まらない。 */
+function riichiAccepted(seq: number, seat: Seat): ClientEventEnvelope {
+  return { seq, event: { type: "riichi", seat, step: "accepted" } };
+}
+
+/** 行動要求。締切が受信時刻を基準にしているかを見るために使う。 */
+function requestAction(seq: number, deadlineMs: number): ClientEventEnvelope {
+  return {
+    seq,
+    event: { type: "request_action", window_id: 1, options: [], deadline_ms: deadlineMs },
+  };
 }
 
 describe("Presentation", () => {
@@ -131,14 +169,28 @@ describe("Presentation", () => {
     expect(p.state.seats[1].river).toHaveLength(1);
   });
 
+  it("締切は受信した時刻を基準にする", () => {
+    const clock = new ManualClock();
+    const p = new Presentation(0, clock);
+    // 打牌の演出（350ms）を挟んでから行動要求が届く。
+    p.receive(discard(1, 1, 5));
+    clock.advance(1_000);
+    p.receive(requestAction(2, 20_000));
+
+    // 受信は 1,000ms の時点。表示はここから更に遅れる。
+    clock.advance(5_000);
+    p.update();
+
+    // **表示時刻（6,000）を基準にすると 26,000 になる。**演出を見ている間に
+    // 締切が後ろへずれ、実際には切れているのに時間が残って見える。
+    expect(p.state.pending?.deadlineAt).toBe(21_000);
+  });
+
   it("演出を持たないイベントは待たせない", () => {
     const clock = new ManualClock();
     const p = new Presentation(0, clock);
-    // match_start は effectOf が null を返すので 0ms。
-    p.receive({
-      seq: 0,
-      event: { type: "match_start", you: 0 },
-    } as unknown as ClientEventEnvelope);
+    // リーチの成立は effectOf が null を返すので 0ms。
+    p.receive(riichiAccepted(0, 1));
 
     p.update();
     expect(p.state.lastSeq).toBe(0);
@@ -192,13 +244,20 @@ export class Presentation {
   #state: GameState;
   /** 受信済みの最大 seq。**再接続はこれを送る。**表示より先を行く。 */
   #receivedSeq: number | null = null;
-  /** 受信順の控え。`EffectPlayer` は seq を持たないのでこちらで持つ。 */
-  #envelopes: ClientEventEnvelope[] = [];
+  /**
+   * 受信順の控え。`EffectPlayer` は seq を持たないのでこちらで持つ。
+   *
+   * **受信した時刻も一緒に控える。**`apply` はこれを `deadlineAt` の基準に
+   * 使うので、畳むときの時刻を渡すと締切が演出待ちのぶん後ろへずれる。
+   */
+  #envelopes: { envelope: ClientEventEnvelope; receivedAt: number }[] = [];
+  readonly #clock: Clock;
   /** すでに畳んだ件数。二重に畳まないための印。 */
   #folded = 0;
 
   constructor(you: Seat, clock: Clock, policy: CatchUpPolicy = defaultCatchUp) {
     this.#player = new EffectPlayer(clock, policy);
+    this.#clock = clock;
     this.#state = emptyState(you);
   }
 
@@ -219,7 +278,7 @@ export class Presentation {
   }
 
   receive(envelope: ClientEventEnvelope): void {
-    this.#envelopes.push(envelope);
+    this.#envelopes.push({ envelope, receivedAt: this.#clock.now() });
     this.#receivedSeq = envelope.seq;
     this.#player.push(envelope.event);
   }
@@ -252,11 +311,13 @@ export class Presentation {
   #fold(): void {
     const done = this.#player.presented.length;
     for (; this.#folded < done; this.#folded += 1) {
-      const envelope = this.#envelopes[this.#folded];
-      if (envelope === undefined) {
+      const item = this.#envelopes[this.#folded];
+      if (item === undefined) {
         return;
       }
-      this.#state = apply(this.#state, envelope, performance.now());
+      // **受信時刻を渡す。**`performance.now()` を直に読んではならない。
+      // 実時間を握るのは `Clock` だけであり、締切の基準は表示ではなく受信である。
+      this.#state = apply(this.#state, item.envelope, item.receivedAt);
     }
   }
 }
@@ -265,12 +326,12 @@ export class Presentation {
 - [ ] **Step 4: 試験が通ることを確かめる**
 
 Run: `pnpm --dir apps/web test src/game/presentation.test.ts`
-Expected: 8 passed
+Expected: 9 passed
 
 全体でも退行が無いことを見る。
 
 Run: `pnpm --dir apps/web test`
-Expected: 179 passed
+Expected: 180 passed
 
 - [ ] **Step 5: 型検査**
 
@@ -338,12 +399,15 @@ const connection = connect({
   },
   onStatus(text) {
     document.title = `麻雀 — ${text}`;
-    if (text.includes("接続")) {
-      // 再接続の取り直しは演出を挟まずに最新へ飛ばす。
-      presentation.jumpToLatest();
-    }
   },
 });
+```
+
+**再接続で `jumpToLatest()` を呼んではならない。**表示用の文字列を
+`includes("接続")` で拾うのは脆いうえ、仕様 6.3 は閾値による加速と切り捨てを
+求めている（`docs/superpowers/specs/2026-08-08-real-mahjong-design.md:316`）。
+取り直した backlog は `EffectPlayer` の方針に任せる。溜まりが 1,500ms を超えれば
+勝手に速まり、6,000ms を超えれば勝手に飛ぶ。**判断を二重に持たない。**
 ```
 
 クリックは、打牌に使えないときだけ早送りにする。
@@ -380,12 +444,28 @@ const renderFrame = (): void => {
 requestAnimationFrame(renderFrame);
 
 document.addEventListener("visibilitychange", () => {
-  // 裏に回っている間 requestAnimationFrame は止まる。戻ったら追いつく。
+  // 裏に回っている間 requestAnimationFrame は止まり、演出が溜まる。
+  // **ここでも飛ばすと決めつけない。**溜まりが少なければ普通に見せる。
   if (!document.hidden) {
-    presentation.jumpToLatest();
+    presentation.update();
     draw();
   }
 });
+```
+
+**演出を切る口を1つ用意する。**`?effects=off` で付けたときは受信した端から
+見せる。間の長さが体感として妥当かを人間が判断するとき、**入れた場合と切った
+場合を並べて比べられないと決められない。**
+
+```ts
+const effectsOff = new URLSearchParams(location.search).get("effects") === "off";
+// ...受信したとき
+onEvent(envelope) {
+  presentation.receive(envelope);
+  if (effectsOff) {
+    presentation.skip();
+  }
+},
 ```
 
 - [ ] **Step 2: 型検査とビルドが通ることを確かめる**
@@ -396,7 +476,7 @@ Expected: エラー0件でビルド成功
 - [ ] **Step 3: 既存の試験が壊れていないことを確かめる**
 
 Run: `pnpm --dir apps/web test`
-Expected: 179 passed
+Expected: 180 passed
 
 - [ ] **Step 4: 実際に描けることを確かめる**
 
@@ -457,12 +537,19 @@ function envelopes(raw: string): ClientEventEnvelope[] {
     .map((line) => JSON.parse(line) as ClientEventEnvelope);
 }
 
-/** 演出を挟まずに畳んだ、答え合わせ用の状態。 */
-function directly(all: ClientEventEnvelope[]): GameState {
+/**
+ * 演出を挟まずに畳んだ、答え合わせ用の状態。
+ *
+ * **受信時刻を揃えて渡す。**`apply` は `request_action` の締切を
+ * `nowMs + deadline_ms` で作るので、片方だけ 0 で畳むと `deadlineAt` が
+ * 食い違う。牌譜の最後は `match_end` が `pending` を null にするため
+ * 最終状態だけ見ると偶然一致してしまい、**検査になっていない。**
+ */
+function directly(all: ClientEventEnvelope[], times: number[]): GameState {
   let state = emptyState(0);
-  for (const envelope of all) {
-    state = apply(state, envelope, 0);
-  }
+  all.forEach((envelope, index) => {
+    state = apply(state, envelope, times[index] ?? 0);
+  });
   return state;
 }
 
@@ -473,22 +560,45 @@ describe("演出は盤面を変えない", () => {
 
     const clock = new ManualClock();
     const p = new Presentation(0, clock);
+    const times: number[] = [];
     for (const envelope of all) {
+      times.push(clock.now());
       p.receive(envelope);
       // 1件ずつ、最長の演出（リーチ宣言 1,800ms）より長く進める。
       clock.advance(2_000);
       p.update();
     }
 
-    expect(p.state).toEqual(directly(all));
+    expect(p.state).toEqual(directly(all, times));
     expect(p.pendingMs).toBe(0);
     expect(p.receivedSeq).toBe(all[all.length - 1]?.seq);
+  });
+
+  it("1件ごとに、締切まで含めて一致する", () => {
+    const all = envelopes(seed1);
+    const clock = new ManualClock();
+    const p = new Presentation(0, clock);
+    // **答え合わせ側も1件ずつ進める。**毎回 slice して畳み直すと
+    // 1,304件の二乗になり、試験が終わらない。
+    let expected = emptyState(0);
+
+    for (const envelope of all) {
+      const receivedAt = clock.now();
+      p.receive(envelope);
+      expected = apply(expected, envelope, receivedAt);
+      clock.advance(2_000);
+      p.update();
+      // 最終状態だけを見ると、`match_end` が `pending` を null にするので
+      // 締切の食い違いが消えてしまう。**途中を見ないと検査にならない。**
+      expect(p.state).toEqual(expected);
+    }
   });
 
   it("時計を進めずに全部積んで早送りしても、同じ盤面になる", () => {
     const all = envelopes(seed1);
     const clock = new ManualClock();
     const p = new Presentation(0, clock);
+    const times = all.map(() => 0);
     for (const envelope of all) {
       p.receive(envelope);
     }
@@ -496,7 +606,7 @@ describe("演出は盤面を変えない", () => {
     p.update();
 
     // **早送りは見せ方であって、結果ではない。**
-    expect(p.state).toEqual(directly(all));
+    expect(p.state).toEqual(directly(all, times));
   });
 });
 ```
@@ -504,23 +614,35 @@ describe("演出は盤面を変えない", () => {
 - [ ] **Step 2: 試験が通ることを確かめる**
 
 Run: `pnpm --dir apps/web test src/game/presentation-replay.test.ts`
-Expected: 2 passed
+Expected: 3 passed
 
 全体でも退行が無いことを見る。
 
 Run: `pnpm --dir apps/web test`
-Expected: 181 passed
+Expected: 183 passed
 
 - [ ] **Step 3: 試験が本当に効くことを確かめる**
 
-`presentation.ts` の `#fold` で `this.#folded` を毎回 0 に戻すよう一時的に壊し、
-試験が落ちることを確かめる。**確かめたら必ず元へ戻す。**
+**どの試験がどの誤りを捕まえるかは、実際に壊して確かめた結果を書いてある。**
+思い込みで書くと、守っていないものを守っているつもりになる。
+**確かめたら必ず元へ戻す。**
+
+`#fold` の `item.receivedAt` を `0` に潰す。
 
 壊した状態で Run: `pnpm --dir apps/web test src/game/presentation-replay.test.ts`
-Expected: FAIL（同じイベントを何度も畳むので盤面が合わない）
+Expected: FAIL 1件（「1件ごとに、締切まで含めて一致する」だけが落ちる）
+
+**最終状態の比較も早送りの比較も、この誤りを捕まえない。**牌譜の最後で
+`match_end` が `pending` を null にするため、締切の食い違いが消えるからである。
+「半荘を流し切ると一致する」だけを書いて安心してはならない。
+
+もう一方の誤り——`#fold` の先頭で `this.#folded` を 0 に戻してしまう——は、
+**replay では捕まらず `presentation.test.ts` の「同じイベントを二度畳まない」と
+「溜まった演出を早送りできる」が捕まえる。**局の頭で河が作り直されるので、
+牌譜を流し切ると重複が消えてしまう。
 
 戻してから Run: `pnpm --dir apps/web test src/game/presentation-replay.test.ts`
-Expected: 2 passed
+Expected: 3 passed
 
 - [ ] **Step 4: コミット**
 
@@ -543,10 +665,10 @@ git commit -m "test(web): 演出が盤面を変えないことを半荘まるご
 
 **認められた妥協:**
 
-- 演出は「待つ」だけで、牌は依然として瞬間移動する。`timeline.ts` の `tween` は次のウェーブで使う
-- `#fold` の中で `performance.now()` を呼んでいる。これは `apply` が持ち時間バーの
-  基準時刻に使うもので、**演出の進行には使っていない**（進行は `Clock` のみ）。
-  試験では `pending` を持つイベントを扱わないため揺れない
+- 演出は「待つ」だけで、牌は依然として瞬間移動する。`timeline.ts` の `tween` は次のウェーブで使う。
+  **この状態を人に見せると「重い」と受け取られうる**という指摘を受けたので、`?effects=off` で
+  切って比べられるようにしてある。可否は人間が決める
+- 実時間は `Clock` だけが握る。`performance.now()` はこの層のどこからも呼ばない
 
 **型の整合:** `Presentation` は Task 1 で定義し、Task 2・3 はそれを読むだけ。
 `GameState` `ClientEventEnvelope` は既存のものをそのまま使う。
