@@ -337,7 +337,7 @@ def check_characters(text):
     bad = set()
     for ch in text:
         # 【】は LOOP_CONVENTION が定める合図（【要確認】）なので通す。
-        if ord(ch) < 128 or ch in "、。「」『』（）ー・…—→×〜§±≤≥·【】":
+        if ord(ch) < 128 or ch in "、。「」『』（）ー・…—→×〜§±≤≥·【】π":
             continue
         name = unicodedata.name(ch, "")
         if name.startswith(("CJK UNIFIED", "HIRAGANA", "KATAKANA", "FULLWIDTH",

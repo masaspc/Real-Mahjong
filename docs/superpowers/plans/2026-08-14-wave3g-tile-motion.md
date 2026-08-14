@@ -12,7 +12,7 @@
 
 - **牌の中間位置を状態として持たない。**イベント・前後の配置・経過時刻だけから毎回計算する。累積すると早送り4倍・6秒超の切り捨て・再接続で**牌が空中に取り残される**
 - **`timeline/` は読み取りの窓口を足すだけ。**`EffectPlayer` の再生の挙動（待ち時間・加速・切り捨て）は1行も変えない。Wave 3f では「変更しない」としていたが、**いま何をどこまで再生中かを外から問えないと動きを描けない**ため、`current` の取得のみ足す。既存の試験がそのまま通ることで挙動不変を担保する
-- **早送りの出口を1つにする。**`?effects=off`・手で叩いた早送り・6秒超の自動切り捨て・再接続は、すべて同じ終了処理を通す。**別経路を作ると `effects=off` だけ挙動が違う事故になる**
+- **演出を畳む経路を1つにする。**`?effects=off`・手で叩いた早送り・6秒超の自動切り捨ての3つは、すべて同じ終了処理を通す。**別経路を作ると `effects=off` だけ挙動が違う事故になる。**再接続はここに含めない。Wave 3f で、取り直した backlog は通常の加速と6秒判定に委ねる設計にした
 - **動いている牌は掴めない。**移動中はレイキャストの対象から外す。終端で最終配置へ焼き込んでから押せるようにする
 - 実時間を直接読まない。時刻は `Clock` のみ。試験は `ManualClock` で駆動する
 - 既存の 183 件の試験の期待値を緩めない
@@ -323,17 +323,36 @@ git commit -m "feat(web): 再生中のイベントと適用後の盤面を出す
 複数でき、**フレームごとに違う牌が選ばれて手牌がちらつく。**席とイベントから
 一意に決まる規則にする。
 
+規則は3段で、**上から順に当てて、当たったものは下の段では扱わない。**
+
+**第1段。領域をまたぐ牌をイベントから決める。**
+
 | イベント | 起点 | 着地 |
 |---|---|---|
 | ツモ（自分） | 消えた山の牌 | `drawn-${席}` |
-| ツモ（他家） | 消えた山の牌 | その席の手牌の**ツモ側の端** |
+| ツモ（他家） | 消えた山の牌 | その席の手牌の**添字が最大**の牌 |
 | 打牌（自分・ツモ切り） | `drawn-${自分}` | 新しくできた河の牌 |
 | 打牌（自分・手出し） | `hand-${自分}-${i}`（`encoded` が一致する最初のもの） | 新しくできた河の牌 |
-| 打牌（他家） | その席の手牌のツモ側の端 | 新しくできた河の牌 |
-| 手牌の整列（自分） | 打牌後に残った手牌 | 同じ牌の新しい位置 |
+| 打牌（他家） | その席の手牌の添字が最大の牌 | 新しくできた河の牌 |
 
-手牌の整列は、**同じ `encoded` の n 個目どうしを順に対応させる。**これで
-並びが変わっても対応が一意に決まる。
+**消えた山の牌は番号が最も小さいものである。**`placement.ts:304` の
+`slot = WALL_SLOTS - wallRemaining + index` は、残りが減るほど**開始の番号が
+上がる**。したがって `wall-135` は常に残り、消えるのは下端である。
+**「最も大きいもの」を選ぶと、両方に存在する牌を掴んで動きが1つも出ない。**
+
+**第2段。自分の手牌の中の並び替え。**
+`before` と `after` の `hand-${自分}-*` を、**同じ `encoded` の n 個目どうし**で
+対応させる。第1段で起点になった牌は除く。自分の手牌はツモのたびに
+`sortTiles` で並べ替わる（`state.ts:207`）ので、鍵で対応させると**中身が
+入れ替わった牌が滑って見える。**
+
+**第3段。それ以外で、鍵が前後の両方にあり姿勢が変わったもの。**
+そのまま滑らせる。`hand-${自分}-*` は第2段が扱うので除く。
+
+**この第3段が無いと Goal を達成できない。**手牌も河も列を中央揃えするため、
+枚数が1枚変わると**残りの牌がすべて半スロットずれる。**他家がツモると
+その席の13枚が、リーチ宣言牌が河へ入るとその段の牌が、それぞれ動く。
+1枚だけを動かして残りを瞬間移動させたのでは、瞬間移動は無くならない。
 
 - [ ] **Step 1: 型と失敗する試験を書く**
 
@@ -353,7 +372,13 @@ function envelope(seq: number, event: ClientEvent): ClientEventEnvelope {
   return { seq, event };
 }
 
-/** 東1局の頭。自分に13枚、山は70枚。 */
+/**
+ * 東1局の頭。自分に13枚、他家も13枚、山は70枚。
+ *
+ * **手牌は `round_start` では配られない。**局の情報を運ぶのは `round_start`、
+ * 手牌を配るのは `deal` である。`round_start` に `hand` を書くと型が通らず、
+ * 通したとしても全員の手牌が0枚のまま試験が無意味になる。
+ */
 function started(): GameState {
   let state = emptyState(0);
   state = apply(
@@ -363,11 +388,19 @@ function started(): GameState {
       round: { wind: "East", number: 1 },
       dealer: 0,
       honba: 0,
-      sticks: 0,
+      riichi_sticks: 0,
       scores: [25000, 25000, 25000, 25000],
-      hand: [0, 1, 2, 9, 10, 11, 18, 19, 20, 27, 27, 33, 33],
+      seed_commit: "x",
+    }),
+    0,
+  );
+  state = apply(
+    state,
+    envelope(1, {
+      type: "deal",
+      your_hand: [0, 1, 2, 9, 10, 11, 18, 19, 20, 27, 27, 33, 33],
+      hand_sizes: [13, 13, 13, 13],
       dora_indicator: 5,
-      seed_commitment: "x",
     }),
     0,
   );
@@ -421,9 +454,42 @@ describe("motionsFor", () => {
       0,
     );
 
-    expect(motions).toHaveLength(1);
-    expect(motions[0]?.fromKey.startsWith("wall-")).toBe(true);
-    expect(motions[0]?.toKey.startsWith("hand-1-")).toBe(true);
+    const drawn = motions.find((m) => m.toKey.startsWith("hand-1-"));
+    expect(drawn?.fromKey.startsWith("wall-")).toBe(true);
+    // **1件だけを期待してはいけない。**手牌は列を中央揃えするので、
+    // 13枚が14枚になると残りの13枚も動く。それも動きとして出る。
+    expect(motions.length).toBeGreaterThan(1);
+  });
+
+  it("姿勢が変わる牌には必ず動きがある", () => {
+    const event: ClientEvent = {
+      type: "draw",
+      seat: 1,
+      tile: null,
+      source: "wall",
+      wall_remaining: 69,
+    };
+    const { before, after } = step(started(), event);
+    const beforeAll = placementsFor(before, 0);
+    const afterAll = placementsFor(after, 0);
+    const motions = motionsFor(beforeAll, afterAll, event, 0);
+
+    const wasAt = new Map(beforeAll.map((p) => [p.key, p]));
+    const covered = new Set(motions.map((m) => m.toKey));
+
+    // **これがこのウェーブの Goal そのものである。**動かない牌が1枚でも
+    // 位置を変えたら、それは瞬間移動している。
+    for (const p of afterAll) {
+      const old = wasAt.get(p.key);
+      if (old === undefined) continue;
+      const moved =
+        old.position.x !== p.position.x ||
+        old.position.y !== p.position.y ||
+        old.position.z !== p.position.z;
+      if (moved) {
+        expect(covered.has(p.key)).toBe(true);
+      }
+    }
   });
 
   it("他家の打牌は手牌の端から河へ動く", () => {
@@ -491,25 +557,31 @@ Expected: FAIL（`motion.ts` が無い）
 `apps/web/src/scene/motion.ts` を作る。要点は次のとおり。
 
 - `Pose = { position: Vec3; rotationX: number; rotationY: number }`
-- `Motion = { fromKey: string; toKey: string; encoded: Tile; faceUp: boolean; from: Pose; to: Pose; lift: number }`
+- `Motion = { id: string; fromKey: string; toKey: string; encoded: Tile; faceUp: boolean; from: Pose; to: Pose; lift: number }`
 - `before` と `after` を `Map<string, Placement>` にする
-- イベントの型で分岐し、上の表のとおり起点と着地の鍵を決める
-- 「消えた山の牌」は `before` にあって `after` に無い `wall-` の鍵。**複数あるときは
-  番号が最も大きいものを選ぶ**（山は片端から減るため）
-- 「新しくできた河の牌」は `after` にあって `before` に無い `river-${席}-` の鍵
-- 手牌の整列は、自分の席について `before` と `after` の `hand-0-*` を
-  `encoded` ごとに出現順で対応させ、位置が変わったものだけ動きにする
+- **第1段。**イベントの型で分岐し、上の表のとおり起点と着地の鍵を決める
+  - 「消えた山の牌」は `before` にあって `after` に無い `wall-` の鍵。
+    **複数あるときは番号が最も小さいものを選ぶ。**`slot` は
+    `WALL_SLOTS - wallRemaining + index` なので、残りが減ると開始番号が上がる。
+    **番号が大きいほうを選ぶと、両方に在る牌を掴んで動きが1つも出ない**
+  - 「新しくできた河の牌」は `after` にあって `before` に無い `river-${席}-` の鍵
+  - 他家の手牌の端は、`hand-${席}-` のうち**添字が最大**のもの
+- **第2段。**自分の席の `hand-${viewer}-*` を、`encoded` ごとに出現順で対応させる。
+  第1段で起点に使った鍵は除く。位置が変わったものだけ動きにする
+- **第3段。**残りのうち、鍵が前後の両方にあって姿勢が変わったものを滑らせる。
+  `hand-${viewer}-*` は第2段が扱ったので除く
 - 起点も着地も見つからないときは**動きを作らない。**当てずっぽうで動かすより、
   今までどおり即座に置いたほうがよい
-- `lift` はツモと打牌で正の値（例: ツモ 0.8、打牌 1.2）、整列は 0
+- `lift` は第1段のみ正の値（ツモ 0.8、打牌 1.2）、第2段と第3段は 0
+- `id` は `${fromKey}->${toKey}` とする。代理メッシュの鍵に使う
 
 - [ ] **Step 4: 試験が通ることを確かめる**
 
 Run: `pnpm --dir apps/web test src/scene/motion.test.ts`
-Expected: 5 passed
+Expected: 6 passed
 
 Run: `pnpm --dir apps/web test`
-Expected: 195 passed
+Expected: 196 passed
 
 - [ ] **Step 5: コミット**
 
@@ -532,6 +604,8 @@ git commit -m "feat(web): どの牌がどこへ動くかをイベントから決
 **Files:**
 - Modify: `apps/web/src/scene/table.ts`
 - Modify: `apps/web/src/main.ts`
+- Modify: `apps/web/preview.html`
+- Modify: `apps/web/src/preview.ts`
 
 **Interfaces:**
 - Consumes: `motionsFor`（Task 3）、`Presentation.active`（Task 2）、`tween` `easeOutCubic`（`timeline/timeline.ts`）
@@ -549,6 +623,38 @@ git commit -m "feat(web): どの牌がどこへ動くかをイベントから決
   5. 弧は `y` に `lift × 4t(1-t)` を足す（t=0 と t=1 で 0 になる）
   6. 代理のメッシュは `pickHandTile` の対象から外す
 - 動きが空なら `sync` と同じ結果になること
+
+**代理のメッシュは別の入れ物で持つ。**`#meshes` へ入れてはならない。
+`sync` は「`placements` に無い鍵のメッシュを消す」（`table.ts:138`）ので、
+**次のフレームの `sync` が代理を消してしまう。**
+
+```ts
+  /** 移動中の代理。`#meshes` とは別に持つ。鍵は Motion の id。 */
+  readonly #moving = new Map<string, TileMesh>();
+```
+
+回収の規則を決めておく。**決めないと、イベントが切り替わった瞬間に前の代理が
+卓上へ residue として残る。**
+
+- `syncWithMotion` の先頭で、今回の `motions` に無い id の代理をすべて捨てる
+- `sync`（動きが無い経路）の先頭で、代理をすべて捨てる
+- `dispose` で代理もすべて捨てる
+
+**回転は最短の向きへ回す。**`rotationX` と `rotationY` をそのまま線形に
+補間すると、たとえば `π` から `-π` へ回すときに一周して見える。差を
+`[-π, π]` へ畳んでから補間する。
+
+```ts
+/** 角度の差を [-π, π] へ畳む。**畳まないと牌が大回りする。** */
+function shortestDelta(from: number, to: number): number {
+  let d = (to - from) % (Math.PI * 2);
+  if (d > Math.PI) d -= Math.PI * 2;
+  if (d < -Math.PI) d += Math.PI * 2;
+  return d;
+}
+```
+
+補間は `from + shortestDelta(from, to) * easeOutCubic(t)` とする。
 
 `main.ts` の描画ループを次のようにする。
 
@@ -580,7 +686,7 @@ Expected: エラー0件でビルド成功
 - [ ] **Step 3: 既存の試験が壊れていないことを確かめる**
 
 Run: `pnpm --dir apps/web test`
-Expected: 195 passed
+Expected: 196 passed
 
 - [ ] **Step 4: 動いていることを絵で確かめる**
 
@@ -618,10 +724,18 @@ from + ease(t)×(to-from) を計算し直す。**位置を足し込まない。*
 
 ---
 
-### Task 5: 早送りの出口を1つにする
+### Task 5: 演出を畳む経路が牌を空中に残さないことを固定する
 
-`?effects=off`・手で叩いた早送り・6秒超の自動切り捨て・再接続が、
-**すべて同じ終了処理を通る**ことを確かめる。
+演出を途中でやめる経路は**3つ**ある。`?effects=off`・手で叩いた早送り・
+6秒超の自動切り捨て。いずれも `Presentation.skip()` か `EffectPlayer` 内部の
+`skip()` を通り、キューを空にして畳む。**どの経路でも `active` が `null` に
+なる**ことを試験で固定する。`active` が残ると、代理の牌が空中で止まる。
+
+**再接続はこの3つに含めない。**Wave 3f で、再接続では `jumpToLatest()` を
+呼ばず、取り直した backlog を通常の加速と6秒判定へ渡す設計にした
+（`main.ts` の `onStatus` にその旨を書いてある）。**「4経路が同じ出口」と
+書くのは実配線と食い違う。**`jumpToLatest()` は API として残っているので、
+呼んだときに `active` が消えることだけを別に確かめる。
 
 **Files:**
 - Modify: `apps/web/src/main.ts`
@@ -671,7 +785,7 @@ describe("早送りの出口", () => {
     expect(p.state.seats[1].river).toHaveLength(20);
   });
 
-  it("再接続で最新へ飛ぶと再生中のものが無くなる", () => {
+  it("最新へ飛ばすと再生中のものが無くなる", () => {
     const clock = new ManualClock();
     const p = new Presentation(0, clock);
     p.receive(discard(1, 1, 5));
@@ -693,7 +807,7 @@ Expected: 3 passed
 - [ ] **Step 3: 全体を確かめる**
 
 Run: `pnpm --dir apps/web test`
-Expected: 198 passed
+Expected: 199 passed
 
 Run: `pnpm --dir apps/web typecheck && pnpm --dir apps/web build`
 Expected: エラー0件でビルド成功
