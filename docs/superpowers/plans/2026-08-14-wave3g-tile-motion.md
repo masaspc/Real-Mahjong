@@ -333,7 +333,17 @@ git commit -m "feat(web): 再生中のイベントと適用後の盤面を出す
 | ツモ（他家） | 消えた山の牌 | その席の手牌の**添字が最大**の牌 |
 | 打牌（自分・ツモ切り） | `drawn-${自分}` | 新しくできた河の牌 |
 | 打牌（自分・手出し） | `hand-${自分}-${i}`（`encoded` が一致する最初のもの） | 新しくできた河の牌 |
+| 打牌（自分・手出し）の**ツモ牌** | `drawn-${自分}` | ツモ牌が入った `hand-${自分}-${j}` |
 | 打牌（他家） | その席の手牌の添字が最大の牌 | 新しくできた河の牌 |
+
+**手出しでは牌が2枚動く。**手出しをすると、それまで手牌から離れて置かれていた
+ツモ牌が手牌へ吸収される（`state.ts:203` の `state.hand.push(state.drawn)`）。
+`drawn-0` は消え、その牌は `hand-0-${j}` として現れる。**鍵が変わるので、
+第2段（`hand-*` どうしの対応）も第3段（同じ鍵の対応）も拾えない。**
+ここを第1段に入れないと、切った牌が河へ飛ぶ横でツモ牌が手牌へ瞬間移動する。
+
+着地の添字 `j` は、第2段の対応を取ったあとに**余った `after` の手牌の位置**である。
+ツモ牌と同じ牌が手牌にもある場合は、余りが一意に決まるのでそれを使う。
 
 **消えた山の牌は番号が最も小さいものである。**`placement.ts:304` の
 `slot = WALL_SLOTS - wallRemaining + index` は、残りが減るほど**開始の番号が
@@ -407,6 +417,29 @@ function started(): GameState {
   return state;
 }
 
+/**
+ * 自分がツモった直後。手牌13枚 + ツモ牌1枚。
+ *
+ * **打牌の試験はここから始める。**13枚から切ると12枚になり、実際の局には
+ * 現れない形になる。ツモ→打牌の 14→13 が本来の経路である。
+ */
+function drawnMine(): GameState {
+  return apply(
+    started(),
+    envelope(2, { type: "draw", seat: 0, tile: 4, source: "wall", wall_remaining: 69 }),
+    0,
+  );
+}
+
+/** 他家がツモった直後。その席だけ14枚。 */
+function drawnOther(): GameState {
+  return apply(
+    started(),
+    envelope(2, { type: "draw", seat: 1, tile: null, source: "wall", wall_remaining: 69 }),
+    0,
+  );
+}
+
 function step(state: GameState, event: ClientEvent): {
   before: GameState;
   after: GameState;
@@ -461,33 +494,66 @@ describe("motionsFor", () => {
     expect(motions.length).toBeGreaterThan(1);
   });
 
-  it("姿勢が変わる牌には必ず動きがある", () => {
-    const event: ClientEvent = {
-      type: "draw",
-      seat: 1,
-      tile: null,
-      source: "wall",
-      wall_remaining: 69,
-    };
-    const { before, after } = step(started(), event);
-    const beforeAll = placementsFor(before, 0);
-    const afterAll = placementsFor(after, 0);
-    const motions = motionsFor(beforeAll, afterAll, event, 0);
+  it("そのまま居座る牌以外は、すべて動きで説明できる", () => {
+    // **これがこのウェーブの Goal そのものである。**
+    //
+    // 「位置が変わったものに動きがあるか」では足りない。前の盤面に鍵が
+    // 無い牌（ツモ牌が手牌へ吸収されるなど）を飛ばしてしまい、**瞬間移動が
+    // 起きるまさにその場所を検査しない。**
+    //
+    // 正しい言い方はこうである。**後の盤面のどの牌も、前と寸分違わず
+    // 同じ場所に同じ姿勢で在ったか、さもなくば動いて来たかのどちらかである。**
+    const scenarios: { name: string; from: GameState; event: ClientEvent }[] = [
+      {
+        name: "自分のツモ",
+        from: started(),
+        event: { type: "draw", seat: 0, tile: 4, source: "wall", wall_remaining: 69 },
+      },
+      {
+        name: "他家のツモ",
+        from: started(),
+        event: { type: "draw", seat: 1, tile: null, source: "wall", wall_remaining: 69 },
+      },
+      {
+        name: "自分のツモ切り",
+        from: drawnMine(),
+        event: { type: "discard", seat: 0, tile: 4, manner: "tsumogiri" },
+      },
+      {
+        name: "自分の手出し",
+        from: drawnMine(),
+        event: { type: "discard", seat: 0, tile: 0, manner: "tedashi" },
+      },
+      {
+        name: "他家の打牌",
+        from: drawnOther(),
+        event: { type: "discard", seat: 1, tile: 7, manner: "tsumogiri" },
+      },
+    ];
 
-    const wasAt = new Map(beforeAll.map((p) => [p.key, p]));
-    const covered = new Set(motions.map((m) => m.toKey));
+    for (const scenario of scenarios) {
+      const { before, after } = step(scenario.from, scenario.event);
+      const beforeAll = placementsFor(before, 0);
+      const afterAll = placementsFor(after, 0);
+      const motions = motionsFor(beforeAll, afterAll, scenario.event, 0);
 
-    // **これがこのウェーブの Goal そのものである。**動かない牌が1枚でも
-    // 位置を変えたら、それは瞬間移動している。
-    for (const p of afterAll) {
-      const old = wasAt.get(p.key);
-      if (old === undefined) continue;
-      const moved =
-        old.position.x !== p.position.x ||
-        old.position.y !== p.position.y ||
-        old.position.z !== p.position.z;
-      if (moved) {
-        expect(covered.has(p.key)).toBe(true);
+      const wasAt = new Map(beforeAll.map((p) => [p.key, p]));
+      const covered = new Set(motions.map((m) => m.toKey));
+
+      for (const p of afterAll) {
+        const old = wasAt.get(p.key);
+        // 位置だけでなく姿勢も見る。**手牌は立ち河は寝るので、回転を見ないと
+        // 「同じ場所で向きだけ変わった」牌を見逃す。**
+        const stayed =
+          old !== undefined &&
+          old.position.x === p.position.x &&
+          old.position.y === p.position.y &&
+          old.position.z === p.position.z &&
+          old.rotationX === p.rotationX &&
+          old.rotationY === p.rotationY;
+        if (!stayed && !covered.has(p.key)) {
+          throw new Error(`${scenario.name}: ${p.key} が動きなしで現れた`);
+        }
       }
     }
   });
@@ -495,11 +561,12 @@ describe("motionsFor", () => {
   it("他家の打牌は手牌の端から河へ動く", () => {
     const event: ClientEvent = {
       type: "discard",
-      seat: 2,
+      seat: 1,
       tile: 7,
       manner: "tsumogiri",
     };
-    const { before, after } = step(started(), event);
+    // **13枚から切らない。**実際の局では必ずツモを挟んだ 14 枚から切る。
+    const { before, after } = step(drawnOther(), event);
     const motions = motionsFor(
       placementsFor(before, 0),
       placementsFor(after, 0),
@@ -507,9 +574,9 @@ describe("motionsFor", () => {
       0,
     );
 
-    const toRiver = motions.find((m) => m.toKey === "river-2-0");
+    const toRiver = motions.find((m) => m.toKey === "river-1-0");
     expect(toRiver).toBeDefined();
-    expect(toRiver?.fromKey.startsWith("hand-2-")).toBe(true);
+    expect(toRiver?.fromKey.startsWith("hand-1-")).toBe(true);
   });
 
   it("同じ盤面なら何も動かない", () => {
@@ -624,9 +691,34 @@ git commit -m "feat(web): どの牌がどこへ動くかをイベントから決
   6. 代理のメッシュは `pickHandTile` の対象から外す
 - 動きが空なら `sync` と同じ結果になること
 
+**確定ぶんを置く処理を、公開の `sync` から切り出す。**
+
+`sync` の中身をそのまま `#place(placements)` という私有のものへ移し、
+公開の `sync` と `syncWithMotion` の両方がそれを呼ぶ形にする。
+
+```ts
+  /** 動きが無いときの入口。**代理をすべて捨ててから置く。** */
+  sync(placements: Placement[]): void {
+    this.#dropMoving();
+    this.#place(placements);
+  }
+
+  /** 動きがあるときの入口。**今回の動きに無い代理だけを捨てる。** */
+  syncWithMotion(placements: Placement[], motions: Motion[], progress: number): void {
+    const alive = new Set(motions.map((m) => m.id));
+    this.#dropMoving((id) => !alive.has(id));
+    const landing = new Set(motions.map((m) => m.toKey));
+    this.#place(placements.filter((p) => !landing.has(p.key)));
+    // ...代理を progress で置く
+  }
+```
+
+**`syncWithMotion` から公開の `sync` を呼んではならない。**呼ぶと毎フレーム
+自分の代理を捨てて作り直すことになり、動きが1フレームも続かない。
+
 **代理のメッシュは別の入れ物で持つ。**`#meshes` へ入れてはならない。
-`sync` は「`placements` に無い鍵のメッシュを消す」（`table.ts:138`）ので、
-**次のフレームの `sync` が代理を消してしまう。**
+`#place` は「`placements` に無い鍵のメッシュを消す」（`table.ts:138`）ので、
+**次のフレームで代理が消えてしまう。**
 
 ```ts
   /** 移動中の代理。`#meshes` とは別に持つ。鍵は Motion の id。 */
@@ -636,8 +728,9 @@ git commit -m "feat(web): どの牌がどこへ動くかをイベントから決
 回収の規則を決めておく。**決めないと、イベントが切り替わった瞬間に前の代理が
 卓上へ residue として残る。**
 
-- `syncWithMotion` の先頭で、今回の `motions` に無い id の代理をすべて捨てる
-- `sync`（動きが無い経路）の先頭で、代理をすべて捨てる
+- `#dropMoving(pred?)` は、述語が無ければ全部、あれば真になった id だけを捨てる
+- `sync` は全部捨てる。**動きが無い＝空中に牌があってはならない**
+- `syncWithMotion` は今回の動きに無い id だけを捨てる
 - `dispose` で代理もすべて捨てる
 
 **回転は最短の向きへ回す。**`rotationX` と `rotationY` をそのまま線形に
@@ -738,8 +831,12 @@ from + ease(t)×(to-from) を計算し直す。**位置を足し込まない。*
 呼んだときに `active` が消えることだけを別に確かめる。
 
 **Files:**
-- Modify: `apps/web/src/main.ts`
 - Create: `apps/web/src/game/settle.test.ts`
+- Modify: `apps/web/src/game/presentation.ts`
+
+**`main.ts` は触らない。**このタスクは既にある振る舞いを試験で固定するもので、
+結線は Task 4 で済んでいる。試験が落ちた場合は `presentation.ts` を直す。
+**それでも直らないときは、勝手に設計を変えずに worker_done へ書いて終える。**
 
 **Interfaces:**
 - Consumes: `Presentation`（Task 2）
@@ -816,11 +913,13 @@ Expected: エラー0件でビルド成功
 
 ```bash
 git add apps/web/src/game/settle.test.ts apps/web/src/main.ts
-git commit -m "test(web): 早送りの出口が1つであることを確かめる
+git commit -m "test(web): 演出を畳む経路が牌を空中に残さないことを固定する
 
-?effects=off・手で叩いた早送り・6秒超の自動切り捨て・再接続の4つが、
-すべて同じ終了処理を通ることを見る。**別経路が残ると effects=off だけ
-挙動が違う事故になる。**"
+?effects=off・手で叩いた早送り・6秒超の自動切り捨ての3つが、いずれも
+active を null にすることを見る。**残ると代理の牌が空中で止まる。**
+
+再接続はここに含めない。Wave 3f で、取り直した backlog は通常の加速と
+6秒判定に委ねる設計にしてある。"
 ```
 
 ---
