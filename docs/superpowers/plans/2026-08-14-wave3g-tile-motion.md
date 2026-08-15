@@ -1071,6 +1071,20 @@ describe("早送りの出口", () => {
     expect(p.state.seats[1].river).toHaveLength(1);
   });
 
+  it("effects=off の経路でも、受け取った端から畳まれる", () => {
+    const clock = new ManualClock();
+    const p = new Presentation(0, clock);
+    // `?effects=off` は受信のたびに skip を呼ぶ。**別経路を作らない。**
+    p.receive(discard(1, 1, 5));
+    p.skip();
+    p.receive(discard(2, 2, 6));
+    p.skip();
+
+    expect(p.active).toBeNull();
+    expect(p.state.seats[1].river).toHaveLength(1);
+    expect(p.state.seats[2].river).toHaveLength(1);
+  });
+
   it("6秒を超えて溜まると自動で切り捨て、再生中のものが無くなる", () => {
     const clock = new ManualClock();
     const p = new Presentation(0, clock);
