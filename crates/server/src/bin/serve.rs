@@ -92,18 +92,35 @@ async fn play(mut socket: WebSocket, tables: Tables, id: TableId, last_seq: Opti
     let _ = handle.detach(seat, connection).await;
 }
 
+/// 配信する静的ファイルの場所。
+///
+/// **カレントディレクトリを基準にしてはいけない。**リポジトリのルート以外から
+/// 起動すると、サーバは「待っています」と出したまま全部 404 を返す。
+/// 起動したように見えて画面が出ないので、原因に辿り着きにくい。
+fn dist_dir() -> std::path::PathBuf {
+    std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../apps/web/dist")
+}
+
 #[tokio::main]
 async fn main() {
+    let dist = dist_dir();
+    // **黙って 404 を返さない。**ビルドを忘れているのか、置き場所が違うのかを
+    // 起動時に言い切る。
+    if !dist.join("index.html").is_file() {
+        eprintln!("画面が見つかりません: {}", dist.display());
+        eprintln!("先に `pnpm --dir apps/web build` を実行してください。");
+        std::process::exit(1);
+    }
+
     let tables = Tables::new();
     let app = Router::new()
         .route("/ws", any(ws_handler))
-        .fallback_service(ServeDir::new("apps/web/dist"))
+        .fallback_service(ServeDir::new(&dist))
         .with_state(tables);
 
     let listener = tokio::net::TcpListener::bind("127.0.0.1:8080")
         .await
         .expect("8080 を開ける");
     println!("http://127.0.0.1:8080 で待っています");
-    println!("（先に `pnpm --dir apps/web build` を実行しておくこと）");
     axum::serve(listener, app).await.expect("配信できる");
 }
