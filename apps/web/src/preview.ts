@@ -167,8 +167,18 @@ function resize(): void {
 resize();
 addEventListener("resize", resize);
 
+/**
+ * `?still=1` なら1コマだけ描いて止める。
+ *
+ * **撮影のために回し続けない。**仮想時間で撮ると、止まらないループは
+ * 千コマ単位で描き直され、ソフトウェア描画では終わらない。
+ */
+const still = new URLSearchParams(location.search).get("still") === "1";
+
 function frame(): void {
   scene.render();
-  requestAnimationFrame(frame);
+  if (!still) {
+    requestAnimationFrame(frame);
+  }
 }
 requestAnimationFrame(frame);
