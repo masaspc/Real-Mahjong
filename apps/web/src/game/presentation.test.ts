@@ -163,4 +163,66 @@ describe("Presentation", () => {
     // 終わっていないので出せない。
     expect(p.state.lastSeq).toBeNull();
   });
+  describe("再生中のもの", () => {
+    it("再生中のイベントと、適用後の盤面を出す", () => {
+      const clock = new ManualClock();
+      const p = new Presentation(0, clock);
+      p.receive(discard(1, 1, 5));
+
+      clock.advance(100);
+      p.update();
+
+      const active = p.active;
+      // 表示中の盤面にはまだ無い。
+      expect(p.state.seats[1].river).toHaveLength(0);
+      // 適用後の盤面には有る。**この差が動きの起点と着地になる。**
+      expect(active?.nextState.seats[1].river).toHaveLength(1);
+      expect(active?.elapsedMs).toBe(100);
+      expect(active?.durationMs).toBe(350);
+    });
+
+    it("再生し終えたら再生中のものは無い", () => {
+      const clock = new ManualClock();
+      const p = new Presentation(0, clock);
+      p.receive(discard(1, 1, 5));
+
+      clock.advance(350);
+      p.update();
+
+      expect(p.active).toBeNull();
+      expect(p.state.seats[1].river).toHaveLength(1);
+    });
+
+    it("何度読んでも表示は進まない", () => {
+      const clock = new ManualClock();
+      const p = new Presentation(0, clock);
+      p.receive(discard(1, 1, 5));
+      p.update();
+
+      // **毎フレーム読むので、読むたびに表示が進んでは困る。**
+      p.active;
+      p.active;
+      expect(p.state.seats[1].river).toHaveLength(0);
+    });
+
+    it("次のイベントへ移ると適用後の盤面も入れ替わる", () => {
+      const clock = new ManualClock();
+      const p = new Presentation(0, clock);
+      p.receive(discard(1, 1, 5));
+      p.receive(discard(2, 2, 6));
+
+      // **境目をまたいで2度読む。**1度しか読まない試験では、控えを
+      // 作り直さない実装でも通ってしまう。
+      p.update();
+      expect(p.active?.nextState.seats[1].river).toHaveLength(1);
+
+      clock.advance(350);
+      p.update();
+
+      // 控えを作り直さないと、1件目の盤面を返し続ける。
+      const active = p.active;
+      expect(active?.nextState.seats[2].river).toHaveLength(1);
+      expect(active?.nextState.seats[1].river).toHaveLength(1);
+    });
+  });
 });

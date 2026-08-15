@@ -243,6 +243,25 @@ git commit -m "feat(web): 再生中の演出と経過時刻を問える窓口を
     expect(p.state.seats[1].river).toHaveLength(1);
   });
 
+  it("次のイベントへ移ると適用後の盤面も入れ替わる", () => {
+    const clock = new ManualClock();
+    const p = new Presentation(0, clock);
+    p.receive(discard(1, 1, 5));
+    p.receive(discard(2, 2, 6));
+
+    // **境目をまたいで2度読む。**1度しか読まない試験では、控えを
+    // 作り直さない実装でも通ってしまう。
+    p.update();
+    expect(p.active?.nextState.seats[1].river).toHaveLength(1);
+
+    clock.advance(350);
+    p.update();
+
+    const active = p.active;
+    expect(active?.nextState.seats[2].river).toHaveLength(1);
+    expect(active?.nextState.seats[1].river).toHaveLength(1);
+  });
+
   it("再生中の盤面を何度読んでも表示は進まない", () => {
     const clock = new ManualClock();
     const p = new Presentation(0, clock);
@@ -308,27 +327,24 @@ Expected: FAIL（`active` が無い）
   }
 ```
 
-`#fold` の中で、畳んだら控えを捨てる。
-
-```ts
-      this.#state = apply(this.#state, item.envelope, item.receivedAt);
-      this.#activeNext = null;
-```
+**`#fold` で控えを捨てる必要は無い。**`#activeAt !== #folded` の判定だけで
+作り直しの契機は足りる。捨てる行を足しても、それを落とす変異が試験を
+素通りする＝**効いていない行**になる。
 
 - [ ] **Step 4: 試験が通ることを確かめる**
 
 このタスクで足した3件だけを見る。名前に「再生」を含むのはこの3件だけである。
 
-Run: `pnpm --dir apps/web test src/game/presentation.test.ts -t 再生`
-Expected: 3 passed
+Run: `pnpm --dir apps/web test src/game/presentation.test.ts -t 再生中のもの`
+Expected: 4 passed
 
 ファイル全体と、全体の退行も見る。
 
 Run: `pnpm --dir apps/web test src/game/presentation.test.ts`
-Expected: 12 passed
+Expected: 13 passed
 
 Run: `pnpm --dir apps/web test`
-Expected: 192 passed
+Expected: 193 passed
 
 - [ ] **Step 5: コミット**
 
@@ -795,7 +811,7 @@ Run: `pnpm --dir apps/web test src/scene/motion.test.ts`
 Expected: 10 passed
 
 Run: `pnpm --dir apps/web test`
-Expected: 202 passed
+Expected: 203 passed
 
 - [ ] **Step 5: コミット**
 
@@ -923,7 +939,7 @@ Expected: エラー0件でビルド成功
 - [ ] **Step 3: 既存の試験が壊れていないことを確かめる**
 
 Run: `pnpm --dir apps/web test`
-Expected: 202 passed
+Expected: 203 passed
 
 - [ ] **Step 4: 人が見るための口を足す（合否判定には使わない）**
 
@@ -1065,7 +1081,7 @@ Expected: 3 passed
 - [ ] **Step 3: 全体を確かめる**
 
 Run: `pnpm --dir apps/web test`
-Expected: 205 passed
+Expected: 206 passed
 
 Run: `pnpm --dir apps/web typecheck && pnpm --dir apps/web build`
 Expected: エラー0件でビルド成功

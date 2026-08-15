@@ -1,3 +1,4 @@
+import type { ClientEvent } from "../protocol/ClientEvent";
 import type { ClientEventEnvelope } from "../protocol/ClientEventEnvelope";
 import type { Seat } from "../protocol/Seat";
 import { EffectPlayer, defaultCatchUp } from "../timeline/player";
@@ -31,6 +32,9 @@ export class Presentation {
   #envelopes: { envelope: ClientEventEnvelope; receivedAt: number }[] = [];
   /** すでに畳んだ件数。二重に畳まないための印。 */
   #folded = 0;
+  /** `active` の作り直しを避けるための控え。畳んだ件数が変われば作り直す。 */
+  #activeAt: number | null = null;
+  #activeNext: GameState | null = null;
 
   constructor(you: Seat, clock: Clock, policy: CatchUpPolicy = defaultCatchUp) {
     this.#player = new EffectPlayer(clock, policy);
@@ -52,6 +56,41 @@ export class Presentation {
 
   get playbackRate(): number {
     return this.#player.playbackRate;
+  }
+
+  /**
+   * いま再生中のイベントと、それを適用した後の盤面。
+   *
+   * **`state` が動きの起点、`nextState` が着地点である。**再生中は
+   * `state` にまだ入っていないので、両方を配置へ直せば差が動きになる。
+   */
+  get active(): {
+    event: ClientEvent;
+    elapsedMs: number;
+    durationMs: number;
+    nextState: GameState;
+  } | null {
+    const current = this.#player.current;
+    if (current === null) {
+      return null;
+    }
+    // 再生中のものは「次に畳むもの」である。
+    const item = this.#envelopes[this.#folded];
+    if (item === undefined) {
+      return null;
+    }
+    // **毎フレーム畳み直さない。**apply は状態を深く複製するので、
+    // 同じイベントのあいだは作った結果を使い回す。
+    if (this.#activeAt !== this.#folded || this.#activeNext === null) {
+      this.#activeAt = this.#folded;
+      this.#activeNext = apply(this.#state, item.envelope, item.receivedAt);
+    }
+    return {
+      event: current.event,
+      elapsedMs: current.elapsedMs,
+      durationMs: current.durationMs,
+      nextState: this.#activeNext,
+    };
   }
 
   receive(envelope: ClientEventEnvelope): void {
