@@ -591,6 +591,28 @@ describe("motionsFor", () => {
     expect(motions.length).toBeGreaterThan(1);
   });
 
+  it("山が一度に複数減ったら、消えた端のうち最も小さい番号から動く", () => {
+    // **1枚しか消えない場合では、最小を選ぶ規則が効いているか分からない。**
+    const event: ClientEvent = {
+      type: "draw",
+      seat: 0,
+      tile: 4,
+      source: "wall",
+      wall_remaining: 67,
+    };
+    const { before, after } = step(started(), event);
+    const motions = motionsFor(
+      placementsFor(before, 0),
+      placementsFor(after, 0),
+      event,
+      0,
+    );
+
+    const drawn = motions.find((m) => m.toKey === "drawn-0");
+    // 70 -> 67 なので、消えるのは slot 66, 67, 68。最も小さいものを使う。
+    expect(drawn?.fromKey).toBe("wall-66");
+  });
+
   it("そのまま居座る牌以外は、すべて動きで説明できる", () => {
     // **これがこのウェーブの Goal そのものである。**
     //
