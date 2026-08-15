@@ -1098,14 +1098,14 @@ describe("早送りの出口", () => {
 - [ ] **Step 2: 試験が通ることを確かめる**
 
 Run: `pnpm --dir apps/web test src/game/settle.test.ts`
-Expected: 3 passed
+Expected: 4 passed
 
 落ちる場合は `Presentation` 側を直す。**試験の期待値を緩めない。**
 
 - [ ] **Step 3: 全体を確かめる**
 
 Run: `pnpm --dir apps/web test`
-Expected: 207 passed
+Expected: 208 passed
 
 Run: `pnpm --dir apps/web typecheck && pnpm --dir apps/web build`
 Expected: エラー0件でビルド成功
