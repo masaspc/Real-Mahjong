@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import { BufferGeometry } from "three";
-import { BODY_INDEX, uvOffsetOf } from "./atlas";
+import { BACK_INDEX, BODY_INDEX, uvOffsetOf } from "./atlas";
 import { TILE } from "./layout";
 import { applyFaceUv, createTileGeometry } from "./tile-geometry";
 
@@ -24,20 +24,49 @@ describe("createTileGeometry", () => {
     expect(uv.count).toBe(position.count);
   });
 
-  it("maps every face to the body cell initially", () => {
+  it("面と側面は牌体、背は裏面の色になる", () => {
+    // **実物は白い面板と色のついた背が貼り合わさっている。**全部を同じ色に
+    // すると、どちらから見ても同じ板に見える。
     const geometry = createTileGeometry();
     const uv = geometry.getAttribute("uv");
+    const position = geometry.getAttribute("position");
     const body = uvOffsetOf(BODY_INDEX);
+    const back = uvOffsetOf(BACK_INDEX);
     // **UV は Float32 で持たれる。**セルの境目にぴったり乗る値は倍精度の
-    // ままでは表せず、0.2 が 0.20000000298 になる。境界を厳密に比べると
-    // セルの端に触れる牌体で落ちる。丸め1つぶんだけ緩める。
+    // ままでは表せない。丸め1つぶんだけ緩める。
     const slack = 1e-6;
+    const inside = (i: number, cell: { u: number; v: number; du: number; dv: number }) =>
+      uv.getX(i) >= cell.u - slack &&
+      uv.getX(i) <= cell.u + cell.du + slack &&
+      uv.getY(i) >= cell.v - slack &&
+      uv.getY(i) <= cell.v + cell.dv + slack;
+
+    let backCount = 0;
     for (let i = 0; i < uv.count; i += 1) {
-      expect(uv.getX(i)).toBeGreaterThanOrEqual(body.u - slack);
-      expect(uv.getX(i)).toBeLessThanOrEqual(body.u + body.du + slack);
-      expect(uv.getY(i)).toBeGreaterThanOrEqual(body.v - slack);
-      expect(uv.getY(i)).toBeLessThanOrEqual(body.v + body.dv + slack);
+      if (position.getZ(i) < -TILE.depth / 2 + 0.07) {
+        expect(inside(i, back), `背の頂点 ${i} が裏面のセルに無い`).toBe(true);
+        backCount += 1;
+      } else {
+        expect(inside(i, body), `面か側面の頂点 ${i} が牌体のセルに無い`).toBe(true);
+      }
     }
+    expect(backCount).toBeGreaterThan(0);
+  });
+
+  it("角が丸い", () => {
+    // **直方体では麻雀牌に見えない。**角の頂点が、四隅の直角の位置よりも
+    // 内側に無ければ丸まっていない。
+    const geometry = createTileGeometry();
+    const position = geometry.getAttribute("position");
+    let corners = 0;
+    for (let i = 0; i < position.count; i += 1) {
+      const x = Math.abs(position.getX(i));
+      const y = Math.abs(position.getY(i));
+      if (x > TILE.width / 2 - 1e-6 && y > TILE.height / 2 - 1e-6) {
+        corners += 1;
+      }
+    }
+    expect(corners).toBe(0);
   });
 });
 

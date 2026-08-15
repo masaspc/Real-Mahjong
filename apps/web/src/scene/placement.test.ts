@@ -3,6 +3,7 @@ import { describe, expect, it } from "vitest";
 import type { ClientEvent } from "../protocol/ClientEvent";
 import { apply, emptyState } from "../game/state";
 import type { GameState } from "../game/state";
+import { TILE } from "./layout";
 import { pickFrom, placementsFor } from "./placement";
 
 let seq = 0;
@@ -94,8 +95,9 @@ function footprint(p: {
   rotationX: number;
   rotationY: number;
 }) {
-  // 牌の箱は 幅1・高さ1.35・厚み0.6。
-  const half = [0.5, 0.675, 0.3];
+  // **寸法を書き写さない。**`TILE` を変えたときに試験だけが古い値のまま
+  // 残り、ぶつかっていないものを「ぶつかった」と言い出す。
+  const half = [TILE.width / 2, TILE.height / 2, TILE.depth / 2];
   const r = orientation(p);
   const extent = [0, 1, 2].map((i) =>
     [0, 1, 2].reduce((sum, j) => sum + Math.abs(r[i]?.[j] ?? 0) * (half[j] ?? 0), 0),

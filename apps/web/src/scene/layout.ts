@@ -10,11 +10,16 @@
 
 export type Vec3 = { x: number; y: number; z: number };
 
-/** 牌の寸法比。実際の麻雀牌に近い比率。 */
+/**
+ * 牌の寸法比。
+ *
+ * リーチ麻雀の牌はおよそ 20 x 26 x 16mm である。**厚みを薄くすると板に
+ * 見える。**幅の 0.6 倍にしていたが、実物は 0.8 倍ある。
+ */
 export const TILE = {
   width: 1,
-  height: 1.35,
-  depth: 0.6,
+  height: 1.3,
+  depth: 0.8,
 } as const;
 
 /** 河は6枚で1段。 */

@@ -145,15 +145,34 @@ function suitBody(kind: number, red: boolean): string {
     .join("");
 }
 
+/**
+ * 白。
+ *
+ * **細い長方形を1本置いただけでは、枠に見えず記号に見える。**実物は太い
+ * 縁取りが牌の縁に沿って回り、内側にもう1本細い線が入る。角は牌と同じく
+ * 丸い。線が細く内側に浮いていると、何かの当て字のように見えてしまう。
+ */
+function hakuBody(): string {
+  return (
+    `<rect x="7.5" y="9" width="25" height="36" rx="3.5" fill="none" ` +
+    `stroke="${BLUE}" stroke-width="2.8"/>` +
+    `<rect x="11" y="12.5" width="18" height="29" rx="2" fill="none" ` +
+    `stroke="${BLUE}" stroke-width="1.1" opacity="0.85"/>`
+  );
+}
+
 function honorBody(kind: number): string {
   const index = kind - 27;
   const glyph = HONORS[index] ?? "?";
   if (index === 4) {
-    // 白は字を書かず、枠だけを描く。
-    return `<rect x="9" y="10" width="22" height="34" fill="none" stroke="${BLUE}" stroke-width="2.2" rx="2"/>`;
+    return hakuBody();
   }
   const color = index === 5 ? GREEN : index === 6 ? RED : INK;
-  return `<text x="${FACE_W / 2}" y="38" text-anchor="middle" font-size="26" fill="${color}" font-family="serif">${glyph}</text>`;
+  // 字牌は面いっぱいに書く。小さいと札に印を打っただけに見える。
+  return (
+    `<text x="${FACE_W / 2}" y="39" text-anchor="middle" font-size="30" ` +
+    `fill="${color}" font-family="serif" font-weight="600">${glyph}</text>`
+  );
 }
 
 /**
