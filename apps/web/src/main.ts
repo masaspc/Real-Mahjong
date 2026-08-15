@@ -1,5 +1,6 @@
 import { Presentation } from "./game/presentation";
 import { connect } from "./net/connection";
+import { motionsFor } from "./scene/motion";
 import { placementsFor } from "./scene/placement";
 import { TableScene } from "./scene/table";
 import { systemClock } from "./timeline/clock";
@@ -45,7 +46,19 @@ const presentation = new Presentation(0, systemClock);
 
 const draw = (): void => {
   const state = presentation.state;
-  scene.sync(placementsFor(state));
+  const active = presentation.active;
+  if (active === null) {
+    scene.sync(placementsFor(state));
+  } else {
+    const before = placementsFor(state);
+    const after = placementsFor(active.nextState);
+    const motions = motionsFor(before, after, active.event, state.you);
+    // **進捗は再生器の時計から作る。**ここで数え直すと早送りとずれ、
+    // 待ち時間だけ先に終わって牌が空中に残る。
+    const progress =
+      active.durationMs === 0 ? 1 : active.elapsedMs / active.durationMs;
+    scene.syncWithMotion(after, motions, progress);
+  }
   renderBoard(uiRoot, state, (command) => connection.send(command));
 };
 

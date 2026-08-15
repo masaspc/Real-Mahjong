@@ -23,6 +23,7 @@ import {
   wallPosition,
 } from "./layout";
 import { pickFrom, type Placement } from "./placement";
+import { poseAt, reconcileMoving, type Motion } from "./motion";
 import {
   applyFaceUv,
   createTileGeometry,
@@ -44,6 +45,13 @@ export class TableScene {
   readonly #pool = new TilePool();
   readonly #atlas: Texture;
   readonly #meshes = new Map<string, TileMesh>();
+  /**
+   * 移動中の代理。**`#meshes` とは別に持つ。**
+   *
+   * `#place` は「渡された配置に無い鍵のメッシュを消す」ので、同じ入れ物へ
+   * 入れると次のフレームで代理が消える。鍵は `Motion` の id。
+   */
+  readonly #moving = new Map<string, TileMesh>();
   readonly #raycaster = new Raycaster();
   #placements: Placement[] = [];
 
@@ -127,8 +135,87 @@ export class TableScene {
     this.sync(placements);
   }
 
-  /** 現在の配置とメッシュを鍵で同期する。 */
+  /**
+   * 動きが無いときの入口。**代理をすべて捨ててから置く。**
+   *
+   * 動きが無いということは、空中に牌があってはならないということである。
+   */
   sync(placements: Placement[]): void {
+    this.#dropMoving();
+    this.#place(placements);
+  }
+
+  /**
+   * 動きがあるときの入口。
+   *
+   * **`sync` を呼んではならない。**呼ぶと毎フレーム自分の代理を捨てて
+   * 作り直すことになり、動きが1フレームも続かない。
+   */
+  syncWithMotion(
+    placements: Placement[],
+    motions: Motion[],
+    progress: number,
+  ): void {
+    const plan = reconcileMoving([...this.#moving.keys()], motions);
+    for (const id of plan.drop) {
+      this.#dropOne(id);
+    }
+
+    // 着地の鍵は確定ぶんから外す。**外さないと同じ牌が2つ見える。**
+    const landing = new Set(motions.map((motion) => motion.toKey));
+    this.#place(placements.filter((placement) => !landing.has(placement.key)));
+
+    for (const motion of motions) {
+      let entry = this.#moving.get(motion.id);
+      if (entry === undefined) {
+        const tile = this.#pool.acquire(motion.encoded);
+        const mesh = new Mesh(createTileGeometry(), createTileMaterial(this.#atlas));
+        this.#scene.add(mesh);
+        entry = { mesh, tile };
+        this.#moving.set(motion.id, entry);
+      }
+      // **使い回すのはメッシュだけで、中身ではない。**条件を付けずに毎回
+      // 入れ直す。付けると、WebGL 抜きでは試せない場所に判断が生まれる。
+      entry.tile.encoded = motion.encoded;
+      entry.tile.faceUp = motion.faceUp;
+      applyFaceUv(entry.mesh.geometry, motion.encoded, motion.faceUp);
+
+      const pose = poseAt(motion, progress);
+      entry.mesh.position.set(pose.position.x, pose.position.y, pose.position.z);
+      entry.mesh.rotation.set(pose.rotationX, pose.rotationY, 0);
+    }
+  }
+
+  #dropMoving(): void {
+    for (const id of [...this.#moving.keys()]) {
+      this.#dropOne(id);
+    }
+  }
+
+  #dropOne(id: string): void {
+    const entry = this.#moving.get(id);
+    if (entry === undefined) {
+      return;
+    }
+    // **`#remove` を使わない。**あれは `#meshes` からも消すので、代理の id と
+    // 確定ぶんの鍵がたまたま一致したときに巻き添えで消える。
+    this.#dispose(entry);
+    this.#moving.delete(id);
+  }
+
+  #dispose(entry: TileMesh): void {
+    this.#scene.remove(entry.mesh);
+    entry.mesh.geometry.dispose();
+    if (Array.isArray(entry.mesh.material)) {
+      for (const material of entry.mesh.material) material.dispose();
+    } else {
+      entry.mesh.material.dispose();
+    }
+    this.#pool.release(entry.tile);
+  }
+
+  /** 確定した配置をメッシュへ写す。 */
+  #place(placements: Placement[]): void {
     const unique = new Map<string, Placement>();
     for (const placement of placements) {
       if (!unique.has(placement.key)) unique.set(placement.key, placement);
@@ -175,6 +262,8 @@ export class TableScene {
       -(y / rect.height) * 2 + 1,
     );
     this.#raycaster.setFromCamera(pointer, this.#camera);
+    // **移動中の代理は対象に入れない。**掴めてしまうと、見えている牌と
+    // 返される牌が食い違う。終端で確定ぶんへ焼き込まれてから押せる。
     const hits = this.#raycaster.intersectObjects(
       [...this.#meshes.values()].map((entry) => entry.mesh),
       false,
@@ -200,20 +289,14 @@ export class TableScene {
   }
 
   dispose(): void {
+    this.#dropMoving();
     for (const [key, entry] of this.#meshes) this.#remove(key, entry);
     this.#atlas.dispose();
     this.#renderer.dispose();
   }
 
   #remove(key: string, entry: TileMesh): void {
-    this.#scene.remove(entry.mesh);
-    entry.mesh.geometry.dispose();
-    if (Array.isArray(entry.mesh.material)) {
-      for (const material of entry.mesh.material) material.dispose();
-    } else {
-      entry.mesh.material.dispose();
-    }
-    this.#pool.release(entry.tile);
+    this.#dispose(entry);
     this.#meshes.delete(key);
   }
 }

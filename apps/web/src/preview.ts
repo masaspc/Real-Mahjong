@@ -1,5 +1,8 @@
 import { TableScene } from "./scene/table";
 import { placementsFor } from "./scene/placement";
+import { motionsFor } from "./scene/motion";
+import { apply } from "./game/state";
+import type { ClientEvent } from "./protocol/ClientEvent";
 import type { GameState, SeatView } from "./game/state";
 import type { Seat } from "./protocol/Seat";
 import type { Tile } from "./protocol/Tile";
@@ -97,9 +100,41 @@ if (!canvas) {
 
 const scene = new TableScene(canvas);
 
+/**
+ * `?motion=0.5` で、打牌の動きを途中で止めた絵を出す。
+ *
+ * **対局を待たずに動きを見られるようにする。**進捗を指定して止められないと、
+ * 動いているかどうかを目で追うしかない。
+ */
+const motionAt = (() => {
+  const raw = new URLSearchParams(location.search).get("motion");
+  if (raw === null) return null;
+  const value = Number(raw);
+  return Number.isFinite(value) ? Math.min(1, Math.max(0, value)) : null;
+})();
+
+/** 自分が 1m を手出しする。手牌から河へ動く。 */
+const MOTION_EVENT: ClientEvent = {
+  type: "discard",
+  seat: 0,
+  tile: 0,
+  manner: "tedashi",
+};
+
 /** どの席から見るかを変えられる。自席が手前に来ることを席ごとに確かめる。 */
 function show(viewer: Seat): void {
-  scene.sync(placementsFor(state, viewer));
+  if (motionAt === null) {
+    scene.sync(placementsFor(state, viewer));
+    return;
+  }
+  const after = apply(state, { seq: 999, event: MOTION_EVENT }, 0);
+  const beforeAll = placementsFor(state, viewer);
+  const afterAll = placementsFor(after, viewer);
+  scene.syncWithMotion(
+    afterAll,
+    motionsFor(beforeAll, afterAll, MOTION_EVENT, viewer),
+    motionAt,
+  );
 }
 
 /** `?viewer=2` で見る席を選べる。**押さずに席ごとの絵を撮れる。** */
