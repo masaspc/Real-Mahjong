@@ -63,6 +63,13 @@ export function createTileGeometry(): BufferGeometry {
 
   // **前面・背面・側面を頂点の z で仕分ける。**押し出しは面ごとの
   // グループを持たないので、位置から自分で決める。
+  //
+  // **面取りは1段・2分割なので、頂点は z 方向に4段しか無い。**両端の
+  // 面（z=±half）と、そこから面取りぶん内側へ入った側面の境目
+  // （z=±(half-BEVEL)）の4段だけで、途中を埋める頂点は無い。しきい値に
+  // `BEVEL` を混ぜると面取りの境目まで前面・背面に含んでしまい、後で
+  // `applyFaceUv` がその頂点を牌の縁（x/y がセルの端）のまま牌面用の
+  // セルへ塗ってしまう。**しきい値は本当の面（z=±half）だけに絞る。**
   const position = geometry.getAttribute("position");
   const half = TILE.depth / 2;
   const front: number[] = [];
@@ -70,9 +77,9 @@ export function createTileGeometry(): BufferGeometry {
   const side: number[] = [];
   for (let i = 0; i < position.count; i += 1) {
     const z = position.getZ(i);
-    if (z > half - BEVEL - 1e-4) {
+    if (z > half - 1e-4) {
       front.push(i);
-    } else if (z < -half + BEVEL + 1e-4) {
+    } else if (z < -half + 1e-4) {
       back.push(i);
     } else {
       side.push(i);
@@ -80,8 +87,9 @@ export function createTileGeometry(): BufferGeometry {
   }
   geometry.userData["front"] = front;
 
-  // 側面と面取りは牌体（象牙色）。背は色のついた裏面。
-  paint(geometry, side, BODY_INDEX);
+  // 側面と面取りは牌体（象牙色）。実物は縁も面と同じ象牙色で、背だけ
+  // 色が違う。**位置で塗ると縁の頂点がセルの端をつかむので、1点で塗る。**
+  paintFlat(geometry, side, BODY_INDEX);
   paint(geometry, back, BACK_INDEX);
   paint(geometry, front, BODY_INDEX);
   return geometry;
@@ -115,6 +123,28 @@ function paint(
 
 function clamp01(value: number): number {
   return value < 0 ? 0 : value > 1 ? 1 : value;
+}
+
+/**
+ * 指定した頂点を、セルの中心1点へ寄せる。
+ *
+ * **無地の面を引き伸ばさない。**牌体のセルは一様なので、位置に応じて
+ * 広げるとセルの縁の画素を拾い、厚み方向へ筋が出る。
+ */
+function paintFlat(
+  geometry: BufferGeometry,
+  indices: number[],
+  cell: number,
+): void {
+  const uv = geometry.getAttribute("uv");
+  if (uv === undefined) {
+    throw new Error("uv 属性を持たないジオメトリには適用できない");
+  }
+  const { u, v, du, dv } = uvOffsetOf(cell);
+  for (const i of indices) {
+    uv.setXY(i, u + du / 2, v + dv / 2);
+  }
+  uv.needsUpdate = true;
 }
 
 /** 牌面（+z）の頂点だけを指定されたアトラスセルへ移す。 */
