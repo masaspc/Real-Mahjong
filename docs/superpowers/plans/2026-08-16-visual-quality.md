@@ -460,8 +460,18 @@ export function tileFaceSvg(tile: Tile): string {
 }
 ```
 
-`reddened` は Task 7 で実装する。**このタスクでは素の素材をそのまま返す
-仮置きにせず、Task 7 まで赤ドラは通常の五と同じ絵になることを受け入れる。**
+`reddened` は**このタスクで素通しとして定義する。**Task 7 で中身を入れる。
+
+```ts
+/** 赤ドラの絵。**Task 7 で素材の中身を読んでから実装する。** */
+function reddened(source: string): string {
+  return source;
+}
+```
+
+**呼ぶ側だけ先に書いて関数を後のタスクへ回さない。**コンパイルが通らず、
+このタスク単体で完了できなくなる。Task 7 までは赤ドラが通常の五と同じ絵に
+なることを受け入れる。
 
 - [ ] **Step 3: 試験を新しい形へ直す**
 
@@ -495,9 +505,10 @@ Run: `pnpm --dir apps/web test src/ui/tile-face.test.ts`
 Expected: 3 passed
 
 Run: `pnpm --dir apps/web test`
-Expected: 202 passed
+Expected: 203 passed
 
-（自前描画の試験がいくつか消えるため、全体の件数は減る）
+（`tile-face.test.ts` は現在10件ある。自前描画の中身を見る試験が消えて3件に
+なるため、全体は 210 から 203 へ減る）
 
 - [ ] **Step 5: コミット**
 
@@ -572,7 +583,7 @@ Run: `pnpm --dir apps/web test src/ui/tile-face.test.ts`
 Expected: 5 passed
 
 Run: `pnpm --dir apps/web test`
-Expected: 204 passed
+Expected: 205 passed
 
 - [ ] **Step 5: コミット**
 
@@ -690,7 +701,7 @@ Run: `pnpm --dir apps/web typecheck && pnpm --dir apps/web build`
 Expected: エラー0件でビルド成功
 
 Run: `pnpm --dir apps/web test`
-Expected: 204 passed
+Expected: 206 passed
 
 - [ ] **Step 3: 絵を撮る（合否判定には使わない）**
 
