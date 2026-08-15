@@ -388,9 +388,24 @@ describe("盤面から牌の置き場所を出す", () => {
             x: Math.sin((relative * Math.PI) / 2),
             z: Math.cos((relative * Math.PI) / 2),
           };
-          expect(Math.abs(n.y), `${p.key} の面が上下を向いている`).toBeLessThan(0.01);
-          expect(Math.abs(n.x - want.x), `${p.key} の面の左右が違う`).toBeLessThan(0.01);
-          expect(Math.abs(n.z - want.z), `${p.key} の面の前後が違う`).toBeLessThan(0.01);
+          // **自分の手牌は読ませるために手前へ倒してある。**倒すと面が
+          // 斜め上を向くので、水平成分だけを見て左右と前後を確かめる。
+          const mine = p.seat === state.you && (p.kind === "hand" || p.kind === "drawn");
+          if (mine) {
+            expect(n.y, `${p.key} が手前へ倒れていない`).toBeGreaterThan(0.1);
+          } else {
+            expect(Math.abs(n.y), `${p.key} の面が上下を向いている`).toBeLessThan(0.01);
+          }
+          const flat = Math.hypot(n.x, n.z);
+          expect(flat, `${p.key} の面が真上を向いている`).toBeGreaterThan(0.1);
+          expect(
+            Math.abs(n.x / flat - want.x),
+            `${p.key} の面の左右が違う`,
+          ).toBeLessThan(0.01);
+          expect(
+            Math.abs(n.z / flat - want.z),
+            `${p.key} の面の前後が違う`,
+          ).toBeLessThan(0.01);
         }
       }
     }
@@ -490,12 +505,24 @@ describe("盤面から牌の置き場所を出す", () => {
     const all = placementsFor(state);
     // **副露は卓に寝かせて面を上へ向ける。**立てると卓上の副露に見えず、
     // 倒した牌が卓面から浮く。
-    const standing = all.filter((p) => p.kind === "hand" || p.kind === "drawn");
+    const standing = all.filter(
+      (p) => (p.kind === "hand" || p.kind === "drawn") && p.seat !== state.you,
+    );
+    // **自分の手牌だけは手前へ倒す。**俯瞰のカメラからは、真っ直ぐ立てた
+    // 面がほぼ真横になって読めない。
+    const mine = all.filter(
+      (p) => (p.kind === "hand" || p.kind === "drawn") && p.seat === state.you,
+    );
     const lying = all.filter(
       (p) => p.kind === "river" || p.kind === "wall" || p.kind === "meld",
     );
     expect(standing.every((p) => p.rotationX === 0)).toBe(true);
     expect(lying.every((p) => p.rotationX === -Math.PI / 2)).toBe(true);
+    expect(mine.length).toBeGreaterThan(0);
+    // 立てきってもいないし、寝かせきってもいない。**どちらかに寄せると、
+    // 読めないか、他家の伏せ牌や河と見分けがつかなくなる。**
+    expect(mine.every((p) => p.rotationX < 0)).toBe(true);
+    expect(mine.every((p) => p.rotationX > -Math.PI / 2)).toBe(true);
   });
 
   it("副露が増えても卓からはみ出さない", () => {

@@ -83,6 +83,25 @@ export function clearRiichiReady(): void {
 }
 
 /** 3D 卓へ重ねる局情報と操作 UI を描く。牌の配置は描かない。 */
+/**
+ * 持ち時間バーの残りだけを更新する。
+ *
+ * **バーのために盤面を作り直してはならない。**`renderBoard` は
+ * `replaceChildren` で全部を差し替えるので、毎フレーム呼ぶとボタンが
+ * 押下と離上の間に消え、**クリックが一度も成立しない。**
+ * 動かす必要があるのはこの幅だけである。
+ */
+export function updateTimer(root: HTMLElement, state: GameState, nowMs: number): void {
+  const fill = root.querySelector<HTMLElement>(".timer-fill");
+  if (!fill) {
+    return;
+  }
+  const remaining = state.pending
+    ? Math.max(0, state.pending.deadlineAt - nowMs)
+    : 0;
+  fill.style.width = `${Math.min(100, remaining / 200)}%`;
+}
+
 export function renderBoard(
   root: HTMLElement,
   state: GameState,
@@ -139,10 +158,8 @@ export function renderBoard(
   const controls = node("section", "controls");
   controls.append(renderActions(state, send));
   if (state.pending) {
-    const remaining = Math.max(0, state.pending.deadlineAt - performance.now());
     const meter = node("div", "timer");
     const fill = node("span", "timer-fill");
-    fill.style.width = `${Math.min(100, remaining / 200)}%`;
     meter.append(fill);
     controls.append(meter);
   }

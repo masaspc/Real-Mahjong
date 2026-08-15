@@ -7,6 +7,7 @@ import {
   PlaneGeometry,
   Raycaster,
   Scene,
+  SRGBColorSpace,
   Texture,
   Vector2,
   WebGLRenderer,
@@ -64,8 +65,15 @@ export class TableScene {
     this.#camera.position.set(0, 31, 22);
     this.#camera.lookAt(0, 0, 1);
 
-    const atlasCanvas = drawPlaceholderAtlas();
+    // **牌面の解像度はここで決まる。**1,024 では 8x5 のセル1つが 128px
+    // しかなく、漢数字がにじむ。2,048 にすると 256px になる。
+    const atlasCanvas = drawPlaceholderAtlas(2048);
     this.#atlas = new Texture(atlasCanvas);
+    // canvas をそのまま貼ると色空間が付かず、暗く沈む。
+    this.#atlas.colorSpace = SRGBColorSpace;
+    // **牌は寝かせて見るので、異方性フィルタが最も効く。**無いと河と副露の
+    // 文字が斜めから見たときに潰れる。
+    this.#atlas.anisotropy = this.#renderer.capabilities.getMaxAnisotropy();
     this.#atlas.needsUpdate = true;
     void paintAtlas(atlasCanvas)
       .then(() => {
@@ -75,8 +83,9 @@ export class TableScene {
         console.error("牌面アトラスを作れなかった", error);
       });
 
-    this.#scene.add(new AmbientLight(0xffffff, 0.7));
-    const key = new DirectionalLight(0xffffff, 0.9);
+    // 色空間を正すと中間調が沈むので、明かりを少し足して戻す。
+    this.#scene.add(new AmbientLight(0xffffff, 1.05));
+    const key = new DirectionalLight(0xffffff, 1.15);
     key.position.set(4, 12, 6);
     this.#scene.add(key);
 

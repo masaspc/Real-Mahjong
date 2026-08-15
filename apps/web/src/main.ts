@@ -9,6 +9,7 @@ import {
   clearRiichiReady,
   isRiichiReady,
   renderBoard,
+  updateTimer,
 } from "./ui/board";
 import "./ui/board.css";
 
@@ -44,6 +45,27 @@ root.replaceChildren(tableRoot, uiRoot);
 const scene = new TableScene(canvas);
 const presentation = new Presentation(0, systemClock);
 
+/**
+ * 盤面の HTML を作り直した時点の目印。
+ *
+ * **毎フレーム作り直してはならない。**`renderBoard` は `replaceChildren` で
+ * 全部を差し替えるため、押下と離上の間にボタンが消え、**クリックが一度も
+ * 成立しない。**状態が変わったときだけ作り直す。
+ */
+let renderedState: unknown = null;
+let renderedRiichi = false;
+
+const drawBoard = (force = false): void => {
+  const state = presentation.state;
+  const riichi = isRiichiReady();
+  if (!force && renderedState === state && renderedRiichi === riichi) {
+    return;
+  }
+  renderedState = state;
+  renderedRiichi = riichi;
+  renderBoard(uiRoot, state, (command) => connection.send(command));
+};
+
 const draw = (): void => {
   const state = presentation.state;
   const active = presentation.active;
@@ -59,7 +81,9 @@ const draw = (): void => {
       active.durationMs === 0 ? 1 : active.elapsedMs / active.durationMs;
     scene.syncWithMotion(after, motions, progress);
   }
-  renderBoard(uiRoot, state, (command) => connection.send(command));
+  drawBoard();
+  // バーだけは毎フレーム動かす。**作り直さずに幅を書き換える。**
+  updateTimer(uiRoot, state, performance.now());
 };
 
 const connection = connect({
@@ -96,6 +120,7 @@ canvas.addEventListener("click", (event) => {
   }
   connection.send(command);
   clearRiichiReady();
+  drawBoard(true);
   draw();
 });
 

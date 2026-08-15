@@ -48,6 +48,18 @@ const SIDEWAYS = Math.PI / 2;
 /** 卓に寝かせる角度。牌面を上へ向ける。 */
 const LYING = -Math.PI / 2;
 
+/**
+ * 自分の手牌を手前へ倒す角度。
+ *
+ * **真っ直ぐ立てると読めない。**カメラは (0, 31, 22) から俯瞰しているので、
+ * 立てた牌の面はほぼ真横から見ることになる。手前へ倒して面をカメラへ
+ * 向けると、自分の手牌だけが正面から読める。
+ *
+ * 寝かせきる（`LYING`）と他家の伏せ牌や河と見分けがつかなくなるため、
+ * 立っている姿は保つ。
+ */
+const TILTED = -Math.PI * 0.28;
+
 /** 横に倒した牌が余分に取る幅。 */
 const RIICHI_EXTRA = TILE.height - TILE.width;
 
@@ -217,7 +229,8 @@ export function placementsFor(state: GameState, viewer: Seat = state.you): Place
         seat: absolute,
         encoded: hand[index] ?? 0,
         position: rowPosition(relative, index, total),
-        rotationX: 0,
+        // 自分の手牌だけ手前へ倒す。他家は伏せているので立てたままでよい。
+        rotationX: mine ? TILTED : 0,
         rotationY: facing,
         faceUp: mine,
         pickable: mine,
@@ -231,7 +244,7 @@ export function placementsFor(state: GameState, viewer: Seat = state.you): Place
         seat: absolute,
         encoded: state.drawn,
         position: rowPosition(relative, size + 0.6, total),
-        rotationX: 0,
+        rotationX: TILTED,
         rotationY: facing,
         faceUp: true,
         pickable: true,
