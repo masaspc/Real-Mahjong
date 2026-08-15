@@ -2,3 +2,6 @@
 node_modules
 dist
 .DS_Store
+
+# SDD の作業場（台帳・レビュー資材）。履歴に入れない。
+.superpowers/
