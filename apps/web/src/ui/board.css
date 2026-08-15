@@ -105,3 +105,23 @@ button { font: inherit; }
   .score { min-width: 120px; }
   .controls { bottom: 8px; }
 }
+
+/* 何を鳴くのかを真っ先に見せる帯。 */
+.target {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 6px 10px;
+  margin-bottom: 6px;
+  background: #1d2b22cc;
+  border: 1px solid #c9a227;
+  border-radius: 8px;
+  color: #f2ead6;
+  font-size: 13px;
+}
+.target .tile { width: 34px; }
+
+/* 鳴きのボタンは、字と牌を縦に積む。 */
+.action { display: flex; flex-direction: column; align-items: center; gap: 4px; }
+.action-tiles { display: flex; gap: 2px; }
+.action-tiles .tile { width: 26px; }

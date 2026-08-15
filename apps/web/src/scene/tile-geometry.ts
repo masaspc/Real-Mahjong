@@ -53,8 +53,11 @@ export function createTileGeometry(): BufferGeometry {
     bevelEnabled: true,
     bevelThickness: BEVEL,
     bevelSize: BEVEL,
-    bevelSegments: 2,
-    curveSegments: 4,
+    // **分割を増やすと頂点が跳ね上がる。**角の丸みは小さいので、
+    // 1段と2分割で十分に丸く見える。4分割だと1枚 708 頂点になり、
+    // 136枚の山を置いた時点で描画が持たない。
+    bevelSegments: 1,
+    curveSegments: 2,
   });
   geometry.center();
 

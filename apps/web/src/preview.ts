@@ -87,6 +87,8 @@ const state: GameState = {
   doraIndicators: [P(3), S(1)],
   wallRemaining: 42,
   pending: null,
+  // 上家が切った 1索 を鳴ける、という場面にしておく。
+  lastDiscard: { seat: 3, tile: 18 },
   lastSeq: 1,
   phase: "playing",
   notice: null,

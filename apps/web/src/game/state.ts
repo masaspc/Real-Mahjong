@@ -57,6 +57,13 @@ export type GameState = {
   pending: Pending | null;
   lastSeq: number | null;
   phase: "waiting" | "playing" | "matchOver";
+  /**
+   * 直前に切られた牌。**鳴くかどうかを決めるのに要る。**
+   *
+   * 相手が何を切ったのかが分からないと、ポンやチーのボタンが出ても何を
+   * 鳴くのか判断できない。次のツモか鳴きの成立で消える。
+   */
+  lastDiscard: { seat: Seat; tile: Tile } | null;
   /** 和了や流局の要約。画面の帯に出す。 */
   notice: string | null;
   finalScores: number[] | null;
@@ -112,6 +119,7 @@ export function emptyState(you: Seat): GameState {
     doraIndicators: [],
     wallRemaining: 70,
     pending: null,
+    lastDiscard: null,
     lastSeq: null,
     phase: "waiting",
     notice: null,
@@ -171,6 +179,7 @@ export function apply(
       break;
 
     case "draw":
+      state.lastDiscard = null;
       state.wallRemaining = event.wall_remaining;
       if (event.seat === state.you && event.tile !== null) {
         // **前のツモ牌が残っていれば手牌へ入れる。**カンのあとの嶺上ツモで
@@ -190,6 +199,7 @@ export function apply(
       const seat = seatOf(state, event.seat);
       seat.river.push({ tile: event.tile, riichi: seat.declaring });
       seat.declaring = false;
+      state.lastDiscard = { seat: event.seat, tile: event.tile };
       if (event.seat === state.you) {
         // **ツモ切りかどうかはイベントが持っている。**牌の一致で当てると、
         // 同じ牌を手にも持っているときに取り違える。

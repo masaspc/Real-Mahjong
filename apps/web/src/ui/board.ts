@@ -31,8 +31,16 @@ function actionButton(
   label: string,
   command: Command,
   send: (command: Command) => void,
+  tiles: Tile[] = [],
 ): HTMLButtonElement {
-  const button = node("button", "action", label);
+  const button = node("button", "action");
+  // **文字だけでは何を鳴くのか分からない。**牌そのものを並べる。
+  button.append(node("span", "action-label", label));
+  if (tiles.length > 0) {
+    const row = node("span", "action-tiles");
+    for (const tile of tiles) row.append(tileNode(tile));
+    button.append(row);
+  }
   button.addEventListener("click", () => {
     clearRiichiReady();
     send(command);
@@ -65,7 +73,7 @@ function renderActions(
     actions.append(button);
   }
   for (const choice of actionsFor(state)) {
-    actions.append(actionButton(choice.label, choice.command, send));
+    actions.append(actionButton(choice.label, choice.command, send, choice.tiles));
   }
   return actions;
 }
@@ -156,6 +164,13 @@ export function renderBoard(
   board.append(header, scores);
 
   const controls = node("section", "controls");
+  if (state.pending && state.lastDiscard) {
+    // **鳴けるときは、何を鳴くのかを真っ先に見せる。**
+    const target = node("div", "target");
+    target.append(node("span", undefined, `席${state.lastDiscard.seat} が捨てた`));
+    target.append(tileNode(state.lastDiscard.tile));
+    controls.append(target);
+  }
   controls.append(renderActions(state, send));
   if (state.pending) {
     const meter = node("div", "timer");

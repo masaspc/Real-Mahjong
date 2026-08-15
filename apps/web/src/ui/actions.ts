@@ -1,3 +1,4 @@
+import type { Tile } from "../protocol/Tile";
 import type { Command } from "../protocol/Command";
 import type { GameState } from "../game/state";
 import { tileLabel } from "../game/tiles";
@@ -5,6 +6,8 @@ import { tileLabel } from "../game/tiles";
 /** 押せるボタン1つぶん。 */
 export type Choice = {
   label: string;
+  /** ボタンに並べて見せる牌。**文字だけでは何を鳴くのか分からない。** */
+  tiles: Tile[];
   command: Command;
 };
 
@@ -35,7 +38,8 @@ export function actionsFor(state: GameState): Choice[] {
       case "chi":
         for (const tiles of option.candidates) {
           choices.push({
-            label: `チー ${tiles.map(tileLabel).join(" ")}`,
+            label: "チー",
+            tiles,
             command: { type: "call_response", window_id: windowId, response: { type: "chi", tiles } },
           });
         }
@@ -44,7 +48,8 @@ export function actionsFor(state: GameState): Choice[] {
       case "pon":
         for (const tiles of option.candidates) {
           choices.push({
-            label: `ポン ${tiles.map(tileLabel).join(" ")}`,
+            label: "ポン",
+            tiles,
             command: { type: "call_response", window_id: windowId, response: { type: "pon", tiles } },
           });
         }
@@ -55,16 +60,19 @@ export function actionsFor(state: GameState): Choice[] {
           if (candidate.type === "minkan") {
             choices.push({
               label: "大明槓",
+              tiles: [],
               command: { type: "call_response", window_id: windowId, response: { type: "kan" } },
             });
           } else if (candidate.type === "ankan") {
             choices.push({
-              label: `暗槓 ${tileLabel(candidate.kind)}`,
+              label: "暗槓",
+              tiles: [candidate.kind],
               command: { type: "ankan", kind: candidate.kind },
             });
           } else {
             choices.push({
-              label: `加槓 ${tileLabel(candidate.tile)}`,
+              label: "加槓",
+              tiles: [candidate.tile],
               command: { type: "kakan", tile: candidate.tile },
             });
           }
@@ -74,16 +82,19 @@ export function actionsFor(state: GameState): Choice[] {
       case "ron":
         choices.push({
           label: "ロン",
+          tiles: [],
           command: { type: "call_response", window_id: windowId, response: { type: "ron" } },
         });
         break;
 
       case "tsumo":
-        choices.push({ label: "ツモ", command: { type: "tsumo" } });
+        choices.push({ label: "ツモ",
+          tiles: [], command: { type: "tsumo" } });
         break;
 
       case "kyuushu":
-        choices.push({ label: "九種九牌", command: { type: "kyuushu" } });
+        choices.push({ label: "九種九牌",
+          tiles: [], command: { type: "kyuushu" } });
         break;
 
       default:
@@ -98,6 +109,7 @@ export function actionsFor(state: GameState): Choice[] {
   if (isReaction && choices.length > 0) {
     choices.push({
       label: "見送り",
+          tiles: [],
       command: { type: "call_response", window_id: windowId, response: { type: "pass" } },
     });
   }

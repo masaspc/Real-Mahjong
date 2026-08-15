@@ -176,6 +176,7 @@ export class TableScene {
 
     for (const motion of motions) {
       let entry = this.#moving.get(motion.id);
+      const made = entry === undefined;
       if (entry === undefined) {
         const tile = this.#pool.acquire(motion.encoded);
         const mesh = new Mesh(createTileGeometry(), createTileMaterial(this.#atlas));
@@ -185,9 +186,13 @@ export class TableScene {
       }
       // **使い回すのはメッシュだけで、中身ではない。**条件を付けずに毎回
       // 入れ直す。付けると、WebGL 抜きでは試せない場所に判断が生まれる。
+      const changed =
+        made || entry.tile.encoded !== motion.encoded || entry.tile.faceUp !== motion.faceUp;
       entry.tile.encoded = motion.encoded;
       entry.tile.faceUp = motion.faceUp;
-      applyFaceUv(entry.mesh.geometry, motion.encoded, motion.faceUp);
+      if (changed) {
+        applyFaceUv(entry.mesh.geometry, motion.encoded, motion.faceUp);
+      }
 
       const pose = poseAt(motion, progress);
       entry.mesh.position.set(pose.position.x, pose.position.y, pose.position.z);
@@ -236,6 +241,7 @@ export class TableScene {
 
     for (const [key, placement] of unique) {
       let entry = this.#meshes.get(key);
+      const fresh = entry === undefined;
       if (entry === undefined) {
         const tile = this.#pool.acquire(placement.encoded);
         const geometry = createTileGeometry();
@@ -246,11 +252,20 @@ export class TableScene {
         this.#meshes.set(key, entry);
       }
 
+      // **面が変わっていないなら UV に触れない。**触ると頂点バッファを
+      // まるごと送り直すことになり、牌1枚あたり数百頂点 x 全牌 x 毎フレーム
+      // の転送が起きて描画が止まる。
+      const changed =
+        entry.tile.encoded !== placement.encoded ||
+        entry.tile.faceUp !== placement.faceUp ||
+        fresh;
       entry.tile.encoded = placement.encoded;
       entry.tile.position = placement.position;
       entry.tile.rotationY = placement.rotationY;
       entry.tile.faceUp = placement.faceUp;
-      applyFaceUv(entry.mesh.geometry, placement.encoded, placement.faceUp);
+      if (changed) {
+        applyFaceUv(entry.mesh.geometry, placement.encoded, placement.faceUp);
+      }
       entry.mesh.position.set(
         placement.position.x,
         placement.position.y,

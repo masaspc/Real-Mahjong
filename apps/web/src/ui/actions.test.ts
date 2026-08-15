@@ -46,13 +46,17 @@ describe("選べる操作からコマンドを組み立てる", () => {
     // **送り方が違う。**取り違えるとサーバが受け付けない。
     const choices = actionsFor(offering([{ type: "kan", candidates: [{ type: "ankan", kind: 4 }] }]));
     expect(choices[0]?.command).toEqual({ type: "ankan", kind: 4 });
-    expect(choices[0]?.label).toBe("暗槓 5m");
+    // **牌は label ではなく tiles で渡す。**文字だけのボタンでは、何を
+    // 鳴くのかが画面から分からない。
+    expect(choices[0]?.label).toBe("暗槓");
+    expect(choices[0]?.tiles).toEqual([4]);
   });
 
   it("加槓も専用のコマンドで、牌そのものを送る", () => {
     const choices = actionsFor(offering([{ type: "kan", candidates: [{ type: "kakan", tile: 34 }] }]));
     expect(choices[0]?.command).toEqual({ type: "kakan", tile: 34 });
-    expect(choices[0]?.label).toBe("加槓 0m");
+    expect(choices[0]?.label).toBe("加槓");
+    expect(choices[0]?.tiles).toEqual([34]);
   });
 
   it("3種類のカンが同時に出せる", () => {
