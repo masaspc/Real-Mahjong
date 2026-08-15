@@ -791,6 +791,8 @@ Expected: FAIL（`motion.ts` が無い）
 - `before` と `after` を `Map<string, Placement>` にする
 - **第1段。**イベントの型で分岐し、上の表のとおり起点と着地の鍵を決める
   - 「消えた山の牌」は `before` にあって `after` に無い `wall-` の鍵。
+  **1枚しか消えない場面だけを試験しても、最小を選ぶ規則が効いているか
+  分からない。**山が一度に複数減る場面で固定すること。
     **複数あるときは番号が最も小さいものを選ぶ。**`slot` は
     `WALL_SLOTS - wallRemaining + index` なので、残りが減ると開始番号が上がる。
     **番号が大きいほうを選ぶと、両方に在る牌を掴んで動きが1つも出ない**
@@ -808,10 +810,10 @@ Expected: FAIL（`motion.ts` が無い）
 - [ ] **Step 4: 試験が通ることを確かめる**
 
 Run: `pnpm --dir apps/web test src/scene/motion.test.ts`
-Expected: 10 passed
+Expected: 11 passed
 
 Run: `pnpm --dir apps/web test`
-Expected: 203 passed
+Expected: 204 passed
 
 - [ ] **Step 5: コミット**
 
@@ -939,7 +941,7 @@ Expected: エラー0件でビルド成功
 - [ ] **Step 3: 既存の試験が壊れていないことを確かめる**
 
 Run: `pnpm --dir apps/web test`
-Expected: 203 passed
+Expected: 204 passed
 
 - [ ] **Step 4: 人が見るための口を足す（合否判定には使わない）**
 
@@ -1081,7 +1083,7 @@ Expected: 3 passed
 - [ ] **Step 3: 全体を確かめる**
 
 Run: `pnpm --dir apps/web test`
-Expected: 206 passed
+Expected: 207 passed
 
 Run: `pnpm --dir apps/web typecheck && pnpm --dir apps/web build`
 Expected: エラー0件でビルド成功
