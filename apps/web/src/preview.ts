@@ -176,8 +176,9 @@ addEventListener("resize", resize);
  * ただし1コマで即止めるだけでは中身が空の png になる。理由は2つある。
  *
  * 1. 牌面アトラス（`table.ts` の `paintAtlas`）は非同期に焼ける。焼き上がり前に
- *    止めると、テクスチャが差し替わる前の絵になる。ローカルの data URL 読込
- *    なので数コマ待てば十分間に合う。
+ *    止めると、テクスチャが差し替わる前の絵になる。**猶予コマ数の勘に頼らず、**
+ *    `scene.ready` を実際に待つ。`paintAtlas` が失敗しても `scene.ready` は
+ *    解決するので、待ちっぱなしにはならない。
  * 2. ヘッドレス Chrome の `--virtual-time-budget` 下では、WebGL の描画バッファに
  *    正しく描けていても（`gl.readPixels` で確認済み）、ページの合成側がその
  *    コマを拾わないまま `--screenshot` が走ることがある。コマ数を増やしても
@@ -188,22 +189,17 @@ addEventListener("resize", resize);
  */
 const still = new URLSearchParams(location.search).get("still") === "1";
 
-/** 牌面アトラスの焼き上がりを待つための猶予コマ数。ローカル読込なので十分。 */
+/**
+ * アトラスの焼き上がり後、合成に確実に乗せるための猶予コマ数。
+ *
+ * 焼き上がり自体は `scene.ready` で確かめ済みなので、ここでの猶予は
+ * 上記の理由2（合成側の取りこぼし）だけを埋める。
+ */
 const STILL_SETTLE_FRAMES = 15;
 
-let stillFrames = 0;
 function frame(): void {
   scene.render();
-  if (!still) {
-    requestAnimationFrame(frame);
-    return;
-  }
-  stillFrames += 1;
-  if (stillFrames < STILL_SETTLE_FRAMES) {
-    requestAnimationFrame(frame);
-    return;
-  }
-  freezeCanvas();
+  requestAnimationFrame(frame);
 }
 
 /** WebGL の canvas を、直前に描いた絵のままの 2D canvas へ差し替えて止める。 */
@@ -216,4 +212,22 @@ function freezeCanvas(): void {
   snapshot.getContext("2d")?.drawImage(canvas!, 0, 0);
   canvas!.replaceWith(snapshot);
 }
-requestAnimationFrame(frame);
+
+if (still) {
+  // アトラスの焼き上がりを実際に待ってから、猶予コマを描いて止める。
+  void scene.ready.then(() => {
+    let settleFrames = 0;
+    function settle(): void {
+      scene.render();
+      settleFrames += 1;
+      if (settleFrames < STILL_SETTLE_FRAMES) {
+        requestAnimationFrame(settle);
+        return;
+      }
+      freezeCanvas();
+    }
+    requestAnimationFrame(settle);
+  });
+} else {
+  requestAnimationFrame(frame);
+}

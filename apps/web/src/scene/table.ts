@@ -56,6 +56,13 @@ export class TableScene {
   readonly #moving = new Map<string, TileMesh>();
   readonly #raycaster = new Raycaster();
   #placements: Placement[] = [];
+  /**
+   * 牌面アトラスが焼き上がった（または焼くのに失敗した）ことを表す。
+   *
+   * **失敗しても解決する。**`paintAtlas` の失敗を握りつぶさず記録はするが、
+   * `ready` を待つ側（撮影経路）が永久に固まらないようにするのが目的。
+   */
+  readonly ready: Promise<void>;
 
   constructor(canvas: HTMLCanvasElement) {
     this.#canvas = canvas;
@@ -76,7 +83,7 @@ export class TableScene {
     // 文字が斜めから見たときに潰れる。
     this.#atlas.anisotropy = this.#renderer.capabilities.getMaxAnisotropy();
     this.#atlas.needsUpdate = true;
-    void paintAtlas(atlasCanvas)
+    this.ready = paintAtlas(atlasCanvas)
       .then(() => {
         this.#atlas.needsUpdate = true;
       })
