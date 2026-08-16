@@ -20,7 +20,13 @@ describe("牌姿一覧", () => {
       sheet[String(tile)] = mark(tileFaceSvg(tile));
     }
     sheet["back"] = mark(tileBackSvg());
-    // **アトラスの行が反転したときも、牌を取り違えたときも、ここが動く。**
+    // **この試験が捕まえるのは `SOURCES` の並び違いと取り違え、素材の
+    // 差し替えである。**`tileFaceSvg` は `SOURCES` を直接引くだけで、
+    // 3D のアトラスの行・列の計算（`scene/atlas.ts` の `uvOffsetOf`）を
+    // 経由しない。**よってアトラスの行の反転はここでは捕まえられない**
+    // ——それは `scene/atlas.test.ts` の役目である。重く不安定な3D撮影に
+    // 依存せず、3Dを経由しないまま牌の対応が保たれているかを見るのが
+    // この試験の役割。
     expect(sheet).toMatchSnapshot();
   });
 });
