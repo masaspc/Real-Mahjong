@@ -22,21 +22,57 @@ const TILES = [
   ["1F021", "p9"],
 ];
 
-/** 許すのはこれだけ。**増やすときは人が判断する。** */
-const ALLOWED = ["cc0", "pd", "public domain"];
+/**
+ * 許すのはこれだけ。**増やすときは人が判断する。**
+ *
+ * gpl を含めるのは人の判断による。File:U+1F000 MJEastwind.svg（東風）だけが
+ * GPL のみで、同じ作者の他の牌が持つ PD の記載を欠いている。**配布するときは
+ * GPL の義務が生じる。**手元で遊ぶ間は問題にならないが、公開する前に見直すこと。
+ */
+const ALLOWED = ["cc0", "pd", "public domain", "gpl"];
+
+function sleep(ms) {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+/**
+ * Wikimedia は連続リクエストをレート制限する（"You are making too many
+ * requests" というプレーンテキストを返し、JSON として壊れる）。値や許諾判定
+ * ロジックには関係ない技術的な再試行なので、ここだけリトライを入れる。
+ */
+async function fetchWithRetry(url, parse) {
+  const MAX_ATTEMPTS = 10;
+  for (let attempt = 0; attempt < MAX_ATTEMPTS; attempt++) {
+    const res = await fetch(url, {
+      headers: {
+        // Wikimedia のベストプラクティスに従い、識別可能な User-Agent を送る。
+        "User-Agent": "RealMahjongTileFetch/1.0 (local dev script; contact: masaxeon@gmail.com)",
+      },
+    });
+    const text = await res.text();
+    try {
+      return parse(text);
+    } catch {
+      if (attempt === MAX_ATTEMPTS - 1) {
+        throw new Error(`リトライしても取得できない: ${url}\n${text.slice(0, 200)}`);
+      }
+      await sleep(Math.min(3000 * (attempt + 1), 30000));
+    }
+  }
+}
 
 async function categoryFiles() {
   const url = `${API}?action=query&list=categorymembers`
     + `&cmtitle=${encodeURIComponent("Category:SVG Planar illustrations of Mahjong tiles")}`
     + `&cmlimit=500&cmtype=file&format=json&origin=*`;
-  const json = await (await fetch(url)).json();
+  const json = await fetchWithRetry(url, JSON.parse);
   return json.query.categorymembers.map((m) => m.title);
 }
 
 async function info(title) {
   const url = `${API}?action=query&titles=${encodeURIComponent(title)}`
     + `&prop=imageinfo&iiprop=url|size|extmetadata&format=json&origin=*`;
-  const json = await (await fetch(url)).json();
+  const json = await fetchWithRetry(url, JSON.parse);
   const page = Object.values(json.query.pages)[0];
   const ii = page.imageinfo[0];
   const meta = ii.extmetadata ?? {};
@@ -59,6 +95,7 @@ for (const [code, name] of TILES) {
     throw new Error(`U+${code} のファイルが見つからない`);
   }
   const meta = await info(title);
+  await sleep(1000);
 
   // **ここで止める。**許諾が合わないものを1件でも通したら意味がない。
   if (!ALLOWED.some((ok) => meta.license.includes(ok))) {
@@ -68,16 +105,23 @@ for (const [code, name] of TILES) {
     throw new Error(`${title} の寸法が違う: ${meta.width}x${meta.height}`);
   }
 
-  const svg = await (await fetch(meta.url)).text();
+  const svg = await fetchWithRetry(meta.url, (text) => {
+    if (!text.includes("<svg")) {
+      throw new Error("svg でない応答");
+    }
+    return text;
+  });
   await writeFile(`apps/web/src/assets/tiles/${name}.svg`, svg);
   credits.push(`| ${name}.svg | ${title.replace("File:", "")} | ${meta.author} | ${meta.license} | ${meta.width}x${meta.height} |`);
   console.log(`取り込み: ${name}.svg  ${meta.license}`);
+  await sleep(1500);
 }
 
 await writeFile(
   "apps/web/src/assets/tiles/CREDITS.md",
   `# 牌図の出所\n\n取得日: ${new Date().toISOString().slice(0, 10)}\n`
   + `出所: Wikimedia Commons\n\n`
+  + `**注意: east.svg（東風）のみ GPL である。**他は PD か CC0。配布するときは GPL の義務が生じる。\n\n`
   + `| 保存名 | 元ファイル | 作者 | 許諾 | 寸法 |\n|---|---|---|---|---|\n`
   + credits.join("\n") + "\n",
 );
