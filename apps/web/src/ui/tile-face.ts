@@ -78,9 +78,19 @@ export function tileFaceSvg(tile: Tile): string {
   return isRed(tile) ? reddened(source) : source;
 }
 
-/** 赤ドラの絵。**Task 7 で素材の中身を読んでから実装する。** */
+/**
+ * 赤ドラの絵。
+ *
+ * **一括の色置換はしていない。**`m5.svg`/`p5.svg`/`s5.svg` を読むと、3ファイル
+ * とも構造は同じで、色は `fill=` 属性ではなく数字の `<path>` を包む `<g>` の
+ * `style` 属性の中に `fill:#000000;fill-opacity:1;stroke:none;...` として
+ * 1箇所だけ書かれている（`fill=` 属性は0件）。牌の背景色は `span.tile` 側の
+ * CSS が持ち、この SVG 自体は数字とその縁取りの黒いパス1本だけを描いている。
+ * よってこの `fill:#000000` だけを赤に変えれば、数字の絵だけが赤くなり、
+ * 背景（＝この文字列には存在しない）が赤くなることはない。
+ */
 function reddened(source: string): string {
-  return source;
+  return source.replace("fill:#000000", "fill:#c0392b");
 }
 
 /** 裏向きの牌。他家の手牌に使う。 */
