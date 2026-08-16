@@ -6,9 +6,13 @@ import { isRed, kindOf } from "../game/tiles";
  * 34種の牌図。`?raw` で文字列として読み込む。
  *
  * **`*?raw` の型は `vite/client` が既に宣言している。**`tsconfig.json` の
- * `types` を空にしているためグローバルには入らないが、上の参照でこの
- * ファイルだけに効かせられる。`vite-env.d.ts` に新しい宣言を足すと、この
- * タスクの `Files:`（`tile-face.ts` と試験のみ）を超えてしまう。
+ * `types` を空にしているためグローバルには自動では入らないが、この
+ * ファイル冒頭の参照ディレクティブでアンビエント宣言として読み込んでいる。
+ * **アンビエント宣言はプログラム全体（他のファイルも含む）に効く。**この
+ * ファイルに書いたのは単に「ここで最初に必要になったから」であり、
+ * 効果範囲をこのファイルに閉じ込めているわけではない。`vite-env.d.ts` に
+ * 移すのはこのタスクの `Files:`（`tile-face.ts` と試験のみ）を超えるため
+ * 見送っている。
  */
 import m1 from "../assets/tiles/m1.svg?raw";
 import m2 from "../assets/tiles/m2.svg?raw";
@@ -63,6 +67,46 @@ const SOURCES: readonly string[] = [
 
 const SVG_NS = "http://www.w3.org/2000/svg";
 
+/** ルート `<svg ...>` の開きタグ全体（属性部分を捕捉する）。 */
+const SVG_OPEN_TAG = /<svg\b([^>]*)>/;
+
+/**
+ * 取り込んだ SVG のルート `<svg>` タグに `class="tile-face"` と `viewBox`
+ * を注入する。
+ *
+ * **取り込み素材34件はどれも `class="tile-face"` も `viewBox` も持たない**
+ * （`grep -l 'class="tile-face"' apps/web/src/assets/tiles/*.svg` /
+ * `grep -l viewBox ...` はいずれも0件）。`board.css` の `.tile-face` は
+ * `class="tile-face"` を持つ要素にしか当たらないため、これを注入し
+ * ないと 2D の盤面（`ui/board.ts`）では `width`/`height` の実寸
+ * （74.7×95.1px 等）でそのまま描かれ、28px の牌の枠からはみ出す。3D の
+ * 牌面アトラス（`scene/face-atlas.ts`）は描画先の寸法を別途指定するため
+ * 影響を受けないが、`tileFaceSvg`/`tileBackSvg` は唯一の定義であり両方が
+ * 通るので、ここで両方に注入する。
+ *
+ * `viewBox` は素材ごとの `width`/`height` から作る（値は素材間で微妙に
+ * 異なる。例: `m8.svg` は `width="74.700005"`）。既に `viewBox` や
+ * `class="tile-face"` を持つ文字列（`tileBackSvg` の手書き SVG）に対しては
+ * 何もしない。冪等にしておくことで、`tileFaceSvg` と `tileBackSvg` の
+ * 両方からこの1つの関数を素直に呼べる。
+ */
+function normalizeTileSvg(source: string): string {
+  return source.replace(SVG_OPEN_TAG, (whole, attrs: string) => {
+    const width = /\bwidth="([^"]+)"/.exec(attrs)?.[1];
+    const height = /\bheight="([^"]+)"/.exec(attrs)?.[1];
+    if (width === undefined || height === undefined) {
+      throw new Error("牌のSVGに width/height が無く viewBox を作れない");
+    }
+    const withViewBox = /\bviewBox="/.test(attrs)
+      ? attrs
+      : `${attrs} viewBox="0 0 ${width} ${height}"`;
+    const withClass = /\bclass="tile-face"/.test(withViewBox)
+      ? withViewBox
+      : `${withViewBox} class="tile-face"`;
+    return `<svg${withClass}>`;
+  });
+}
+
 /**
  * 1枚ぶんの SVG。
  *
@@ -75,7 +119,8 @@ export function tileFaceSvg(tile: Tile): string {
   if (source === undefined) {
     throw new Error(`牌の符号が範囲外: ${tile}`);
   }
-  return isRed(tile) ? reddened(source) : source;
+  const svg = isRed(tile) ? reddened(source) : source;
+  return normalizeTileSvg(svg);
 }
 
 /**
@@ -93,14 +138,21 @@ function reddened(source: string): string {
   return source.replace("fill:#000000", "fill:#c0392b");
 }
 
-/** 裏向きの牌。他家の手牌に使う。 */
+/**
+ * 裏向きの牌。他家の手牌に使う。
+ *
+ * 手書きの SVG。`width`/`height` だけを持たせ、`class="tile-face"` と
+ * `viewBox` は他の34件と同じ `normalizeTileSvg` に作らせる。手で
+ * `viewBox="0 0 40 54"` と書いても値は一致するが、経路を1本にしておく
+ * ほうが `width`/`height` を変えたときにズレない。
+ */
 export function tileBackSvg(): string {
-  return (
-    `<svg xmlns="${SVG_NS}" viewBox="0 0 40 54" class="tile-face" aria-hidden="true">` +
+  const svg =
+    `<svg xmlns="${SVG_NS}" width="40" height="54" aria-hidden="true">` +
     `<rect x="0.7" y="0.7" width="38.6" height="52.6" rx="4.5" ` +
     `fill="#2f7a52" stroke="#1c4b33" stroke-width="1.2"/>` +
     `<rect x="6" y="7" width="28" height="40" rx="3" fill="none" ` +
     `stroke="#7fc39b" stroke-width="1.4"/>` +
-    `</svg>`
-  );
+    `</svg>`;
+  return normalizeTileSvg(svg);
 }
