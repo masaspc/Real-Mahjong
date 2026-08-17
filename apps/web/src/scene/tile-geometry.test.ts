@@ -41,9 +41,13 @@ describe("createTileGeometry", () => {
       uv.getY(i) >= cell.v - slack &&
       uv.getY(i) <= cell.v + cell.dv + slack;
 
+    // **裏面として扱うのは本当の背の面（z ≈ -depth/2）だけ。**面取りの
+    // 境目（z ≈ -(depth/2 - BEVEL) = -0.34）は側面と同じ牌体の縁なので、
+    // 裏面ではなく牌体のセルに塗られる。しきい値を面取りの厚み(0.06)より
+    // 内側に置き、境目を裏面判定に含めない。
     let backCount = 0;
     for (let i = 0; i < uv.count; i += 1) {
-      if (position.getZ(i) < -TILE.depth / 2 + 0.07) {
+      if (position.getZ(i) < -TILE.depth / 2 + 0.02) {
         expect(inside(i, back), `背の頂点 ${i} が裏面のセルに無い`).toBe(true);
         backCount += 1;
       } else {
@@ -67,6 +71,34 @@ describe("createTileGeometry", () => {
       }
     }
     expect(corners).toBe(0);
+  });
+
+  it("側面は引き伸ばさず、1点の色で塗る", () => {
+    // **側面の頂点をセル全体へ広げると、縁の画素が厚み方向へ伸びて筋になる。**
+    // 牌体のセルは無地なので、すべて同じ1点を指せばよい。
+    const geometry = createTileGeometry();
+    const position = geometry.getAttribute("position");
+    const uv = geometry.getAttribute("uv");
+    const half = TILE.depth / 2;
+
+    // **面取り(1段・2分割)は z 方向に4段しか頂点を持たない。**両端の面
+    // (z=±half)と、面取りと側面の境目(z=±(half-BEVEL)=±0.34)だけで、
+    // その間を埋める頂点は無い。境目を確実に拾うには、面取りの厚み
+    // (0.06)より内側にしきい値を置く必要がある。
+    const sides: number[] = [];
+    for (let i = 0; i < position.count; i += 1) {
+      const z = position.getZ(i);
+      if (z <= half - 0.05 && z >= -half + 0.05) {
+        sides.push(i);
+      }
+    }
+    expect(sides.length).toBeGreaterThan(0);
+
+    const first = sides[0]!;
+    for (const i of sides) {
+      expect(uv.getX(i)).toBeCloseTo(uv.getX(first), 6);
+      expect(uv.getY(i)).toBeCloseTo(uv.getY(first), 6);
+    }
   });
 });
 
