@@ -41,3 +41,14 @@ jobs:
           version: 11
       - run: pnpm install --frozen-lockfile
       - run: pnpm --filter @real-mahjong/web typecheck
+
+      # **型検査だけでは絵の事故が止まらない。**アトラスの上下反転も、牌面に
+      # `xmlns` が無い事故も、型は通ったまま起きた。試験がそれを見張っている
+      # ので、CI で必ず走らせる。
+      - run: pnpm --filter @real-mahjong/web test
+
+      # 本番の束ね方でしか出ない失敗（`?raw` 取り込みなど）を捕まえる。
+      - run: pnpm --filter @real-mahjong/web build
+
+      # 牌図の許諾は人の目に任せない。表と実体がずれたら落とす。
+      - run: node tools/check_tile_credits.mjs

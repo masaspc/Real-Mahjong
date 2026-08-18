@@ -51,7 +51,29 @@ cargo clippy --all-targets -- -D warnings
 cargo fmt --check
 ```
 
+画面（`apps/web`）を触ったなら、次も通すこと。
+
+```bash
+pnpm --filter @real-mahjong/web test
+pnpm --filter @real-mahjong/web typecheck
+pnpm --filter @real-mahjong/web build
+```
+
 「実装したが未検証」の状態で完了を報告しない。
+
+## 牌図の許諾
+
+`apps/web/src/assets/tiles/` の牌図は外から持ち込んだ素材である。**許諾の確認を
+人の目に任せない。**この判断は一度誤って CC BY-SA のファイルを「パブリック
+ドメイン」と書き、もう一度、東風だけが GPL であることを見落とした。
+
+```bash
+node tools/check_tile_credits.mjs
+```
+
+`CREDITS.md` の表と実体を突き合わせ、許諾・寸法・過不足を見る。CI でも走る。
+牌図を足す・差し替えるときは、取り込みスクリプト `tools/fetch_tiles.mjs` を
+通すこと。手で置かない。
 
 ## 絵を出すものは、絵を出して確かめる
 
