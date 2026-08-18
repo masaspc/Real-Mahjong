@@ -86,11 +86,10 @@ const SVG_OPEN_TAG = /<svg\b([^>]*)>/;
  *
  * `viewBox` は素材ごとの `width`/`height` から作る（値は素材間で微妙に
  * 異なる。例: `m8.svg` は `width="74.700005"`）。既に `viewBox` や
- * `class="tile-face"` を持つ文字列（`tileBackSvg` の手書き SVG）に対しては
- * 何もしない。冪等にしておくことで、`tileFaceSvg` と `tileBackSvg` の
- * 両方からこの1つの関数を素直に呼べる。
+ * `class="tile-face"` を持つ文字列に対しては何もしない。冪等にしておくことで、
+ * `tileFaceSvg` と `tileBackSvg` の両方からこの1つの関数を素直に呼べる。
  */
-function normalizeTileSvg(source: string): string {
+export function normalizeTileSvg(source: string): string {
   return source.replace(SVG_OPEN_TAG, (whole, attrs: string) => {
     const width = /\bwidth="([^"]+)"/.exec(attrs)?.[1];
     const height = /\bheight="([^"]+)"/.exec(attrs)?.[1];
@@ -100,9 +99,22 @@ function normalizeTileSvg(source: string): string {
     const withViewBox = /\bviewBox="/.test(attrs)
       ? attrs
       : `${attrs} viewBox="0 0 ${width} ${height}"`;
-    const withClass = /\bclass="tile-face"/.test(withViewBox)
-      ? withViewBox
-      : `${withViewBox} class="tile-face"`;
+    // **`class` は足すのではなく混ぜる。**既に別の `class` を持つ SVG に
+    // 素朴に付け足すと `class="a" class="tile-face"` になり、ブラウザは
+    // 後ろを捨てるので寸法の指定が効かなくなる。属性が2つある不正な XML を
+    // 作っておいて、片方が黙って無視されるという最も気付きにくい壊れ方を
+    // するので、既存の値へ追記する形にする。
+    const existing = /\bclass="([^"]*)"/.exec(withViewBox);
+    const names = existing?.[1] ?? "";
+    let withClass: string;
+    if (existing === null) {
+      withClass = `${withViewBox} class="tile-face"`;
+    } else if (names.split(/\s+/).includes("tile-face")) {
+      withClass = withViewBox;
+    } else {
+      const merged = names === "" ? "tile-face" : `${names} tile-face`;
+      withClass = withViewBox.replace(existing[0], `class="${merged}"`);
+    }
     return `<svg${withClass}>`;
   });
 }

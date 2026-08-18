@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 
-import { tileBackSvg, tileFaceSvg } from "./tile-face";
+import { normalizeTileSvg, tileBackSvg, tileFaceSvg } from "./tile-face";
 
 describe("牌の面を描く", () => {
   it("34種すべてに素材がある", () => {
@@ -60,5 +60,33 @@ describe("牌の面を描く", () => {
     const back = tileBackSvg();
     expect(back).toContain('class="tile-face"');
     expect(back).toMatch(/<svg[^>]*\bviewBox="/);
+  });
+});
+
+describe("SVG の正規化", () => {
+  it("既に class を持つ SVG には属性を足さず、値を混ぜる", () => {
+    // **`class="a" class="tile-face"` を作ってはいけない。**属性が2つある
+    // 不正な XML になり、ブラウザは後ろを黙って捨てる。寸法の指定だけが
+    // 効かなくなるという、最も気付きにくい壊れ方をする。
+    const out = normalizeTileSvg(
+      '<svg xmlns="http://www.w3.org/2000/svg" class="a" width="10" height="20"></svg>',
+    );
+    expect(out.match(/\bclass="/g)).toHaveLength(1);
+    expect(out).toContain('class="a tile-face"');
+  });
+
+  it("既に tile-face を持つ SVG は増やさない", () => {
+    const once = normalizeTileSvg(
+      '<svg xmlns="http://www.w3.org/2000/svg" width="10" height="20"></svg>',
+    );
+    expect(normalizeTileSvg(once)).toBe(once);
+    expect(once.match(/\bclass="/g)).toHaveLength(1);
+  });
+
+  it("取り込んだ34種と裏の class は1つだけ", () => {
+    for (let kind = 0; kind < 34; kind += 1) {
+      expect(tileFaceSvg(kind).match(/\bclass="/g)).toHaveLength(1);
+    }
+    expect(tileBackSvg().match(/\bclass="/g)).toHaveLength(1);
   });
 });

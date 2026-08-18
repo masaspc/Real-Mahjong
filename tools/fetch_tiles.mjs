@@ -50,6 +50,21 @@ async function fetchWithRetry(url, parse) {
       },
     });
     const text = await res.text();
+    // **状態行を見ずに本文を解釈しない。**404 や 500 の本文は HTML なので
+    // `JSON.parse` が投げ、リトライの側に落ちる。10回ぶん待ってから
+    // 「リトライしても取得できない」とだけ言うので、URL の綴り間違いなのか
+    // 混雑なのかが分からない。ここで切り分ける。
+    if (!res.ok) {
+      // 429（過負荷）と 5xx は待てば直る。それ以外は待っても直らない。
+      if (res.status !== 429 && res.status < 500) {
+        throw new Error(`取得できない (HTTP ${res.status}): ${url}`);
+      }
+      if (attempt === MAX_ATTEMPTS - 1) {
+        throw new Error(`リトライしても取得できない (HTTP ${res.status}): ${url}`);
+      }
+      await sleep(Math.min(3000 * (attempt + 1), 30000));
+      continue;
+    }
     try {
       return parse(text);
     } catch {
@@ -59,6 +74,24 @@ async function fetchWithRetry(url, parse) {
       await sleep(Math.min(3000 * (attempt + 1), 30000));
     }
   }
+}
+
+/**
+ * 作者名を1行に均す。
+ *
+ * Commons の `Artist` は HTML であり、作者名のほかに Inkscape の定型文が
+ * 続く版がある。タグを剥がしただけだと
+ * 「Shizhao  This W3C-unspecified vector image was created with Inkscape .」
+ * のような行が `CREDITS.md` の表に入る。**`|` が混ざると表そのものが崩れる**
+ * ので、ここで潰しておく。
+ */
+function cleanAuthor(html) {
+  return html
+    .replace(/<[^>]*>/g, " ")
+    .replace(/This [^.]*vector image was created with [^.]*\./gi, "")
+    .replace(/\|/g, "/")
+    .replace(/\s+/g, " ")
+    .trim();
 }
 
 async function categoryFiles() {
@@ -81,7 +114,7 @@ async function info(title) {
     width: ii.width,
     height: ii.height,
     license: (meta.LicenseShortName?.value ?? "").toLowerCase(),
-    author: (meta.Artist?.value ?? "").replace(/<[^>]*>/g, "").trim(),
+    author: cleanAuthor(meta.Artist?.value ?? ""),
   };
 }
 

@@ -8,11 +8,11 @@
 | 保存名 | 元ファイル | 作者 | 許諾 | 寸法 |
 |---|---|---|---|---|
 | east.svg | U+1F000 MJEastwind.svg | Shizhao | gpl | 75x95 |
-| south.svg | U+1F001 MJSouthwind.svg | Shizhao  This W3C-unspecified vector image was created with Inkscape . | public domain | 75x95 |
+| south.svg | U+1F001 MJSouthwind.svg | Shizhao | public domain | 75x95 |
 | west.svg | U+1F002 MJWestwind.svg | Shizhao | cc0 | 75x95 |
-| north.svg | U+1F003 MJNorthwind.svg | Shizhao  This W3C-unspecified vector image was created with Inkscape . | public domain | 75x95 |
+| north.svg | U+1F003 MJNorthwind.svg | Shizhao | public domain | 75x95 |
 | red.svg | U+1F004 MJReddragon.svg | Shizhao | public domain | 75x95 |
-| green.svg | U+1F005 MJGreendragon.svg | Shizhao  This W3C-unspecified vector image was created with Inkscape . | public domain | 75x95 |
+| green.svg | U+1F005 MJGreendragon.svg | Shizhao | public domain | 75x95 |
 | white.svg | U+1F006 MJWhitedragon.svg | Shizhao | public domain | 75x95 |
 | m1.svg | U+1F007 MJ1wan.svg | Shizhao | public domain | 75x95 |
 | m2.svg | U+1F008 MJ2wan.svg | Shizhao | public domain | 75x95 |
