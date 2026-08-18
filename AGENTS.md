@@ -94,11 +94,25 @@ node tools/check_tile_credits.mjs
 WebGL は swiftshader で動く。
 
 ```bash
-"/Applications/Google Chrome.app/Contents/MacOS/Google Chrome" \
-  --headless=new --disable-gpu --use-angle=swiftshader --enable-unsafe-swiftshader \
-  --window-size=1280,720 --virtual-time-budget=20000 \
-  --screenshot=out.png "http://127.0.0.1:8080/preview.html?viewer=0"
+node tools/shoot.mjs "http://127.0.0.1:8080/?table=x" out.png 20000
+node tools/shoot.mjs "http://127.0.0.1:8080/?table=x" zoom.png 20000 "380,100,540,340,2.2"
 ```
+
+**`--screenshot` と `--virtual-time-budget` は対局の画面では返らない。**卓は
+`requestAnimationFrame` を止めないので仮想時間が尽きない（2分待っても返らな
+かった）。`preview.html?still=1` はこの回避で、動く画面には使えない。
+`tools/shoot.mjs` は DevTools プロトコルで今の絵を要求するので、描画ループが
+回っていてよい。第4引数に `x,y,幅,高さ,倍率` を渡すと一部を拡大して撮れる。
+
+**全体像だけ見ても足りない。**上端の帯やボタンの中の牌は数十画素しかなく、
+牌が化けていても気付けない。実際、2D の牌が「黒地に黒い線」で描かれていたのは
+拡大して初めて分かった。
+
+**動いている対局を撮る。**他家は持ち時間切れで自動的に打つので、放っておけば
+局が進む。`shoot.mjs` の第3引数に待つミリ秒を渡して、河が伸びた頃合いを撮る。
+相手の捨て牌が全部あらぬ方を向いていた欠陥は、この撮り方でしか見つからな
+かった（`preview.html` は自分の席から見た決め打ちの盤面なので、他家の河の
+向きが崩れていても気付けない）。
 
 **確かめる盤面は決め打ちにする。**対局しながら副露5種を待つのは運任せで、
 出ない半荘もある。`apps/web/preview.html` は副露5種・リーチ宣言牌・21枚の河・
