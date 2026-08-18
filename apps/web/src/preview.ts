@@ -91,6 +91,7 @@ const state: GameState = {
   lastDiscard: { seat: 3, tile: 18 },
   lastSeq: 1,
   phase: "playing",
+  turn: 0,
   notice: null,
   finalScores: null,
 };

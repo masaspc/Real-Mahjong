@@ -64,6 +64,12 @@ export type GameState = {
    * 鳴くのか判断できない。次のツモか鳴きの成立で消える。
    */
   lastDiscard: { seat: Seat; tile: Tile } | null;
+  /**
+   * いま手番の席。**誰を待っているのかが画面から読めないと、止まって
+   * いるのか自分が見落としているのか分からない。**ツモで移り、局の
+   * 終わりで消える。鳴きの反応待ちの間は、直前にツモった席のまま。
+   */
+  turn: Seat | null;
   /** 和了や流局の要約。画面の帯に出す。 */
   notice: string | null;
   finalScores: number[] | null;
@@ -122,6 +128,7 @@ export function emptyState(you: Seat): GameState {
     lastDiscard: null,
     lastSeq: null,
     phase: "waiting",
+    turn: null,
     notice: null,
     finalScores: null,
   };
@@ -179,6 +186,7 @@ export function apply(
       break;
 
     case "draw":
+      state.turn = event.seat;
       state.lastDiscard = null;
       state.wallRemaining = event.wall_remaining;
       if (event.seat === state.you && event.tile !== null) {
@@ -237,6 +245,9 @@ export function apply(
       break;
 
     case "call": {
+      // **鳴いた席が打つ番になる。**ツモを経由しないので、ここで移さないと
+      // 手番の表示が捨てた側に残る。
+      state.turn = event.seat;
       const caller = seatOf(state, event.seat);
       // **`tiles` は副露の全部であって、手牌から出た分ではない。**
       // 取り違えると手牌の枚数が狂う。
@@ -313,12 +324,14 @@ export function apply(
       const winners = event.results.map((r) => `席${r.seat}`).join("・");
       state.notice = `${winners} 和了`;
       state.pending = null;
+      state.turn = null;
       break;
     }
 
     case "ryuukyoku":
       state.notice = "流局";
       state.pending = null;
+      state.turn = null;
       break;
 
     case "round_end":

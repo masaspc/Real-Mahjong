@@ -403,3 +403,57 @@ describe("盤面の組み立て", () => {
     expect(state.lastSeq).not.toBeNull();
   });
 });
+
+describe("手番", () => {
+  it("ツモで手番が移る", () => {
+    const state = fold([
+      roundStart,
+      deal,
+      { type: "draw", seat: 2, tile: null, source: "wall", wall_remaining: 69 },
+    ]);
+    expect(state.turn).toBe(2);
+  });
+
+  it("捨てても手番は移らない。次のツモまでは捨てた席のまま", () => {
+    // **鳴きの反応を待っている間である。**ここで手番を進めると、誰の
+    // 反応を待っているのか分からなくなる。
+    const state = fold([
+      roundStart,
+      deal,
+      { type: "draw", seat: 2, tile: null, source: "wall", wall_remaining: 69 },
+      { type: "discard", seat: 2, tile: 5, manner: "tedashi" },
+    ]);
+    expect(state.turn).toBe(2);
+  });
+
+  it("鳴くと鳴いた席が手番になる", () => {
+    // **ツモを経由しない。**ここで移さないと、捨てた側を待ち続けている
+    // ように見える。
+    const state = fold([
+      roundStart,
+      deal,
+      { type: "draw", seat: 1, tile: null, source: "wall", wall_remaining: 69 },
+      { type: "discard", seat: 1, tile: 5, manner: "tedashi" },
+      { type: "call", seat: 3, from: 1, kind: "pon", tiles: [5, 5, 5] },
+    ]);
+    expect(state.turn).toBe(3);
+  });
+
+  it("局が終わると手番が消える", () => {
+    const state = fold([
+      roundStart,
+      deal,
+      { type: "draw", seat: 2, tile: null, source: "wall", wall_remaining: 69 },
+      {
+        type: "ryuukyoku",
+        kind: "exhaustive",
+        initiator: null,
+        tenpai: [false, false, false, false],
+        revealed_hands: [],
+        nagashi_winners: [],
+        settlement: { delta: [0, 0, 0, 0], entries: [] },
+      },
+    ]);
+    expect(state.turn).toBeNull();
+  });
+});

@@ -33,6 +33,13 @@ button { font: inherit; }
   width: 100%;
   height: auto;
   border-radius: 4px;
+  /* **牌図は地色を持たない。**数字と図柄のパスだけなので、下地を敷かないと
+     暗い画面が透けて「黒地に黒い線」になり、牌に見えない。ドラ表示牌も
+     鳴きボタンの中の牌も、牌に見えないまま出ていた。
+     **色は CSS に書かない。**3D のアトラスと食い違うと、同じ牌が 2D と 3D で
+     別の色になる。`face-atlas.ts` の `BODY_FILL_COLOR` を `board.ts` が
+     この変数へ流し込む。定義は1箇所だけにする。 */
+  background: var(--tile-body);
   box-shadow: 0 2px 0 #b0a074, 0 3px 4px rgba(0, 0, 0, .35);
 }
 
@@ -60,6 +67,26 @@ button { font: inherit; }
   pointer-events: auto;
 }
 .actions { min-height: 44px; justify-content: center; }
+/* 帯とボタンは1行に並べる。縦に積むと自分の手牌を覆う。 */
+.control-row {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 10px;
+  align-items: center;
+  justify-content: center;
+}
+.control-row .target { margin-bottom: 0; }
+.status {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-top: 6px;
+  font-size: 13px;
+  text-shadow: 0 1px 3px #000;
+}
+.status .timer { flex: 1; margin-top: 0; }
+.turn { white-space: nowrap; }
+.timer-text { min-width: 5em; text-align: right; white-space: nowrap; }
 .action {
   padding: 8px 14px;
   border: 1px solid #d5c45d;

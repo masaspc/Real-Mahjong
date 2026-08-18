@@ -24,7 +24,7 @@ import {
   seatRotation,
   wallPosition,
 } from "./layout";
-import { pickFrom, type Placement } from "./placement";
+import { ROTATION_ORDER, pickFrom, type Placement } from "./placement";
 import { poseAt, reconcileMoving, type Motion } from "./motion";
 import {
   applyFaceUv,
@@ -206,7 +206,7 @@ export class TableScene {
 
       const pose = poseAt(motion, progress);
       entry.mesh.position.set(pose.position.x, pose.position.y, pose.position.z);
-      entry.mesh.rotation.set(pose.rotationX, pose.rotationY, 0);
+      entry.mesh.rotation.set(pose.rotationX, pose.rotationY, 0, ROTATION_ORDER);
     }
   }
 
@@ -281,7 +281,12 @@ export class TableScene {
         placement.position.y,
         placement.position.z,
       );
-      entry.mesh.rotation.set(placement.rotationX, placement.rotationY, 0);
+      entry.mesh.rotation.set(
+        placement.rotationX,
+        placement.rotationY,
+        0,
+        ROTATION_ORDER,
+      );
     }
 
     this.#placements = [...unique.values()];
