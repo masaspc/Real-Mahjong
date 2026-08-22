@@ -457,3 +457,31 @@ describe("手番", () => {
     expect(state.turn).toBeNull();
   });
 });
+
+describe("鳴いたあとの表示", () => {
+  it("鳴きが成立すると『席N が捨てた』の元が消える", () => {
+    // **これは実際に遊んでいて詰まった。**ポンした直後、帯が出たまま
+    // 残り、その状態で自分の打牌要求が届く。帯があると画面は鳴きの
+    // 反応待ちに見えるのに、押せるボタンは1つも無い。何を待たれて
+    // いるのか分からなくなる。
+    const state = fold([
+      roundStart,
+      deal,
+      { type: "draw", seat: 1, tile: null, source: "wall", wall_remaining: 69 },
+      { type: "discard", seat: 1, tile: 5, manner: "tedashi" },
+      { type: "call", seat: 0, from: 1, kind: "pon", tiles: [5, 5, 5] },
+    ]);
+    expect(state.lastDiscard).toBeNull();
+  });
+
+  it("鳴かれた側でない他家が鳴いても帯は消える", () => {
+    const state = fold([
+      roundStart,
+      deal,
+      { type: "draw", seat: 1, tile: null, source: "wall", wall_remaining: 69 },
+      { type: "discard", seat: 1, tile: 5, manner: "tedashi" },
+      { type: "call", seat: 2, from: 1, kind: "pon", tiles: [5, 5, 5] },
+    ]);
+    expect(state.lastDiscard).toBeNull();
+  });
+});

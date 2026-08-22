@@ -1,5 +1,6 @@
 import { describe, expect, it } from "vitest";
 import {
+  HAND_Z,
   TILE,
   discardPosition,
   handPosition,
@@ -58,18 +59,26 @@ describe("discardPosition", () => {
     expect(g.x).toBeCloseTo(a.x);
   });
 
-  it("grows away from the player row by row", () => {
+  it("段は埋まるたびに自分の側へ降りてくる", () => {
+    // **以前は逆だった。**切るたびに新しい牌が卓の中心へ遠ざかり、
+    // いちばん見たい直前の数枚が他家の河と混ざる位置に来ていた。
     const row0 = discardPosition(0, 0);
     const row1 = discardPosition(0, 6);
     const row2 = discardPosition(0, 12);
-    expect(Math.abs(row1.z)).toBeLessThan(Math.abs(row0.z));
-    expect(Math.abs(row2.z)).toBeLessThan(Math.abs(row1.z));
+    expect(row1.z).toBeGreaterThan(row0.z);
+    expect(row2.z).toBeGreaterThan(row1.z);
   });
 
-  it("does not break past the third row", () => {
-    const far = discardPosition(0, 23);
-    expect(Number.isFinite(far.x)).toBe(true);
-    expect(Number.isFinite(far.z)).toBe(true);
+  it("最後の段が手牌へ食い込まない", () => {
+    // 手牌は立っているので厚みの半分だけ場所を取る。寝かせた河は
+    // 高さの半分。ここが重なると、自分の河と手牌が刺さって見える。
+    const last = discardPosition(0, 23);
+    expect(last.z + TILE.height / 2).toBeLessThan(HAND_Z - TILE.depth / 2);
+  });
+
+  it("1段目が卓の中心を越えない", () => {
+    const first = discardPosition(0, 0);
+    expect(first.z - TILE.height / 2).toBeGreaterThan(0);
   });
 });
 

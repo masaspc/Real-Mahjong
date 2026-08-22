@@ -90,3 +90,43 @@ describe("SVG の正規化", () => {
     expect(tileBackSvg().match(/\bclass="/g)).toHaveLength(1);
   });
 });
+
+describe("牌の色", () => {
+  it("37種のどれにも黒の指定が残らない", () => {
+    // **書き方が3通りある素材を、1通りだけ直して済ませない。**
+    // `fill:#000000` だけを見ていたときは九筒（`stroke="#000"` の線画）
+    // だけが黒いまま残り、筒子の中で1枚だけ色が違っていた。
+    // 東南西北は黒だが `#1c1c1c` であり、素材の生の黒とは別物である。
+    for (let tile = 0; tile <= 36; tile += 1) {
+      const svg = tileFaceSvg(tile);
+      expect(svg, `${tile} に生の黒が残っている`).not.toMatch(
+        /#000000\b|#000"|:\s*#000\b/,
+      );
+    }
+  });
+
+  it("種類ごとに違う色で塗られる", () => {
+    // 筒子は青、索子は緑、發は緑、中は赤。萬子は上下で分ける。
+    expect(tileFaceSvg(9)).toContain("#1f4e9c");
+    expect(tileFaceSvg(18)).toContain("#1a7a3c");
+    expect(tileFaceSvg(32)).toContain("#1a7a3c");
+    expect(tileFaceSvg(33)).toContain("#b3261e");
+    expect(tileFaceSvg(0)).toContain("linearGradient");
+  });
+
+  it("九筒と白は線画なので stroke を塗る", () => {
+    // この2件だけ `fill` を持たない。`fill` しか見ないと黒いまま残る。
+    expect(tileFaceSvg(17)).toContain('stroke="#1f4e9c"');
+    expect(tileFaceSvg(31)).toContain('stroke="#1f4e9c"');
+  });
+
+  it("赤ドラは種類ごとの色より赤が優先される", () => {
+    // 0m/0p/0s。筒子の青や索子の緑が残ってはいけない。
+    for (const tile of [34, 35, 36]) {
+      const svg = tileFaceSvg(tile);
+      expect(svg).toContain("#b3261e");
+      expect(svg).not.toContain("#1f4e9c");
+      expect(svg).not.toContain("#1a7a3c");
+    }
+  });
+});

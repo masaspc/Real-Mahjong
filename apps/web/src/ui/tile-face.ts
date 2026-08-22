@@ -131,23 +131,101 @@ export function tileFaceSvg(tile: Tile): string {
   if (source === undefined) {
     throw new Error(`牌の符号が範囲外: ${tile}`);
   }
-  const svg = isRed(tile) ? reddened(source) : source;
+  // **赤ドラは字形ごと赤にする。**種類ごとの色より優先する。
+  const svg = isRed(tile) ? paint(source, RED) : inked(source, kind);
   return normalizeTileSvg(svg);
 }
 
 /**
- * 赤ドラの絵。
+ * 牌の色。
  *
- * **一括の色置換はしていない。**`m5.svg`/`p5.svg`/`s5.svg` を読むと、3ファイル
- * とも構造は同じで、色は `fill=` 属性ではなく数字の `<path>` を包む `<g>` の
- * `style` 属性の中に `fill:#000000;fill-opacity:1;stroke:none;...` として
- * 1箇所だけ書かれている（`fill=` 属性は0件）。牌の背景色は `span.tile` 側の
- * CSS が持ち、この SVG 自体は数字とその縁取りの黒いパス1本だけを描いている。
- * よってこの `fill:#000000` だけを赤に変えれば、数字の絵だけが赤くなり、
- * 背景（＝この文字列には存在しない）が赤くなることはない。
+ * **取り込んだ牌図は1本のパスでできた字形である。**筒の丸ごと・索の節ごとに
+ * 色を変えるような塗り分けは、この素材ではできない（`fill` は字形全体に
+ * 1つしか無い）。できるのは「1枚を1色で塗る」ことと、上下で色を分けることの
+ * 2つだけなので、その範囲で本物に寄せる。
+ *
+ * - 萬子: 数字は黒、「萬」は赤。上下で分ける
+ * - 筒子: 青
+ * - 索子: 緑
+ * - 風牌: 黒
+ * - 發: 緑 / 中: 赤 / 白: 青い枠
+ * - 赤ドラ: 字形ごと赤
  */
-function reddened(source: string): string {
-  return source.replace("fill:#000000", "fill:#c0392b");
+const BLACK = "#1c1c1c";
+const RED = "#b3261e";
+const GREEN = "#1a7a3c";
+const BLUE = "#1f4e9c";
+
+/**
+ * 字形の色を差し替える。
+ *
+ * **素材は色の書き方が3通りある。**1つの書き方だけ直すと、残りは黒いまま
+ * 出る。実際、`fill:#000000` だけを見ていたときは九筒だけが黒く残った。
+ *
+ * | 書き方 | 件数 | 例 |
+ * |---|---|---|
+ * | `<g style="…fill:#000000…">` の字形 | 31 | 萬子・索子・1〜8筒・風牌・發 |
+ * | `stroke="#000"` の線画 | 2 | 九筒・白 |
+ * | 何も書かず既定の黒に頼る | 1 | 中 |
+ *
+ * 3通り全部に効かせる。根の `fill` は最後の1件のためで、`<g>` の指定が
+ * ある素材では上書きされるので害は無い。
+ */
+function paint(source: string, color: string): string {
+  return source
+    .replace("fill:#000000", `fill:${color}`)
+    .replace(/stroke="#000(000)?"/g, `stroke="${color}"`)
+    .replace(SVG_OPEN_TAG, (_whole, attrs: string) => `<svg${attrs} fill="${color}">`);
+}
+
+/**
+ * 萬子だけ、上下で色を分ける。
+ *
+ * 数字が上、「萬」が下に来る字形なので、**字形の外接矩形の高さ 52% で
+ * 色を切り替える**と数字が黒・萬が赤になる。境目を持つ勾配を1つ置き、
+ * 同じ位置に2つの停止点を重ねて段差にする。
+ *
+ * パスを分割しないので、字形の中身に依存しない。
+ */
+function twoTone(source: string, kind: number): string {
+  const id = `mj-man-${kind}`;
+  const defs =
+    `<defs><linearGradient id="${id}" x1="0" y1="0" x2="0" y2="1">` +
+    `<stop offset="0.52" stop-color="${BLACK}"/>` +
+    `<stop offset="0.52" stop-color="${RED}"/>` +
+    `</linearGradient></defs>`;
+  return source
+    .replace("fill:#000000", `fill:url(#${id})`)
+    .replace(
+      SVG_OPEN_TAG,
+      (_whole, attrs: string) => `<svg${attrs} fill="url(#${id})">${defs}`,
+    );
+}
+
+/**
+ * 白。
+ *
+ * 素材は入れ子の長方形2本でできている。**外側の1本は牌の縁と重なる。**
+ * 牌そのものに縁があるので、そこへさらに細い黒線が乗ると枠に見えず、
+ * 「無地の牌に汚れが付いている」ように見える。外側を外し、内側だけを
+ * 青く太く描く。日本の牌の白はこの1本の枠である。
+ */
+function whiteDragon(source: string): string {
+  return source
+    .replace(/<rect x="1" y="1"[^/]*\/>/, "")
+    .replace('stroke="#000"', `stroke="${BLUE}"`)
+    .replace('stroke-width="1.5"', 'stroke-width="3"');
+}
+
+/** 種類ごとの塗り。0-8=萬 9-17=筒 18-26=索 27-30=東南西北 31=白 32=發 33=中 */
+function inked(source: string, kind: number): string {
+  if (kind < 9) return twoTone(source, kind);
+  if (kind < 18) return paint(source, BLUE);
+  if (kind < 27) return paint(source, GREEN);
+  if (kind < 31) return paint(source, BLACK);
+  if (kind === 31) return whiteDragon(source);
+  if (kind === 32) return paint(source, GREEN);
+  return paint(source, RED);
 }
 
 /**

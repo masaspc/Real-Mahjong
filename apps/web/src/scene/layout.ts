@@ -50,6 +50,17 @@ export const HAND_Z = 10;
  */
 const RIVER_FRONT_Z = 7.925;
 
+/** 河は4段まで。1人が捨てる枚数は多くても21枚ほどで、6枚 x 4段に収まる。 */
+export const RIVER_ROWS = 4;
+
+/**
+ * 河の1段目を置く奥行き。**中心側の端である。**
+ *
+ * 段は中心側から始まり、埋まるたびに手前（自分の側）へ降りてくる。
+ * 4段目がちょうど `RIVER_FRONT_Z` に来るよう逆算する。
+ */
+const RIVER_BACK_Z = RIVER_FRONT_Z - (RIVER_ROWS - 1) * TILE.height;
+
 /** 自席から見た相対席。自分が 0、下家が 1、対面が 2、上家が 3。 */
 export function relativeSeat(absolute: number, viewer: number): number {
   return (absolute - viewer + 4) % 4;
@@ -95,7 +106,10 @@ export function discardPosition(seat: number, index: number, xShift = 0): Vec3 {
   const local: Vec3 = {
     x: (column - (DISCARDS_PER_ROW - 1) / 2) * TILE.width + xShift,
     y: TILE.depth / 2,
-    z: RIVER_FRONT_Z - row * TILE.height,
+    // **段は手前へ降りる。**1段目を卓の中心側に置き、埋まるたびに自分の
+    // 側へ降りてくる。逆にすると、切るたびに新しい牌が遠ざかっていき、
+    // いちばん見たい直前の数枚が卓の真ん中で他家の河と混ざる。
+    z: RIVER_BACK_Z + row * TILE.height,
   };
   return rotateY(local, seatRotation(seat));
 }

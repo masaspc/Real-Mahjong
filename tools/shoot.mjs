@@ -131,7 +131,7 @@ await sleep(Number(waitMs));
 const clip = clipOf(clipArg);
 const { data } = await browser.send(
   "Page.captureScreenshot",
-  clip === undefined ? {} : { clip },
+  clip === undefined ? {} : { clip, captureBeyondViewport: true },
   sessionId,
 );
 writeFileSync(out, Buffer.from(data, "base64"));
