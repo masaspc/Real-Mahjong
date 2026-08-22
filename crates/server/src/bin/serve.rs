@@ -2,6 +2,7 @@
 //!
 //! ```text
 //! cargo run -p server --bin serve
+//! PORT=8081 cargo run -p server --bin serve
 //! ```
 //!
 //! **認証は無い。**卓の id を知っていれば誰でもその席に座れる。
@@ -118,9 +119,22 @@ async fn main() {
         .fallback_service(ServeDir::new(&dist))
         .with_state(tables);
 
-    let listener = tokio::net::TcpListener::bind("127.0.0.1:8080")
-        .await
-        .expect("8080 を開ける");
-    println!("http://127.0.0.1:8080 で待っています");
+    // **8080 は取り合いになる。**別のプロジェクトのサーバが先に握っていると
+    // ここで落ちる。番号を渡せるようにし、塞がっていたら誰が使っているかを
+    // 調べる手立てまで言う。
+    let port = std::env::var("PORT")
+        .ok()
+        .and_then(|value| value.parse::<u16>().ok())
+        .unwrap_or(8080);
+    let listener = match tokio::net::TcpListener::bind(("127.0.0.1", port)).await {
+        Ok(listener) => listener,
+        Err(error) => {
+            eprintln!("{port} を開けません: {error}");
+            eprintln!("誰が使っているかは `lsof -nP -iTCP:{port} -sTCP:LISTEN` で分かります。");
+            eprintln!("別の番号で開くなら `PORT=8081 cargo run -p server --bin serve`。");
+            std::process::exit(1);
+        }
+    };
+    println!("http://127.0.0.1:{port} で待っています");
     axum::serve(listener, app).await.expect("配信できる");
 }
