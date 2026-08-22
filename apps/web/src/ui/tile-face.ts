@@ -205,16 +205,15 @@ function twoTone(source: string, kind: number): string {
 /**
  * 白。
  *
- * 素材は入れ子の長方形2本でできている。**外側の1本は牌の縁と重なる。**
- * 牌そのものに縁があるので、そこへさらに細い黒線が乗ると枠に見えず、
- * 「無地の牌に汚れが付いている」ように見える。外側を外し、内側だけを
- * 青く太く描く。日本の牌の白はこの1本の枠である。
+ * **真っ白にする。**素材は入れ子の長方形2本を描いているが、日本の牌の白は
+ * 何も書かれていない無地である。牌そのものに縁があるので、枠を描くと
+ * 二重になり、枠ではなく汚れのように見える。
+ *
+ * 中身を全部落として、`<svg>` の殻だけ残す。`normalizeTileSvg` が
+ * `width`/`height` から `viewBox` を作るので、殻だけでも寸法は保たれる。
  */
 function whiteDragon(source: string): string {
-  return source
-    .replace(/<rect x="1" y="1"[^/]*\/>/, "")
-    .replace('stroke="#000"', `stroke="${BLUE}"`)
-    .replace('stroke-width="1.5"', 'stroke-width="3"');
+  return source.replace(/<g[\s\S]*<\/g>/, "");
 }
 
 /** 種類ごとの塗り。0-8=萬 9-17=筒 18-26=索 27-30=東南西北 31=白 32=發 33=中 */

@@ -92,6 +92,7 @@ const state: GameState = {
   lastSeq: 1,
   phase: "playing",
   turn: 0,
+  result: null,
   notice: null,
   finalScores: null,
 };

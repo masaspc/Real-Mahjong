@@ -485,3 +485,32 @@ describe("鳴いたあとの表示", () => {
     expect(state.lastDiscard).toBeNull();
   });
 });
+
+describe("局の結果", () => {
+  const ryuukyoku: ClientEvent = {
+    type: "ryuukyoku",
+    kind: "exhaustive",
+    initiator: null,
+    tenpai: [true, false, true, false],
+    revealed_hands: [],
+    nagashi_winners: [],
+    settlement: { delta: [1500, -1500, 1500, -1500], entries: [] },
+  };
+
+  it("流局の結果が残り、次の局が始まっても消えない", () => {
+    // **サーバは間を置かずに次の局を配る。**局の状態と一緒に捨てると、
+    // 誰が聴牌だったのかも点棒の動きも読めないまま画面が切り替わる。
+    const state = fold([roundStart, deal, ryuukyoku, roundStart, deal]);
+    expect(state.result?.kind).toBe("ryuukyoku");
+    expect(state.result?.tenpai).toEqual([true, false, true, false]);
+    expect(state.result?.delta).toEqual([1500, -1500, 1500, -1500]);
+    // 局そのものは配り直されている。
+    expect(state.hand).toHaveLength(13);
+  });
+
+  it("結果には受け取った時刻が入る", () => {
+    // しばらく出したら自動で消すのに要る。
+    const state = fold([roundStart, deal, ryuukyoku], 4_242);
+    expect(state.result?.at).toBe(4_242);
+  });
+});

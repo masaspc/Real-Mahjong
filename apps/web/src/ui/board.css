@@ -152,3 +152,73 @@ button { font: inherit; }
 .action { display: flex; flex-direction: column; align-items: center; gap: 4px; }
 .action-tiles { display: flex; gap: 2px; }
 .action-tiles .tile { width: 26px; }
+
+/* 局の結果。次の局の上に重ねて出す。 */
+.result {
+  position: absolute;
+  top: 50%;
+  left: 50%;
+  width: min(560px, calc(100% - 32px));
+  max-height: calc(100% - 120px);
+  overflow-y: auto;
+  padding: 16px 18px;
+  transform: translate(-50%, -50%);
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  border: 1px solid #d5c45d;
+  border-radius: 10px;
+  background: rgba(9, 32, 22, .97);
+  box-shadow: 0 8px 40px rgba(0, 0, 0, .6);
+  pointer-events: auto;
+}
+.result[hidden] { display: none; }
+.result-win { display: flex; flex-direction: column; gap: 10px; }
+.result-who { font-size: 17px; font-weight: 700; color: #ffe86a; }
+.result-hand { display: flex; flex-wrap: wrap; align-items: center; gap: 2px; }
+.result-hand .tile { width: 24px; }
+/* 副露と和了牌は離す。どれで上がったのかが読めない。 */
+.result-meld { display: inline-flex; gap: 2px; margin-left: 8px; }
+.result-winning { display: inline-flex; margin-left: 10px; }
+.result-winning .tile { width: 28px; }
+.result-yaku {
+  margin: 0;
+  padding: 0;
+  list-style: none;
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(180px, 1fr));
+  gap: 2px 16px;
+  font-size: 14px;
+}
+.result-yaku li { display: flex; justify-content: space-between; gap: 12px; }
+.result-yaku-han { font-variant-numeric: tabular-nums; opacity: .85; }
+.result-score {
+  font-size: 18px;
+  font-weight: 700;
+  font-variant-numeric: tabular-nums;
+  padding-top: 6px;
+  border-top: 1px solid rgba(213, 196, 93, .35);
+}
+.result-ura { display: flex; align-items: center; gap: 4px; font-size: 13px; }
+.result-ura .tile { width: 22px; }
+.result-label { opacity: .8; }
+.result-tenpai { font-size: 14px; }
+.result-delta {
+  display: grid;
+  grid-template-columns: repeat(4, 1fr);
+  gap: 6px;
+  padding-top: 8px;
+  border-top: 1px solid rgba(213, 196, 93, .35);
+  font-variant-numeric: tabular-nums;
+}
+.result-delta-cell {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 2px;
+  font-size: 14px;
+}
+.result-delta-cell b { font-size: 11px; font-weight: 600; opacity: .8; }
+.result-delta-cell.plus span { color: #7fe0a0; }
+.result-delta-cell.minus span { color: #ff9d8a; }
+.result-close { align-self: center; }

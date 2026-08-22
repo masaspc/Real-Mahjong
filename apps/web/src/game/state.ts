@@ -1,4 +1,6 @@
 import type { ActionOption } from "../protocol/ActionOption";
+import type { AgariResult } from "../protocol/AgariResult";
+import type { RyuukyokuKind } from "../protocol/RyuukyokuKind";
 import type { ClientEvent } from "../protocol/ClientEvent";
 import type { ClientEventEnvelope } from "../protocol/ClientEventEnvelope";
 import type { MeldKind } from "../protocol/MeldKind";
@@ -30,6 +32,26 @@ export type SeatView = {
   riichi: boolean;
   /** 次の打牌がリーチ宣言牌になる席。 */
   declaring: boolean;
+};
+
+/**
+ * 局の結果。和了なら誰が何の役でいくら、流局なら誰が聴牌していたか。
+ *
+ * **点棒の増減はイベントが運ぶ `settlement` をそのまま使う。**素点から
+ * 組み直すと、供託・本場・責任払いの扱いを二重に持つことになる。
+ */
+export type RoundResult = {
+  kind: "agari" | "ryuukyoku";
+  /** 和了のとき。複数あるのはダブロン。 */
+  results: AgariResult[];
+  /** 流局のとき。席ごとの聴牌。 */
+  tenpai: boolean[];
+  /** 流局の種類。荒牌平局なら "exhaustive"。 */
+  ryuukyoku: RyuukyokuKind | null;
+  /** 各席の増減。合計は0。 */
+  delta: number[];
+  /** 受け取った時刻。しばらく出したら自動で消す。 */
+  at: number;
 };
 
 /** いま自分が選べること。 */
@@ -72,6 +94,14 @@ export type GameState = {
   turn: Seat | null;
   /** 和了や流局の要約。画面の帯に出す。 */
   notice: string | null;
+  /**
+   * 局の結果。**次の局が始まっても消さない。**
+   *
+   * サーバは和了のあと間を置かずに次の局を配る。結果を局の状態と一緒に
+   * 捨てると、役も点数も読めないまま画面が切り替わる。ここだけ持ち越し、
+   * 画面の上に重ねて見せる。
+   */
+  result: RoundResult | null;
   finalScores: number[] | null;
 };
 
@@ -130,6 +160,7 @@ export function emptyState(you: Seat): GameState {
     phase: "waiting",
     turn: null,
     notice: null,
+    result: null,
     finalScores: null,
   };
 }
@@ -166,7 +197,14 @@ export function apply(
 
     case "round_start": {
       const you = state.you;
-      const carried = { ...emptyState(you), lastSeq: state.lastSeq, phase: "playing" as const };
+      // **直前の局の結果は持ち越す。**次の局が配られても、役と点数を
+      // 読み終わるまで画面に残す。
+      const carried = {
+        ...emptyState(you),
+        lastSeq: state.lastSeq,
+        phase: "playing" as const,
+        result: state.result,
+      };
       Object.assign(state, carried);
       state.round = event.round;
       state.dealer = event.dealer;
@@ -329,6 +367,14 @@ export function apply(
       state.notice = `${winners} 和了`;
       state.pending = null;
       state.turn = null;
+      state.result = {
+        kind: "agari",
+        results: [...event.results],
+        tenpai: [],
+        ryuukyoku: null,
+        delta: [...event.settlement.delta],
+        at: nowMs,
+      };
       break;
     }
 
@@ -336,6 +382,14 @@ export function apply(
       state.notice = "流局";
       state.pending = null;
       state.turn = null;
+      state.result = {
+        kind: "ryuukyoku",
+        results: [],
+        tenpai: [...event.tenpai],
+        ryuukyoku: event.kind,
+        delta: [...event.settlement.delta],
+        at: nowMs,
+      };
       break;
 
     case "round_end":

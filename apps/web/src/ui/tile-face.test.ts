@@ -114,10 +114,18 @@ describe("牌の色", () => {
     expect(tileFaceSvg(0)).toContain("linearGradient");
   });
 
-  it("九筒と白は線画なので stroke を塗る", () => {
-    // この2件だけ `fill` を持たない。`fill` しか見ないと黒いまま残る。
+  it("九筒は線画なので stroke を塗る", () => {
+    // `fill` を持たないので、`fill` しか見ないと黒いまま残る。
     expect(tileFaceSvg(17)).toContain('stroke="#1f4e9c"');
-    expect(tileFaceSvg(31)).toContain('stroke="#1f4e9c"');
+  });
+
+  it("白は何も描かない", () => {
+    // **利用者の指定。**素材は入れ子の長方形2本を描いているが、牌そのものに
+    // 縁があるので二重になり、汚れのように見える。殻だけ残す。
+    const svg = tileFaceSvg(31);
+    expect(svg).not.toContain("<rect");
+    expect(svg).not.toContain("<path");
+    expect(svg).toMatch(/<svg[^>]*>\s*<\/svg>/);
   });
 
   it("赤ドラは種類ごとの色より赤が優先される", () => {

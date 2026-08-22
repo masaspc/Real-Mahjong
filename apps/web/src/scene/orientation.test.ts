@@ -52,6 +52,7 @@ function stateWithRivers(): GameState {
     phase: "playing",
     lastDiscard: null,
     turn: null,
+    result: null,
     notice: null,
     finalScores: null,
   };

@@ -3,11 +3,15 @@ import type { Tile } from "../protocol/Tile";
 import type { GameState } from "../game/state";
 import { tileLabel } from "../game/tiles";
 import { BODY_FILL_COLOR } from "../scene/face-atlas";
+import { isWinningShape } from "../game/complete";
 import { actionsFor, canDeclareRiichi, discardChoices } from "./actions";
+import { RESULT_SHOWN_MS, resultPanel } from "./result";
 import { tileFaceSvg } from "./tile-face";
 
 let riichiReady = false;
 let pendingWindow: number | null = null;
+/** 利用者が自分で閉じた結果。同じものを出し直さない。 */
+let dismissedResultAt: number | null = null;
 
 function node<K extends keyof HTMLElementTagNameMap>(
   tag: K,
@@ -27,7 +31,7 @@ function node<K extends keyof HTMLElementTagNameMap>(
  * `BODY_FILL_COLOR` で塗っているのと同じ色を、2D の `.tile-face` も敷く。
  * 定義を1箇所に保つため、色そのものは CSS に書かず変数で渡す。
  */
-function applyTileTheme(root: HTMLElement): void {
+export function applyTileTheme(root: HTMLElement): void {
   root.style.setProperty("--tile-body", BODY_FILL_COLOR);
 }
 
@@ -90,6 +94,16 @@ function renderActions(
   return actions;
 }
 
+/** 手の中（ツモ牌を含む）が和了形か。副露の数だけ面子が減る。 */
+function completeInHand(state: GameState): boolean {
+  if (state.drawn === null) {
+    return false;
+  }
+  const seat = state.seats[state.you];
+  const meldCount = seat ? seat.melds.length : 0;
+  return isWinningShape([...state.hand, state.drawn], meldCount);
+}
+
 function windLabel(wind: string): string {
   return { East: "東", South: "南", West: "西", North: "北" }[wind] ?? wind;
 }
@@ -123,6 +137,12 @@ export function updateTimer(root: HTMLElement, state: GameState, nowMs: number):
 
   // **棒だけでは「あと何秒か」が読めない。**残り3秒と残り15秒の区別が
   // つかず、急ぐべきかどうかを判断できない。数字を併記する。
+  // **出しっぱなしにしない。**読み終わる頃には次の局が進んでいる。
+  const panel = root.querySelector<HTMLElement>(".result");
+  if (panel !== null && state.result !== null) {
+    panel.hidden = nowMs - state.result.at > RESULT_SHOWN_MS;
+  }
+
   const text = root.querySelector<HTMLElement>(".timer-text");
   if (text) {
     text.textContent = state.pending
@@ -142,7 +162,18 @@ function turnLabel(state: GameState): string {
     return "";
   }
   if (state.pending) {
-    return state.lastDiscard ? "鳴くか決めてください" : "あなたの番";
+    if (state.lastDiscard) {
+      return "鳴くか決めてください";
+    }
+    // **形が揃っているのにツモが出ないときは、理由を言う。**役が1つも
+    // 無ければ和了できない。鳴いた手でよく起きるが、画面が何も言わないと
+    // 「揃っているのに上がれない」としか見えない。
+    // **判定の権威はサーバである。**ここは形だけを見て一言添える。
+    const offersTsumo = state.pending.options.some((o) => o.type === "tsumo");
+    if (!offersTsumo && completeInHand(state)) {
+      return "形は揃っていますが、役が無いので和了できません";
+    }
+    return "あなたの番";
   }
   if (state.turn === null) {
     return "";
@@ -227,7 +258,18 @@ export function renderBoard(
   controls.append(status);
   board.append(controls);
 
-  if (state.notice) board.append(node("div", "notice", state.notice));
+  // **結果は次の局の上に重ねる。**サーバは間を置かずに配り直すので、
+  // 局の状態と一緒に消すと役も点数も読めない。
+  const result = state.result;
+  if (result !== null && result.at !== dismissedResultAt) {
+    board.append(
+      resultPanel(result, state, { node, tileNode }, () => {
+        dismissedResultAt = result.at;
+      }),
+    );
+  } else if (state.notice) {
+    board.append(node("div", "notice", state.notice));
+  }
   if (state.phase === "matchOver" && state.finalScores) {
     const ranking = state.finalScores
       .map((score, seat) => ({ score, seat }))
