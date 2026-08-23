@@ -89,6 +89,7 @@ const state: GameState = {
   pending: null,
   // 上家が切った 1索 を鳴ける、という場面にしておく。
   lastDiscard: { seat: 3, tile: 18 },
+  recentDiscard: { seat: 3, index: 4 },
   lastSeq: 1,
   phase: "playing",
   turn: 0,

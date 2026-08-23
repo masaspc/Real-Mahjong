@@ -238,13 +238,26 @@ export function renderBoard(
     ]
       .filter(Boolean)
       .join("・");
-    scores.append(
-      node(
-        "span",
-        `score seat-${offset}`,
-        `席${seat}${marks ? ` ${marks}` : ""} ${(state.scores[seat] ?? 0).toLocaleString()}点`,
-      ),
+    // **いま誰の番かを、卓の席そのものの近くで示す。**画面の下端の一行
+    // だけでは、点数と手番を目で結び付けられない。
+    const active = state.turn === seat && !state.notice;
+    const cell = node(
+      "span",
+      `score seat-${offset}${active ? " active" : ""}`,
+      `席${seat}${marks ? ` ${marks}` : ""} ${(state.scores[seat] ?? 0).toLocaleString()}点`,
     );
+    // 直前の局の増減。**結果の板を閉じても、誰がいくら動いたかは残す。**
+    const delta = state.result?.delta[seat] ?? 0;
+    if (state.result !== null && delta !== 0) {
+      cell.append(
+        node(
+          "span",
+          `score-delta ${delta > 0 ? "plus" : "minus"}`,
+          `${delta > 0 ? "+" : ""}${delta.toLocaleString()}`,
+        ),
+      );
+    }
+    scores.append(cell);
   }
   board.append(header, scores);
 

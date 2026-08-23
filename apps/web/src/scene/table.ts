@@ -1,3 +1,4 @@
+import type { Material } from "three";
 import {
   AmbientLight,
   DirectionalLight,
@@ -30,6 +31,7 @@ import {
   applyFaceUv,
   createTileGeometry,
   createTileMaterial,
+  setEmphasis,
 } from "./tile-geometry";
 import { TilePool, type PooledTile } from "./tile-pool";
 
@@ -122,6 +124,7 @@ export class TableScene {
           rotationY: seatRotation(seat),
           faceUp: seat === 0,
           pickable: false,
+          emphasis: false,
         });
       }
       for (let index = 0; index < 8; index += 1) {
@@ -135,6 +138,7 @@ export class TableScene {
           rotationY: seatRotation(seat),
           faceUp: true,
           pickable: false,
+          emphasis: false,
         });
       }
       for (let index = 0; index < 34; index += 1) {
@@ -148,6 +152,7 @@ export class TableScene {
           rotationY: seatRotation(seat),
           faceUp: false,
           pickable: false,
+          emphasis: false,
         });
       }
     }
@@ -287,6 +292,7 @@ export class TableScene {
         0,
         ROTATION_ORDER,
       );
+      setEmphasis(entry.mesh.material as Material, placement.emphasis);
     }
 
     this.#placements = [...unique.values()];

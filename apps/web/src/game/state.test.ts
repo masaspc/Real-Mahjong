@@ -514,3 +514,41 @@ describe("局の結果", () => {
     expect(state.result?.at).toBe(4_242);
   });
 });
+
+describe("直前の捨て牌の在り処", () => {
+  it("切るたびに、その席の河の末尾を指す", () => {
+    const state = fold([
+      roundStart,
+      deal,
+      { type: "draw", seat: 1, tile: null, source: "wall", wall_remaining: 69 },
+      { type: "discard", seat: 1, tile: 5, manner: "tedashi" },
+    ]);
+    expect(state.recentDiscard).toEqual({ seat: 1, index: 0 });
+  });
+
+  it("次のツモでは消えない", () => {
+    // **`lastDiscard` とは寿命が違う。**あちらは鳴くかどうかの材料なので
+    // 次のツモで消えるが、印は次に誰かが切るまで残す。
+    const state = fold([
+      roundStart,
+      deal,
+      { type: "draw", seat: 1, tile: null, source: "wall", wall_remaining: 69 },
+      { type: "discard", seat: 1, tile: 5, manner: "tedashi" },
+      { type: "draw", seat: 2, tile: null, source: "wall", wall_remaining: 68 },
+    ]);
+    expect(state.lastDiscard).toBeNull();
+    expect(state.recentDiscard).toEqual({ seat: 1, index: 0 });
+  });
+
+  it("鳴かれて河から消えたら印も消える", () => {
+    // 無い牌を指したままにすると、河の別の牌が光る。
+    const state = fold([
+      roundStart,
+      deal,
+      { type: "draw", seat: 1, tile: null, source: "wall", wall_remaining: 69 },
+      { type: "discard", seat: 1, tile: 5, manner: "tedashi" },
+      { type: "call", seat: 2, from: 1, kind: "pon", tiles: [5, 5, 5] },
+    ]);
+    expect(state.recentDiscard).toBeNull();
+  });
+});

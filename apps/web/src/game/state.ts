@@ -87,6 +87,14 @@ export type GameState = {
    */
   lastDiscard: { seat: Seat; tile: Tile } | null;
   /**
+   * 卓でいちばん新しい捨て牌の在り処。**河のどこに落ちたかを指す。**
+   *
+   * `lastDiscard` とは寿命が違う。あちらは「鳴くかどうかを決める材料」
+   * なので次のツモで消えるが、こちらは**次に誰かが切るまで残る。**河が
+   * 3段も伸びると、直前の1枚がどれなのか目で追えなくなる。
+   */
+  recentDiscard: { seat: Seat; index: number } | null;
+  /**
    * いま手番の席。**誰を待っているのかが画面から読めないと、止まって
    * いるのか自分が見落としているのか分からない。**ツモで移り、局の
    * 終わりで消える。鳴きの反応待ちの間は、直前にツモった席のまま。
@@ -156,6 +164,7 @@ export function emptyState(you: Seat): GameState {
     wallRemaining: 70,
     pending: null,
     lastDiscard: null,
+    recentDiscard: null,
     lastSeq: null,
     phase: "waiting",
     turn: null,
@@ -244,6 +253,7 @@ export function apply(
     case "discard": {
       const seat = seatOf(state, event.seat);
       seat.river.push({ tile: event.tile, riichi: seat.declaring });
+      state.recentDiscard = { seat: event.seat, index: seat.river.length - 1 };
       seat.declaring = false;
       state.lastDiscard = { seat: event.seat, tile: event.tile };
       if (event.seat === state.you) {
@@ -306,6 +316,8 @@ export function apply(
       } else {
         // チー・ポン・大明槓。鳴かれた牌は打った席の河から消える。
         const source = seatOf(state, event.from);
+        // **鳴かれた牌は河から消える。**印を残すと、無い牌を指したままになる。
+        state.recentDiscard = null;
         const called = source.river.pop()?.tile;
         const at = called === undefined ? -1 : fromHand.indexOf(called);
         if (at >= 0) {

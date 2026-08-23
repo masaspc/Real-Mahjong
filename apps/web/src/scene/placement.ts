@@ -40,6 +40,13 @@ export type Placement = {
    * 一萬を切ったことになってしまう。
    */
   pickable: boolean;
+  /**
+   * 光らせる牌。いまは「卓でいちばん新しい捨て牌」だけ。
+   *
+   * **河が3段に伸びると、直前の1枚がどれなのか目で追えない。**誰が何を
+   * 切ったかは麻雀の情報の半分なので、そこだけ明るくする。
+   */
+  emphasis: boolean;
 };
 
 /**
@@ -253,6 +260,7 @@ export function placementsFor(state: GameState, viewer: Seat = state.you): Place
         rotationY: facing,
         faceUp: mine,
         pickable: mine,
+        emphasis: false,
       });
     }
 
@@ -267,6 +275,7 @@ export function placementsFor(state: GameState, viewer: Seat = state.you): Place
         rotationY: facing,
         faceUp: true,
         pickable: true,
+        emphasis: false,
       });
     }
 
@@ -297,6 +306,9 @@ export function placementsFor(state: GameState, viewer: Seat = state.you): Place
         rotationY: facing + (discarded.riichi ? SIDEWAYS : 0),
         faceUp: true,
         pickable: false,
+        emphasis:
+          state.recentDiscard?.seat === absolute &&
+          state.recentDiscard.index === index,
       });
     });
 
@@ -320,6 +332,7 @@ export function placementsFor(state: GameState, viewer: Seat = state.you): Place
           rotationY: facing + (piece.sideways ? SIDEWAYS : 0),
           faceUp: piece.faceUp,
           pickable: false,
+          emphasis: false,
         });
         if (piece.stack === 0) {
           meldColumn += piece.sideways ? 1 + RIICHI_EXTRA / 2 : 1;
@@ -349,6 +362,7 @@ export function placementsFor(state: GameState, viewer: Seat = state.you): Place
       rotationY: seatRotation(relative),
       faceUp: false,
       pickable: false,
+      emphasis: false,
     });
   }
 

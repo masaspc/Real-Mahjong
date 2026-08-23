@@ -51,6 +51,7 @@ function stateWithRivers(): GameState {
     lastSeq: null,
     phase: "playing",
     lastDiscard: null,
+    recentDiscard: null,
     turn: null,
     result: null,
     notice: null,
@@ -102,5 +103,29 @@ describe("卓に置いた牌の向き", () => {
       new Euler(-Math.PI / 2, Math.PI / 2, 0, "XYZ"),
     );
     expect(Math.abs(rightward.y)).toBeCloseTo(0, 5);
+  });
+});
+
+describe("直前の捨て牌を光らせる", () => {
+  it("印の指す1枚だけが光る", () => {
+    const state = stateWithRivers();
+    state.recentDiscard = { seat: 2 as Seat, index: 1 };
+    const lit = placementsFor(state).filter((p) => p.emphasis);
+    expect(lit).toHaveLength(1);
+    expect(lit[0]?.key).toBe("river-2-1");
+  });
+
+  it("印が無ければどれも光らない", () => {
+    const state = stateWithRivers();
+    state.recentDiscard = null;
+    expect(placementsFor(state).some((p) => p.emphasis)).toBe(false);
+  });
+
+  it("手牌も山も副露も光らない", () => {
+    // **席と番号だけで照合すると、同じ番号の手牌まで光る。**
+    const state = stateWithRivers();
+    state.recentDiscard = { seat: 0 as Seat, index: 0 };
+    const lit = placementsFor(state).filter((p) => p.emphasis);
+    expect(lit.every((p) => p.kind === "river")).toBe(true);
   });
 });

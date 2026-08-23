@@ -161,11 +161,28 @@ export function applyFaceUv(
 }
 
 /** 動的シャドウを使わない牌用マテリアル。 */
-export function createTileMaterial(atlas: Texture): Material {
+export function createTileMaterial(atlas: Texture): MeshStandardMaterial {
   return new MeshStandardMaterial({
     map: atlas,
     // 象牙は少しつやがある。真っ平らだと紙に見える。
     roughness: 0.42,
     metalness: 0,
   });
+}
+
+/**
+ * 直前に切られた牌を光らせる色。
+ *
+ * **輪郭線や板を足さない。**牌ごとに別のメッシュを重ねると、重なり順と
+ * 深度で ちらつく。自発光を少し足すだけなら形が増えず、寝かせた牌でも
+ * 斜めから見た牌でも同じように効く。
+ */
+const EMPHASIS = 0x6a5a1c;
+
+/** 光らせるかどうかを切り替える。マテリアルは牌ごとに別なので触ってよい。 */
+export function setEmphasis(material: Material, on: boolean): void {
+  if (!(material instanceof MeshStandardMaterial)) {
+    return;
+  }
+  material.emissive.setHex(on ? EMPHASIS : 0x000000);
 }
