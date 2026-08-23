@@ -56,6 +56,9 @@ const presentation = new Presentation(0, systemClock);
 const sfx = new Sfx();
 // 盤面のボタンから触れるようにする。`board.ts` は音を知らなくてよい。
 (globalThis as unknown as { sfx: Sfx }).sfx = sfx;
+// 追いつきの様子を外から測るための口。**画面の動きには関与しない。**
+(globalThis as unknown as { presentation: Presentation }).presentation =
+  presentation;
 presentation.onStart((event, skipped) => {
   // **まとめて出たぶんは鳴らさない。**再接続やタブ復帰では数十件が一度に
   // 出るので、そのまま鳴らすと打牌音が束になって弾ける。
