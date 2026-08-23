@@ -25,6 +25,19 @@ use tokio::time::MissedTickBehavior;
 /// 最低待機は 350ms なので、100ms の粒度は人には見えない。
 const POLL_MS: u64 = 100;
 
+/// 局と局のあいだの間。
+///
+/// **0 にすると、和了の役も点数も読めないまま次の局が配られる。**実際に
+/// 遊んだ人から「上がった後、何の役か分からないままいきなり次が始まる」と
+/// 言われた。局の結果はクライアントが板に出すが、次の局が同時に始まって
+/// しまうと読む時間が無い。
+///
+/// **この間は誰の持ち時間も減らさない。**この区間ではどの席にも行動要求が
+/// 出ていないので、締切そのものが存在しない。演出カタログ（`protocol`）へ
+/// 手を入れる必要も無い。あちらは「行動要求の締切に演出時間を足す」ための
+/// 表であり、行動要求の無いここには関係しない。
+const INTERLUDE_MS: u64 = 6_000;
+
 /// 入口の容量。**`tick` の前に片づける件数の上限でもある。**
 ///
 /// 空になるまで回すと、受信で空いたスロットへ待機中の送信者が補充する
@@ -371,6 +384,77 @@ mod reconnect_tests {
 
     /// 仮想時間でこれを超えたら、卓が終わらない不具合とみなす。
     const A_VIRTUAL_HOUR_MS: u64 = 3_600_000;
+
+    #[test]
+    fn the_first_round_starts_without_waiting() {
+        // 卓に着いた直後に間を置く理由は無い。
+        let mut resume = None;
+        assert!(!interlude(0, false, &mut resume));
+        assert_eq!(resume, None);
+    }
+
+    #[test]
+    fn a_finished_round_holds_for_the_interlude() {
+        let mut resume = None;
+        assert!(interlude(1_000, true, &mut resume));
+        assert_eq!(resume, Some(1_000 + INTERLUDE_MS));
+        // まだ途中。
+        assert!(interlude(1_000 + INTERLUDE_MS - 1, true, &mut resume));
+        // 越えたら通す。
+        assert!(!interlude(1_000 + INTERLUDE_MS, true, &mut resume));
+    }
+
+    #[test]
+    fn the_interlude_is_not_pushed_back_by_later_calls() {
+        // **呼ぶたびに終わり時刻を決め直すと、永久に次の局が始まらない。**
+        // 卓は 100ms ごとに回るので、そのたびに 6 秒足されることになる。
+        let mut resume = None;
+        assert!(interlude(1_000, true, &mut resume));
+        assert!(interlude(2_000, true, &mut resume));
+        assert_eq!(resume, Some(1_000 + INTERLUDE_MS));
+    }
+
+    /// **本当に間が空くことを、卓を走らせて確かめる。**
+    ///
+    /// 純粋な関数の試験は「呼ばれたら待つ」ことしか言えない。呼ぶ場所を
+    /// 間違えていても通る。
+    #[tokio::test(start_paused = true)]
+    async fn the_next_round_is_dealt_after_the_interlude() {
+        let (handle, _actor) = spawn(rules(), all_cpu(), SeedSource::from_master([1u8; 32]));
+        let (_, mut inbox) = handle
+            .attach(Seat::new(0), None)
+            .await
+            .expect("卓は生きている");
+
+        // 1局目が終わり、2局目が配られるまでを見る。
+        let mut round_starts: Vec<u64> = Vec::new();
+        let mut ended_at: Option<u64> = None;
+        let start = tokio::time::Instant::now();
+        while round_starts.len() < 2 {
+            tokio::time::sleep(Duration::from_millis(100)).await;
+            for envelope in take_ready(&mut inbox) {
+                let at = start.elapsed().as_millis() as u64;
+                match envelope.event {
+                    ClientEvent::RoundStart { .. } => round_starts.push(at),
+                    ClientEvent::Agari { .. } | ClientEvent::Ryuukyoku { .. } => {
+                        ended_at.get_or_insert(at);
+                    }
+                    _ => {}
+                }
+            }
+            assert!(
+                start.elapsed().as_millis() < A_VIRTUAL_HOUR_MS as u128,
+                "1局が終わらない"
+            );
+        }
+
+        let ended = ended_at.expect("局が終わっている");
+        let next = round_starts[1];
+        assert!(
+            next >= ended + INTERLUDE_MS,
+            "間が足りない: 終局 {ended}ms → 次局 {next}ms（{INTERLUDE_MS}ms 空けるはず）"
+        );
+    }
 
     /// **正直な申告は必ず受理される。**
     ///
@@ -1212,6 +1296,18 @@ fn handle(table: &mut Table, sinks: &mut Sinks, message: TableMsg, flush_now_ms:
     }
 }
 
+/// 局と局のあいだで待つべきか。
+///
+/// 初めて呼ばれたときに終わり時刻を決め、それまでは真を返す。**1局目には
+/// 間を置かない。**卓に着いた直後に6秒待たされる理由が無い。
+fn interlude(now_ms: u64, played_any: bool, resume_at: &mut Option<u64>) -> bool {
+    if !played_any {
+        return false;
+    }
+    let until = *resume_at.get_or_insert(now_ms + INTERLUDE_MS);
+    now_ms < until
+}
+
 async fn run<S: Seeds>(
     mut table: Table,
     mut seeds: S,
@@ -1221,6 +1317,10 @@ async fn run<S: Seeds>(
     let mut sinks = Sinks::new();
     let mut ticker = tokio::time::interval(Duration::from_millis(POLL_MS));
     ticker.set_missed_tick_behavior(MissedTickBehavior::Skip);
+    // 次の局を始めてよくなる時刻。局が終わった時点で決まる。
+    let mut resume_at: Option<u64> = None;
+    // 1局でも打ったか。**開始の1局目に間を置かない。**
+    let mut played_any = false;
 
     loop {
         let now = clock.now_ms();
@@ -1228,13 +1328,15 @@ async fn run<S: Seeds>(
         if table.is_over() {
             break;
         }
-        if table.needs_seed() {
+        if table.needs_seed() && !interlude(now, played_any, &mut resume_at) {
             // **シードを受け取ってから局を始める。**Wave 3d はこの `await` の
             // 中で永続化する。ここで待てないと、`seed_commit` を配ったあとに
             // 落ちて別のシードで再開する経路ができてしまう。
             let seed = seeds.next_seed().await;
             let now = clock.now_ms();
             table.begin_round(&seed, now);
+            played_any = true;
+            resume_at = None;
             sinks.note_deadlines(&table, now);
             sinks.flush(&table, now);
         }
