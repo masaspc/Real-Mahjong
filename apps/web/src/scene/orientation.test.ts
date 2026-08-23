@@ -56,6 +56,8 @@ function stateWithRivers(): GameState {
     result: null,
     notice: null,
     finalScores: null,
+    placements: null,
+    rules: null,
   };
 }
 

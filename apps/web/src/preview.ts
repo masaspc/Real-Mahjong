@@ -96,6 +96,8 @@ const state: GameState = {
   result: null,
   notice: null,
   finalScores: null,
+  placements: null,
+  rules: null,
 };
 
 const canvas = document.querySelector<HTMLCanvasElement>("#table");

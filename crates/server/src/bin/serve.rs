@@ -17,6 +17,7 @@ use protocol::command::Command;
 use protocol::seat::Seat;
 use server::matchmaking::{TableId, Tables};
 use std::collections::HashMap;
+use tower_http::compression::CompressionLayer;
 use tower_http::services::ServeDir;
 
 /// 人が座る席。**このウェーブでは固定。**
@@ -117,6 +118,11 @@ async fn main() {
     let app = Router::new()
         .route("/ws", any(ws_handler))
         .fallback_service(ServeDir::new(&dist))
+        // **画面の束は 1MB 近い。**牌図34枚を文字列として抱えているのが
+        // 効いている。中身は SVG とスクリプト、つまり圧縮のよく効く文字列
+        // なので、そのまま送る理由が無い。**WebSocket には掛からない**
+        // （アップグレード要求は本体を持たない）。
+        .layer(CompressionLayer::new())
         .with_state(tables);
 
     // **8080 は取り合いになる。**別のプロジェクトのサーバが先に握っていると

@@ -4,6 +4,7 @@ import type { GameState } from "../game/state";
 import { tileLabel } from "../game/tiles";
 import { BODY_FILL_COLOR } from "../scene/face-atlas";
 import { isWinningShape } from "../game/complete";
+import { finalTally } from "../game/final-tally";
 import { actionsFor, canDeclareRiichi, discardChoices } from "./actions";
 import { RESULT_SHOWN_MS, resultPanel } from "./result";
 import { tileFaceSvg } from "./tile-face";
@@ -187,6 +188,82 @@ function turnLabel(state: GameState): string {
   return state.turn === state.you ? "あなたの番" : `席${state.turn} を待っています`;
 }
 
+/**
+ * 終局の画面。
+ *
+ * **1行の順位表では、何が起きて終わったのか分からない。**素点・ウマ・オカを
+ * 分けて出す。順位はサーバが決めたものをそのまま使い、こちらでは並べ替え
+ * ない（同点の裁定を画面が持ってはいけない）。
+ */
+export function finalPanel(
+  state: GameState,
+  make: typeof node,
+  send: (command: Command) => void,
+): HTMLElement {
+  const panel = make("section", "final");
+  panel.append(make("div", "final-title", "終局"));
+
+  const scores = state.finalScores ?? [];
+  const rules = state.rules;
+  if (rules === null) {
+    // **ルールが無ければ順位点は出さない。**定数で埋めると嘘の数字になる。
+    panel.append(make("div", "final-note", "素点のみ（卓のルールが届いていない）"));
+  }
+
+  const table = make("table", "final-table");
+  const head = make("tr");
+  for (const text of ["順位", "席", "素点", "返し差", "ウマ", "オカ", "合計"]) {
+    head.append(make("th", undefined, text));
+  }
+  table.append(head);
+
+  const rows =
+    rules === null
+      ? scores.map((raw, seat) => ({
+          seat,
+          rank: (state.placements?.[seat] ?? seat + 1),
+          raw,
+          base: 0,
+          uma: 0,
+          oka: 0,
+          total: 0,
+        }))
+      : finalTally(rules, scores, state.placements ?? [1, 2, 3, 4]);
+
+  for (const row of rows) {
+    const tr = make("tr", row.seat === state.you ? "mine" : undefined);
+    const cells: string[] = [
+      `${row.rank}位`,
+      row.seat === state.you ? "あなた" : `席${row.seat}`,
+      row.raw.toLocaleString(),
+      rules === null ? "-" : signed(row.base),
+      rules === null ? "-" : signed(row.uma),
+      rules === null ? "-" : row.oka === 0 ? "" : signed(row.oka),
+      rules === null ? "-" : signed(row.total),
+    ];
+    for (const [index, text] of cells.entries()) {
+      const cell = make("td", index === 6 ? "final-total" : undefined, text);
+      tr.append(cell);
+    }
+    table.append(tr);
+  }
+  panel.append(table);
+
+  const again = make("button", "action", "もう一度");
+  again.addEventListener("click", () =>
+    (globalThis as unknown as { newTable: () => void }).newTable(),
+  );
+  panel.append(again);
+  // `send` はここでは使わないが、盤面の他の部品と作法を揃えるため受け取る。
+  void send;
+  return panel;
+}
+
+/** 符号を必ず付ける。0.0 と +0.0 の区別より、桁の揃いを取る。 */
+function signed(value: number): string {
+  return `${value > 0 ? "+" : ""}${value.toFixed(1)}`;
+}
+
 export function renderBoard(
   root: HTMLElement,
   state: GameState,
@@ -288,31 +365,20 @@ export function renderBoard(
   // **結果は次の局の上に重ねる。**サーバは間を置かずに配り直すので、
   // 局の状態と一緒に消すと役も点数も読めない。
   const result = state.result;
-  if (result !== null && result.at !== dismissedResultAt) {
+  // **終局の板と重ねない。**どちらも画面の中央に出るので、両方出すと
+  // 文字が二重に見える。最後の局の結果は終局の板が引き継ぐ。
+  const over = state.phase === "matchOver";
+  if (!over && result !== null && result.at !== dismissedResultAt) {
     board.append(
       resultPanel(result, state, { node, tileNode }, () => {
         dismissedResultAt = result.at;
       }),
     );
-  } else if (state.notice) {
+  } else if (!over && state.notice) {
     board.append(node("div", "notice", state.notice));
   }
-  if (state.phase === "matchOver" && state.finalScores) {
-    const ranking = state.finalScores
-      .map((score, seat) => ({ score, seat }))
-      .sort((a, b) => b.score - a.score);
-    board.append(
-      node(
-        "div",
-        "ranking",
-        ranking
-          .map(
-            (entry, index) =>
-              `${index + 1}位 席${entry.seat} ${entry.score.toLocaleString()}点`,
-          )
-          .join(" / "),
-      ),
-    );
+  if (over && state.finalScores !== null) {
+    board.append(finalPanel(state, node, send));
   }
   applyTileTheme(root);
   root.replaceChildren(board);

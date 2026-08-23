@@ -235,3 +235,47 @@ button { font: inherit; }
 .result-delta-cell.plus span { color: #7fe0a0; }
 .result-delta-cell.minus span { color: #ff9d8a; }
 .result-close { align-self: center; }
+
+/* 終局。局の結果より一段大きく出す。 */
+.final {
+  position: absolute;
+  top: 50%;
+  left: 50%;
+  width: min(600px, calc(100% - 32px));
+  padding: 20px 22px;
+  transform: translate(-50%, -50%);
+  display: flex;
+  flex-direction: column;
+  gap: 14px;
+  align-items: center;
+  border: 1px solid #d5c45d;
+  border-radius: 10px;
+  background: rgba(9, 32, 22, .98);
+  box-shadow: 0 8px 44px rgba(0, 0, 0, .7);
+  pointer-events: auto;
+}
+.final-title { font-size: 22px; font-weight: 700; color: #ffe86a; }
+.final-note { font-size: 13px; opacity: .8; }
+.final-table {
+  width: 100%;
+  border-collapse: collapse;
+  font-variant-numeric: tabular-nums;
+  font-size: 14px;
+}
+.final-table th {
+  padding: 4px 8px;
+  text-align: right;
+  font-size: 11px;
+  font-weight: 600;
+  opacity: .7;
+  border-bottom: 1px solid rgba(213, 196, 93, .35);
+}
+.final-table th:nth-child(-n + 2) { text-align: left; }
+.final-table td {
+  padding: 6px 8px;
+  text-align: right;
+  border-bottom: 1px solid #ffffff14;
+}
+.final-table td:nth-child(-n + 2) { text-align: left; }
+.final-table tr.mine { color: #ffe86a; font-weight: 700; }
+.final-total { font-weight: 700; }

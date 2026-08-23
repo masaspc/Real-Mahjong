@@ -1,6 +1,6 @@
 import { tileFaceSvg, tileBackSvg } from "./ui/tile-face";
 import { tileLabel } from "./game/tiles";
-import { applyTileTheme } from "./ui/board";
+import { applyTileTheme, finalPanel } from "./ui/board";
 import { resultPanel } from "./ui/result";
 import { emptyState } from "./game/state";
 import type { GameState } from "./game/state";
@@ -139,3 +139,41 @@ stage.append(
     () => {},
   ),
 );
+
+
+/**
+ * 終局の板の見本。
+ *
+ * **半荘を打ち切るのを待って確かめるのは現実的でない。**CPU4人でも4分強
+ * かかるうえ、終わった卓は掃除されるので撮り直しがきかない。ここで決め打つ。
+ */
+const over = sampleBoard();
+over.phase = "matchOver";
+over.finalScores = [-2_300, 41_000, 17_500, 43_800];
+over.placements = [4, 2, 3, 1];
+over.rules = {
+  length: "Hanchan",
+  start_score: 25_000,
+  return_score: 30_000,
+  uma: [15, 5, -5, -15],
+  red_dora_count: 3,
+  kuitan: true,
+  double_ron: true,
+  formal_tenpai: true,
+  noten_penalty: 3_000,
+  nagashi_mangan: true,
+  liability: true,
+  round_up_mangan: false,
+  busted_ends_match: true,
+  base_think_ms: 5_000,
+  think_bank_ms: 20_000,
+  network_grace_ms: 500,
+  min_reaction_window_ms: 350,
+};
+
+const overHeading = document.createElement("p");
+overHeading.textContent = "終局（見本）";
+const overStage = document.createElement("div");
+overStage.className = "stage";
+sheet.append(overHeading, overStage);
+overStage.append(finalPanel(over, make.node, () => {}));

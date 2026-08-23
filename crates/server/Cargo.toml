@@ -11,7 +11,7 @@ mahjong-ai = { path = "../mahjong-ai" }
 tokio = { version = "1.53.1", features = ["rt", "rt-multi-thread", "macros", "net", "sync", "time"] }
 rand = "0.9.5"
 axum = { version = "0.8.9", features = ["ws"] }
-tower-http = { version = "0.7.0", features = ["fs"] }
+tower-http = { version = "0.7.0", features = ["fs", "compression-gzip", "compression-br"] }
 serde_json = "1.0.151"
 
 [dev-dependencies]

@@ -1,5 +1,6 @@
 import type { ActionOption } from "../protocol/ActionOption";
 import type { AgariResult } from "../protocol/AgariResult";
+import type { Ruleset } from "../protocol/Ruleset";
 import type { RyuukyokuKind } from "../protocol/RyuukyokuKind";
 import type { ClientEvent } from "../protocol/ClientEvent";
 import type { ClientEventEnvelope } from "../protocol/ClientEventEnvelope";
@@ -111,6 +112,15 @@ export type GameState = {
    */
   result: RoundResult | null;
   finalScores: number[] | null;
+  /**
+   * 終局の順位。**サーバが決める。**同点の並びまで含めてこちらでは決めない。
+   */
+  placements: number[] | null;
+  /**
+   * 卓のルール。**終局の順位点を出すのに要る。**返し点もウマも部屋ごとに
+   * 変わりうるので、画面が定数で持ってはいけない。
+   */
+  rules: Ruleset | null;
 };
 
 /**
@@ -171,6 +181,8 @@ export function emptyState(you: Seat): GameState {
     notice: null,
     result: null,
     finalScores: null,
+    placements: null,
+    rules: null,
   };
 }
 
@@ -202,6 +214,7 @@ export function apply(
     case "match_start":
       state.you = event.you;
       state.phase = "playing";
+      state.rules = event.rules;
       break;
 
     case "round_start": {
@@ -213,6 +226,7 @@ export function apply(
         lastSeq: state.lastSeq,
         phase: "playing" as const,
         result: state.result,
+        rules: state.rules,
       };
       Object.assign(state, carried);
       state.round = event.round;
@@ -412,6 +426,7 @@ export function apply(
     case "match_end":
       state.phase = "matchOver";
       state.finalScores = [...event.final_scores];
+      state.placements = [...event.placements];
       state.notice = "終局";
       state.pending = null;
       break;
