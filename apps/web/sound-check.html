@@ -1,0 +1,34 @@
+<!doctype html>
+<html lang="ja">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>音の確かめ</title>
+    <style>
+      body {
+        margin: 0;
+        padding: 24px;
+        background: #123b26;
+        color: #f2ecd9;
+        font-family: system-ui, sans-serif;
+      }
+      h1 { margin: 0 0 4px; font-size: 18px; }
+      p { margin: 0 0 18px; font-size: 13px; opacity: .85; }
+      table { border-collapse: collapse; font-variant-numeric: tabular-nums; }
+      th, td { padding: 5px 14px; text-align: left; border-bottom: 1px solid #ffffff22; }
+      td.bad { color: #ff9d8a; font-weight: 700; }
+      td.ok { color: #7fe0a0; }
+      canvas { display: block; margin-top: 4px; background: #0d2a1b; }
+      button { font: inherit; margin-top: 16px; padding: 6px 14px; }
+    </style>
+  </head>
+  <body>
+    <h1>音の確かめ</h1>
+    <p>
+      各音を <code>OfflineAudioContext</code> で焼いて、振幅と長さを測る。
+      <strong>例外を出さずに走ったことと、本当に音が出ていることは別である。</strong>
+    </p>
+    <div id="report">測っています…</div>
+    <script type="module" src="/src/sound-check.ts"></script>
+  </body>
+</html>

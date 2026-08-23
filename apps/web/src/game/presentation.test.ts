@@ -226,3 +226,88 @@ describe("Presentation", () => {
     });
   });
 });
+
+describe("演出の出始めを知らせる", () => {
+  /** 知らせを受け取った順に控える。 */
+  function record(presentation: Presentation): {
+    names: string[];
+    skipped: boolean[];
+  } {
+    const names: string[] = [];
+    const skipped: boolean[] = [];
+    presentation.onStart((event, wasSkipped) => {
+      names.push(event.type);
+      skipped.push(wasSkipped);
+    });
+    return { names, skipped };
+  }
+
+  it("演出の頭で1度だけ知らせる", () => {
+    // **畳み終わり（演出の終わり）ではない。**そこで鳴らすと、鳴きの声が
+    // 牌を倒し終えてから聞こえる。
+    const clock = new ManualClock();
+    const presentation = new Presentation(0, clock);
+    const seen = record(presentation);
+
+    presentation.receive(discard(1, 1, 0));
+    presentation.update();
+    expect(seen.names).toEqual(["discard"]);
+
+    // 演出の途中で何度更新しても増えない。
+    clock.advance(100);
+    presentation.update();
+    clock.advance(100);
+    presentation.update();
+    expect(seen.names).toEqual(["discard"]);
+
+    // 終わって次が始まれば、次のぶんが来る。
+    presentation.receive(draw(2, 2));
+    clock.advance(200);
+    presentation.update();
+    expect(seen.names).toEqual(["discard", "draw"]);
+  });
+
+  it("演出を持たないイベントも知らせる", () => {
+    // 和了と流局は演出時間を持たないが、音は鳴らす。
+    const clock = new ManualClock();
+    const presentation = new Presentation(0, clock);
+    const seen = record(presentation);
+
+    presentation.receive(riichiAccepted(1, 1));
+    presentation.update();
+    expect(seen.names).toEqual(["riichi"]);
+  });
+
+  it("まとめて出たときは、その印が付く", () => {
+    // **再接続やタブ復帰では数十件が一度に出る。**そのまま鳴らすと打牌音が
+    // 束になって弾ける。受け取る側が間引けるように伝える。
+    const clock = new ManualClock();
+    const presentation = new Presentation(0, clock);
+    const seen = record(presentation);
+
+    for (let i = 0; i < 6; i += 1) {
+      presentation.receive(discard(i + 1, 1, 0));
+    }
+    presentation.skip();
+
+    expect(seen.names).toHaveLength(6);
+    expect(seen.skipped.slice(1).every(Boolean), "束の印が付いていない").toBe(
+      true,
+    );
+  });
+
+  it("1件ずつ普通に出たものには束の印を付けない", () => {
+    const clock = new ManualClock();
+    const presentation = new Presentation(0, clock);
+    const seen = record(presentation);
+
+    presentation.receive(discard(1, 1, 0));
+    presentation.update();
+    clock.advance(350);
+    presentation.receive(discard(2, 2, 1));
+    presentation.update();
+
+    expect(seen.names).toHaveLength(2);
+    expect(seen.skipped).toEqual([false, false]);
+  });
+});

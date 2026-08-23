@@ -35,6 +35,14 @@ export class Presentation {
   /** `active` の作り直しを避けるための控え。畳んだ件数が変われば作り直す。 */
   #activeAt: number | null = null;
   #activeNext: GameState | null = null;
+  /**
+   * 出し始めたイベントの件数。**畳んだ件数ではない。**
+   *
+   * 音は演出の頭で鳴る。畳み終わり（演出の終わり）を待つと、鳴きの声が
+   * 牌を倒し終えてから聞こえる。
+   */
+  #started = 0;
+  #onStart: ((event: ClientEvent, skipped: boolean) => void) | null = null;
 
   constructor(you: Seat, clock: Clock, policy: CatchUpPolicy = defaultCatchUp) {
     this.#player = new EffectPlayer(clock, policy);
@@ -44,6 +52,17 @@ export class Presentation {
 
   get state(): GameState {
     return this.#state;
+  }
+
+  /**
+   * イベントが出始めたときに1度だけ呼ぶ相手を決める。
+   *
+   * 第2引数は「まとめて出た」印である。再接続やタブ復帰では溜まりを一気に
+   * 捨てるので、**そのまま鳴らすと数十発の音が同時に出る。**呼ばれた側が
+   * 間引けるように伝える。
+   */
+  onStart(listener: (event: ClientEvent, skipped: boolean) => void): void {
+    this.#onStart = listener;
   }
 
   get receivedSeq(): number | null {
@@ -103,18 +122,45 @@ export class Presentation {
   update(): void {
     this.#player.update();
     this.#fold();
+    this.#announce();
   }
 
   /** 溜まっている演出を捨てて、いますぐ全部見せる。 */
   skip(): void {
     this.#player.skip();
     this.#fold();
+    this.#announce();
   }
 
   /** 明示的な再同期。演出を捨てて最新状態へ飛ぶ。 */
   jumpToLatest(): void {
     this.#player.jumpToLatest();
     this.#fold();
+    this.#announce();
+  }
+
+  /**
+   * 新しく出始めたイベントを知らせる。
+   *
+   * **出し始めた件数は「畳んだ件数 + 再生中の1件」である。**畳んだ件数だけ
+   * 見ると、いま再生している演出が数えられない。
+   */
+  #announce(): void {
+    const started = this.#folded + (this.#player.current === null ? 0 : 1);
+    const listener = this.#onStart;
+    if (listener === null) {
+      this.#started = started;
+      return;
+    }
+    // 1回の更新で2件以上進んだなら、演出を飛ばしている。
+    const skipped = started - this.#started > 1;
+    for (; this.#started < started; this.#started += 1) {
+      const item = this.#envelopes[this.#started];
+      if (item === undefined) {
+        return;
+      }
+      listener(item.envelope.event, skipped);
+    }
   }
 
   /**

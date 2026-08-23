@@ -104,6 +104,12 @@ function completeInHand(state: GameState): boolean {
   return isWinningShape([...state.hand, state.drawn], meldCount);
 }
 
+/** 音の入切ボタンの文字。**いまの状態ではなく、押したらどうなるかを書く。** */
+function soundLabel(): string {
+  const audio = (globalThis as unknown as { sfx?: { muted: boolean } }).sfx;
+  return audio?.muted === true ? "音を出す" : "音を消す";
+}
+
 function windLabel(wind: string): string {
   return { East: "東", South: "南", West: "西", North: "北" }[wind] ?? wind;
 }
@@ -207,6 +213,14 @@ export function renderBoard(
   for (const tile of state.doraIndicators) dora.append(tileNode(tile));
   header.append(
     dora,
+    // **音は切れないと困る。**人のいる場所で開くこともある。
+    plainButton(soundLabel(), () => {
+      const audio = (globalThis as unknown as { sfx?: { muted: boolean } }).sfx;
+      if (audio !== undefined) {
+        audio.muted = !audio.muted;
+      }
+      renderBoard(root, state, send);
+    }),
     plainButton("新しい卓", () =>
       (globalThis as unknown as { newTable: () => void }).newTable(),
     ),

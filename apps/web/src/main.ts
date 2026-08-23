@@ -1,3 +1,5 @@
+import { soundOf } from "./audio/catalog";
+import { Sfx } from "./audio/sfx";
 import { Presentation } from "./game/presentation";
 import { connect } from "./net/connection";
 import { motionsFor } from "./scene/motion";
@@ -44,6 +46,27 @@ root.replaceChildren(tableRoot, uiRoot);
 
 const scene = new TableScene(canvas);
 const presentation = new Presentation(0, systemClock);
+
+/**
+ * 音。**利用者が画面を触るまで `AudioContext` は作らない。**
+ *
+ * ブラウザは操作なしに音を出すことを許さない。読み込み時に作ると
+ * `suspended` のまま生まれ、あとから再開しても鳴らない状態を持ち歩く。
+ */
+const sfx = new Sfx();
+// 盤面のボタンから触れるようにする。`board.ts` は音を知らなくてよい。
+(globalThis as unknown as { sfx: Sfx }).sfx = sfx;
+presentation.onStart((event, skipped) => {
+  // **まとめて出たぶんは鳴らさない。**再接続やタブ復帰では数十件が一度に
+  // 出るので、そのまま鳴らすと打牌音が束になって弾ける。
+  if (skipped) {
+    return;
+  }
+  const cue = soundOf(event);
+  if (cue !== null) {
+    sfx.play(cue.name, cue.delayMs);
+  }
+});
 
 /**
  * 盤面の HTML を作り直した時点の目印。
@@ -104,6 +127,12 @@ const connection = connect({
     document.title = `麻雀 — ${text}`;
   },
 });
+
+// **操作のたびに呼ぶ。**最初の1回で作り、以後は止まっていれば再開する。
+// 音の有無に関わらず、操作の文脈でしか `AudioContext` は開始できない。
+for (const kind of ["pointerdown", "keydown"] as const) {
+  addEventListener(kind, () => sfx.unlock(), { passive: true });
+}
 
 canvas.addEventListener("click", (event) => {
   const rect = canvas.getBoundingClientRect();
