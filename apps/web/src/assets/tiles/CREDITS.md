@@ -3,11 +3,16 @@
 取得日: 2026-08-16
 出所: Wikimedia Commons
 
-**注意: east.svg（東風）のみ GPL である。**他は PD か CC0。配布するときは GPL の義務が生じる。
+**east.svg（東風）の字は BIZ UD明朝からパス化したものである。**取り込んだ
+元素材は34枚のうちこの1枚だけが GPL で、他の33枚（PD / CC0）と条件が
+揃わなかった。そこで、SIL Open Font License 1.1 で公開されている Morisawa
+BIZ UDMincho v1.05 Regular の U+6771 を `tools/draw_east.py` に固定し、明朝体の
+筆致を保ったまま再生成できるようにした。牌の外枠だけは south.svg
+（public domain）のものを使っている。フォントの配布元とハッシュは生成スクリプトに記録した。
 
 | 保存名 | 元ファイル | 作者 | 許諾 | 寸法 |
 |---|---|---|---|---|
-| east.svg | U+1F000 MJEastwind.svg | Shizhao | gpl | 75x95 |
+| east.svg | BIZ UDMincho v1.05 U+6771（枠は south.svg より） | Morisawa Inc. | ofl-1.1 | 75x95 |
 | south.svg | U+1F001 MJSouthwind.svg | Shizhao | public domain | 75x95 |
 | west.svg | U+1F002 MJWestwind.svg | Shizhao | cc0 | 75x95 |
 | north.svg | U+1F003 MJNorthwind.svg | Shizhao | public domain | 75x95 |
