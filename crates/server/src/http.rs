@@ -314,15 +314,28 @@ async fn list_records(State(state): State<AppState>, headers: HeaderMap) -> Resp
 ///
 /// **卓が生きているうちは部屋から、畳まれた後は倉から引く。**部屋は
 /// 終わった卓を掃くので、倉に残した証明のハッシュが後々の頼りになる。
-fn seat_in_record(state: &AppState, id: &str, token: &Token) -> Option<Seat> {
-    if let Some((record_id, seat)) = state.rooms.record_of(token) {
+fn seat_in_record(
+    state: &AppState,
+    id: &str,
+    token: Option<&Token>,
+    player: Option<&str>,
+) -> Option<Seat> {
+    if let Some((record_id, seat)) = token.and_then(|token| state.rooms.record_of(token)) {
         if record_id == id {
             return Some(seat);
         }
     }
     let records = state.records.as_ref()?;
     let store = records.store.lock().expect("毒されていない");
-    let seat = store.seat_of(id, &hash_token(&token.0)).ok()??;
+    if let Some(token) = token {
+        if let Ok(Some(seat)) = store.seat_of(id, &hash_token(&token.0)) {
+            return Some(Seat::new(seat));
+        }
+    }
+    // **鍵でも開けるようにする。**席の証明は部屋ごとなので、対局が終わって
+    // 画面を閉じれば手元に残らない。一覧に出ているのに開けない、という
+    // 食い違いを避ける。
+    let seat = player.and_then(|key| store.seat_of_player(id, key).ok().flatten())?;
     Some(Seat::new(seat))
 }
 
@@ -332,12 +345,14 @@ async fn read_record(
     Path(id): Path<String>,
     headers: HeaderMap,
 ) -> Response {
-    let Some(token) = token_of(&headers) else {
-        return fail(StatusCode::UNAUTHORIZED, "bad_token");
-    };
     // **無い id と、見る資格の無い id を区別しない。**id の総当たりに
     // 手がかりを与えない。
-    let Some(seat) = seat_in_record(&state, &id, &token) else {
+    let Some(seat) = seat_in_record(
+        &state,
+        &id,
+        token_of(&headers).as_ref(),
+        player_of(&headers).as_deref(),
+    ) else {
         return fail(StatusCode::UNAUTHORIZED, "bad_token");
     };
     let Some(records) = state.records.as_ref() else {
@@ -363,10 +378,12 @@ async fn record_events(
     Path(id): Path<String>,
     headers: HeaderMap,
 ) -> Response {
-    let Some(token) = token_of(&headers) else {
-        return fail(StatusCode::UNAUTHORIZED, "bad_token");
-    };
-    let Some(seat) = seat_in_record(&state, &id, &token) else {
+    let Some(seat) = seat_in_record(
+        &state,
+        &id,
+        token_of(&headers).as_ref(),
+        player_of(&headers).as_deref(),
+    ) else {
         return fail(StatusCode::UNAUTHORIZED, "bad_token");
     };
     let Some(records) = state.records.as_ref() else {
@@ -941,6 +958,52 @@ mod record_tests {
         }
         let foreign = foreign_draws(&events);
         assert!(foreign >= 8, "他席のツモを {foreign} 件しか見ていない");
+    }
+
+    /// **一覧に出ているのに開けない、では困る。**
+    ///
+    /// 席の証明は部屋ごとに配られるので、対局が終わって画面を閉じれば
+    /// 手元に残らない。browser の鍵でも開けることを確かめる。
+    #[tokio::test(start_paused = true)]
+    async fn a_past_record_opens_with_the_player_key_alone() {
+        let (app, _db, rooms) = app_with_store("bykey");
+        let (_, token) = played(&app, "まさ", "key-a").await;
+        wait_for_a_finished_round(&rooms, &Token(token.clone())).await;
+        let id = my_records(&app, "key-a").await[0]["id"]
+            .as_str()
+            .expect("ある")
+            .to_owned();
+
+        // 席の証明を持たず、鍵だけで開く。
+        let (status, head) = call(
+            &app,
+            with_player(get(&format!("/api/records/{id}")), "key-a"),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "鍵だけでは開けない");
+        assert!(head["you"].as_u64().is_some());
+
+        let response = app
+            .clone()
+            .oneshot(with_player(
+                get(&format!("/api/records/{id}/events")),
+                "key-a",
+            ))
+            .await
+            .expect("応答がある");
+        assert_eq!(
+            response.status(),
+            StatusCode::OK,
+            "鍵だけでは本文が読めない"
+        );
+
+        // **他人の鍵では開かない。**
+        let (status, _) = call(
+            &app,
+            with_player(get(&format!("/api/records/{id}")), "key-b"),
+        )
+        .await;
+        assert_eq!(status, StatusCode::UNAUTHORIZED, "他人の鍵で開けている");
     }
 
     /// 倉を持たない口でも、一覧は空を返すだけで落ちない。

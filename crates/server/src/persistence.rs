@@ -255,6 +255,26 @@ impl Store {
             .optional()
     }
 
+    /// browser の鍵から席を引く。
+    ///
+    /// **席の証明だけでは過去の牌譜を開けない。**証明は部屋ごとに配られる
+    /// ので、対局が終わって画面を閉じれば手元に残らない。一覧に出ている
+    /// のに開けない、という食い違いが起きる。鍵はその browser にずっと
+    /// 残るので、こちらでも引けるようにする。
+    pub fn seat_of_player(
+        &self,
+        record_id: &str,
+        player_key: &str,
+    ) -> rusqlite::Result<Option<u8>> {
+        self.conn
+            .query_row(
+                "SELECT seat FROM record_seats WHERE record_id = ?1 AND player_key = ?2",
+                params![record_id, player_key],
+                |row| row.get::<_, u8>(0),
+            )
+            .optional()
+    }
+
     /// 保存した真実を、書いた順に繋げて返す。
     pub fn events(&self, record_id: &str) -> rusqlite::Result<Vec<EventEnvelope>> {
         let mut statement = self
@@ -312,8 +332,11 @@ impl Store {
 
     /// その browser が打った対局。**新しい順。**
     pub fn list(&self, player_key: &str, limit: u32) -> rusqlite::Result<Vec<MatchHead>> {
+        // **`DISTINCT` を落とさない。**同じ browser が同じ卓の2席に座ると
+        // （手元で2つの窓から入ったときに起きる）、JOIN が席の数だけ行を
+        // 返し、一覧に同じ対局が並ぶ。
         let mut statement = self.conn.prepare(
-            "SELECT r.id, r.rules, r.started_ms, r.ended_ms, r.players, r.result
+            "SELECT DISTINCT r.id, r.rules, r.started_ms, r.ended_ms, r.players, r.result
              FROM records r
              JOIN record_seats s ON s.record_id = r.id
              WHERE s.player_key = ?1
@@ -624,6 +647,19 @@ mod tests {
             store.list("知らない鍵", 10).expect("引ける").is_empty(),
             "他人の鍵で牌譜が出ている"
         );
+    }
+
+    /// **同じ browser が2席に座っても、一覧には1度しか出ない。**
+    /// 手元で2つの窓から同じ部屋に入ると起きる。
+    #[test]
+    fn one_match_shows_up_once_even_with_two_seats() {
+        let store = Store::open_in_memory().expect("開ける");
+        let mut both = seats();
+        both[1].player_key = Some("key-a".to_owned());
+        store.begin_match(&head("a", 100), &both).expect("書ける");
+
+        let mine = store.list("key-a", 10).expect("引ける");
+        assert_eq!(mine.len(), 1, "同じ対局が {} 件出ている", mine.len());
     }
 
     #[test]
