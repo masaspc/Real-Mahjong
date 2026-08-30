@@ -1026,12 +1026,10 @@ mod recording_tests {
     use crate::persistence::Store;
 
     /// 倉と、それを抱えた台帳。試験のあいだだけ生きるファイルを使う。
-    fn ledger_with_store(tag: &str) -> (Rooms, std::path::PathBuf) {
-        let path =
-            std::env::temp_dir().join(format!("mj-rooms-{tag}-{}.sqlite", std::process::id()));
-        let _ = std::fs::remove_file(&path);
-        let store = Store::open(&path).expect("開ける");
-        (Rooms::with_scribe(Some(Scribe::spawn(store))), path)
+    fn ledger_with_store(tag: &str) -> (Rooms, crate::persistence::TempDb) {
+        let db = crate::persistence::TempDb::new(&format!("rooms-{tag}"));
+        let store = Store::open(&db.path).expect("開ける");
+        (Rooms::with_scribe(Some(Scribe::spawn(store))), db)
     }
 
     async fn wait_for_head(path: &std::path::Path) -> Option<MatchHead> {
@@ -1050,11 +1048,13 @@ mod recording_tests {
     /// 卓が立つと見出しの行ができる。
     #[tokio::test(start_paused = true)]
     async fn starting_writes_the_head() {
-        let (rooms, path) = ledger_with_store("head");
+        let (rooms, db) = ledger_with_store("head");
         let (_, host) = rooms.create("まさ", Some("key-a"), 0);
         rooms.start(&host, 0).expect("始められる");
 
-        let head = wait_for_head(&path).await.expect("見出しが書かれていない");
+        let head = wait_for_head(&db.path)
+            .await
+            .expect("見出しが書かれていない");
         assert_eq!(head.players.len(), 4);
         assert!(
             head.players.contains(&"まさ".to_owned()),
@@ -1064,22 +1064,22 @@ mod recording_tests {
         assert!(head.rules_json.contains("Hanchan"), "{}", head.rules_json);
         assert!(head.started_ms > 0, "実時刻が入っていない");
         assert_eq!(head.ended_ms, None);
-
-        let _ = std::fs::remove_file(&path);
     }
 
     /// **人の席にだけ証明と鍵が入り、CPU の席には入らない。**
     #[tokio::test(start_paused = true)]
     async fn only_people_carry_credentials() {
-        let (rooms, path) = ledger_with_store("cred");
+        let (rooms, db) = ledger_with_store("cred");
         let (code, host) = rooms.create("まさ", Some("key-a"), 0);
         let guest = rooms
             .join(&code, "たろう", Some("key-b"), 0)
             .expect("入れる");
         rooms.start(&host, 0).expect("始められる");
 
-        let head = wait_for_head(&path).await.expect("見出しが書かれていない");
-        let reader = Store::open(&path).expect("開ける");
+        let head = wait_for_head(&db.path)
+            .await
+            .expect("見出しが書かれていない");
+        let reader = Store::open(&db.path).expect("開ける");
         let rows = reader.seats(&head.id).expect("引ける");
         assert_eq!(rows.len(), 4);
 
@@ -1113,19 +1113,17 @@ mod recording_tests {
             .find(|r| r.seat == guest_seat.index() as u8)
             .expect("行がある");
         assert_eq!(theirs.token_hash, Some(hash_token(&guest.0)));
-
-        let _ = std::fs::remove_file(&path);
     }
 
     /// **鍵を送らなくても対局はできる。**一覧に出ないだけ。
     #[tokio::test(start_paused = true)]
     async fn a_keyless_player_can_still_play() {
-        let (rooms, path) = ledger_with_store("nokey");
+        let (rooms, db) = ledger_with_store("nokey");
         let (_, host) = rooms.create("まさ", None, 0);
         rooms.start(&host, 0).expect("始められる");
         assert!(rooms.seat_of(&host).is_some(), "卓に着けていない");
 
-        let reader = Store::open(&path).expect("開ける");
+        let reader = Store::open(&db.path).expect("開ける");
         for _ in 0..200 {
             tokio::task::yield_now().await;
         }
@@ -1133,13 +1131,12 @@ mod recording_tests {
             reader.list("key-a", 10).expect("引ける").is_empty(),
             "鍵を送っていないのに一覧に出ている"
         );
-        let _ = std::fs::remove_file(&path);
     }
 
     /// 卓が生きているあいだは、トークンから牌譜を引ける。
     #[tokio::test(start_paused = true)]
     async fn a_token_points_at_its_record_while_the_table_lives() {
-        let (rooms, path) = ledger_with_store("point");
+        let (rooms, _db) = ledger_with_store("point");
         let (code, host) = rooms.create("まさ", Some("key-a"), 0);
         let guest = rooms
             .join(&code, "たろう", Some("key-b"), 0)
@@ -1158,7 +1155,6 @@ mod recording_tests {
             rooms.record_of(&Token("知らない".to_owned())).is_none(),
             "知らない証明で牌譜が引けている"
         );
-        let _ = std::fs::remove_file(&path);
     }
 
     /// 倉を持たない台帳でも卓は立つ。**牌譜は第2段で足したもので、対局の前提ではない。**

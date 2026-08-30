@@ -7,6 +7,7 @@
 //! 席の証明は `X-Mahjong-Token` ヘッダで受ける。**クエリ文字列に置かない。**
 //! アクセスログや `Referer` に席の証明が残る。
 
+use crate::persistence::{hash_token, Store};
 use crate::rooms::{Code, JoinError, Lobby, Rooms, StartError, Token};
 use crate::session::TableHandle;
 use axum::extract::ws::{Message, WebSocket, WebSocketUpgrade};
@@ -17,9 +18,11 @@ use axum::response::{IntoResponse, Response};
 use axum::routing::{any, get, post};
 use axum::{Json, Router};
 use protocol::command::Command;
+use protocol::project::project_envelope;
 use protocol::seat::Seat;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
+use std::sync::{Arc, Mutex};
 
 /// 席の証明を運ぶヘッダ。
 pub const TOKEN_HEADER: &str = "x-mahjong-token";
@@ -234,18 +237,181 @@ async fn play(mut socket: WebSocket, handle: TableHandle, seat: Seat, last_seq: 
     let _ = handle.detach(seat, connection).await;
 }
 
+/// この口が持つもの。
+#[derive(Clone)]
+pub struct AppState {
+    pub rooms: Rooms,
+    /// 牌譜の倉。無ければ牌譜の口は空を返す。
+    pub records: Option<Records>,
+}
+
+impl axum::extract::FromRef<AppState> for Rooms {
+    fn from_ref(state: &AppState) -> Rooms {
+        state.rooms.clone()
+    }
+}
+
+/// 牌譜を読むときの倉。
+///
+/// **書き手とは別の口である。**書き手は自分の `Connection` を1本抱えて
+/// 順に書く。読みは要求のたびに来るので、別の1本を鍵で守って使う。
+/// SQLite は同じファイルを複数の接続から読める。
+#[derive(Clone)]
+pub struct Records {
+    store: Arc<Mutex<Store>>,
+}
+
+impl Records {
+    pub fn new(store: Store) -> Self {
+        Records {
+            store: Arc::new(Mutex::new(store)),
+        }
+    }
+}
+
+#[derive(Serialize)]
+struct RecordCard {
+    id: String,
+    players: Vec<String>,
+    started_ms: u64,
+    ended_ms: Option<u64>,
+    /// 終局の点数と順位。まだなら null。
+    result: Option<serde_json::Value>,
+}
+
+fn card(head: &crate::persistence::MatchHead) -> RecordCard {
+    RecordCard {
+        id: head.id.clone(),
+        players: head.players.clone(),
+        started_ms: head.started_ms,
+        ended_ms: head.ended_ms,
+        result: head
+            .result_json
+            .as_deref()
+            .and_then(|text| serde_json::from_str(text).ok()),
+    }
+}
+
+/// その browser が打った対局。
+async fn list_records(State(state): State<AppState>, headers: HeaderMap) -> Response {
+    let Some(key) = player_of(&headers) else {
+        return fail(StatusCode::UNAUTHORIZED, "bad_player");
+    };
+    let Some(records) = state.records.as_ref() else {
+        return Json(serde_json::json!({ "records": [] })).into_response();
+    };
+    let store = records.store.lock().expect("毒されていない");
+    match store.list(&key, 100) {
+        Ok(heads) => {
+            let cards: Vec<RecordCard> = heads.iter().map(card).collect();
+            Json(serde_json::json!({ "records": cards })).into_response()
+        }
+        Err(_) => fail(StatusCode::INTERNAL_SERVER_ERROR, "unavailable"),
+    }
+}
+
+/// その牌譜で自分がどの席だったか。
+///
+/// **卓が生きているうちは部屋から、畳まれた後は倉から引く。**部屋は
+/// 終わった卓を掃くので、倉に残した証明のハッシュが後々の頼りになる。
+fn seat_in_record(state: &AppState, id: &str, token: &Token) -> Option<Seat> {
+    if let Some((record_id, seat)) = state.rooms.record_of(token) {
+        if record_id == id {
+            return Some(seat);
+        }
+    }
+    let records = state.records.as_ref()?;
+    let store = records.store.lock().expect("毒されていない");
+    let seat = store.seat_of(id, &hash_token(&token.0)).ok()??;
+    Some(Seat::new(seat))
+}
+
+/// 1対局の見出し。
+async fn read_record(
+    State(state): State<AppState>,
+    Path(id): Path<String>,
+    headers: HeaderMap,
+) -> Response {
+    let Some(token) = token_of(&headers) else {
+        return fail(StatusCode::UNAUTHORIZED, "bad_token");
+    };
+    // **無い id と、見る資格の無い id を区別しない。**id の総当たりに
+    // 手がかりを与えない。
+    let Some(seat) = seat_in_record(&state, &id, &token) else {
+        return fail(StatusCode::UNAUTHORIZED, "bad_token");
+    };
+    let Some(records) = state.records.as_ref() else {
+        return fail(StatusCode::UNAUTHORIZED, "bad_token");
+    };
+    let store = records.store.lock().expect("毒されていない");
+    let Ok(Some(head)) = store.head(&id) else {
+        return fail(StatusCode::UNAUTHORIZED, "bad_token");
+    };
+    let mut body = serde_json::to_value(card(&head)).unwrap_or_default();
+    if let Some(object) = body.as_object_mut() {
+        object.insert("you".to_owned(), serde_json::json!(seat.index()));
+    }
+    Json(body).into_response()
+}
+
+/// 保存した真実を、その席の視界に射影して返す。
+///
+/// **生の配信と同じ `project_envelope` を通る。**牌譜のために別の絞り方を
+/// 書くと、そこだけ抜けが生まれる。
+async fn record_events(
+    State(state): State<AppState>,
+    Path(id): Path<String>,
+    headers: HeaderMap,
+) -> Response {
+    let Some(token) = token_of(&headers) else {
+        return fail(StatusCode::UNAUTHORIZED, "bad_token");
+    };
+    let Some(seat) = seat_in_record(&state, &id, &token) else {
+        return fail(StatusCode::UNAUTHORIZED, "bad_token");
+    };
+    let Some(records) = state.records.as_ref() else {
+        return fail(StatusCode::UNAUTHORIZED, "bad_token");
+    };
+    let store = records.store.lock().expect("毒されていない");
+    let Ok(truth) = store.events(&id) else {
+        return fail(StatusCode::INTERNAL_SERVER_ERROR, "unavailable");
+    };
+    let lines: Vec<String> = truth
+        .iter()
+        .filter_map(|envelope| project_envelope(envelope, seat))
+        .filter_map(|projected| serde_json::to_string(&projected).ok())
+        .collect();
+    (
+        [(axum::http::header::CONTENT_TYPE, "application/x-ndjson")],
+        lines.join("\n"),
+    )
+        .into_response()
+}
+
 /// 部屋の口と卓への接続を束ねる。静的配信は呼び手が足す。
 pub fn api(rooms: Rooms) -> Router {
+    api_with(AppState {
+        rooms,
+        records: None,
+    })
+}
+
+/// 部屋の口と卓への接続と牌譜を束ねる。静的配信は呼び手が足す。
+pub fn api_with(state: AppState) -> Router {
+    let rooms = state.rooms.clone();
     Router::new()
         .route("/api/rooms", post(create))
         .route("/api/rooms/{code}", get(look))
         .route("/api/rooms/{code}/join", post(join))
         .route("/api/rooms/{code}/start", post(start))
+        .route("/api/records", get(list_records))
+        .route("/api/records/{id}", get(read_record))
+        .route("/api/records/{id}/events", get(record_events))
         .route(
             "/ws",
-            any(socket).layer(from_fn_with_state(rooms.clone(), require_seat)),
+            any(socket).layer(from_fn_with_state(rooms, require_seat)),
         )
-        .with_state(rooms)
+        .with_state(state)
 }
 
 #[cfg(test)]
@@ -257,7 +423,7 @@ mod tests {
     use serde_json::Value;
     use tower::ServiceExt;
 
-    async fn call(app: &Router, request: Request<Body>) -> (StatusCode, Value) {
+    pub(super) async fn call(app: &Router, request: Request<Body>) -> (StatusCode, Value) {
         let response = app.clone().oneshot(request).await.expect("応答がある");
         let status = response.status();
         let bytes = response
@@ -270,7 +436,7 @@ mod tests {
         (status, value)
     }
 
-    fn post_json(path: &str, body: &str) -> Request<Body> {
+    pub(super) fn post_json(path: &str, body: &str) -> Request<Body> {
         Request::builder()
             .method("POST")
             .uri(path)
@@ -279,14 +445,14 @@ mod tests {
             .expect("組み立てられる")
     }
 
-    fn with_token(mut request: Request<Body>, token: &str) -> Request<Body> {
+    pub(super) fn with_token(mut request: Request<Body>, token: &str) -> Request<Body> {
         request
             .headers_mut()
             .insert(TOKEN_HEADER, token.parse().expect("ヘッダに入る"));
         request
     }
 
-    fn get(path: &str) -> Request<Body> {
+    pub(super) fn get(path: &str) -> Request<Body> {
         Request::builder()
             .uri(path)
             .body(Body::empty())
@@ -470,5 +636,319 @@ mod tests {
         let (code, token) = make_room(&app, "  あいうえおかきくけこさしすせそ  ").await;
         let (_, body) = call(&app, with_token(get(&format!("/api/rooms/{code}")), &token)).await;
         assert_eq!(body["you"]["name"], "あいうえおかきくけこさし");
+    }
+}
+
+#[cfg(test)]
+mod record_tests {
+    use super::tests::{call, get, post_json, with_token};
+    use super::*;
+    use crate::persistence::{Scribe, Store};
+    use axum::body::Body;
+    use axum::http::Request;
+    use http_body_util::BodyExt;
+    use protocol::client_event::ClientEvent;
+    use serde_json::Value;
+    use tower::ServiceExt;
+
+    fn with_player(mut request: Request<Body>, key: &str) -> Request<Body> {
+        request
+            .headers_mut()
+            .insert(PLAYER_HEADER, key.parse().expect("ヘッダに入る"));
+        request
+    }
+
+    /// 倉を抱えた口。読みと書きで別の接続を開く。
+    fn app_with_store(tag: &str) -> (Router, crate::persistence::TempDb, Rooms) {
+        let db = crate::persistence::TempDb::new(&format!("http-{tag}"));
+        let writer = Store::open(&db.path).expect("開ける");
+        let reader = Store::open(&db.path).expect("開ける");
+        let rooms = Rooms::with_scribe(Some(Scribe::spawn(writer)));
+        let state = AppState {
+            rooms: rooms.clone(),
+            records: Some(Records::new(reader)),
+        };
+        (api_with(state), db, rooms)
+    }
+
+    /// 部屋を作って開始し、牌譜の見出しが書かれるまで待つ。
+    async fn played(app: &Router, name: &str, key: &str) -> (String, String) {
+        let (status, body) = call(
+            app,
+            with_player(
+                post_json("/api/rooms", &format!(r#"{{"name":"{name}"}}"#)),
+                key,
+            ),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        let code = body["code"].as_str().expect("ある").to_owned();
+        let token = body["token"].as_str().expect("ある").to_owned();
+        call(
+            app,
+            with_token(post_json(&format!("/api/rooms/{code}/start"), ""), &token),
+        )
+        .await;
+        // **書き手は別の task である。**見出しが届くまで順番を回す。
+        for _ in 0..2_000 {
+            if !my_records(app, key).await.is_empty() {
+                break;
+            }
+            tokio::task::yield_now().await;
+        }
+        (code, token)
+    }
+
+    /// 牌譜の本文を引く。
+    async fn events_of(app: &Router, id: &str, token: &str) -> Vec<ClientEvent> {
+        let response = app
+            .clone()
+            .oneshot(with_token(get(&format!("/api/records/{id}/events")), token))
+            .await
+            .expect("応答がある");
+        assert_eq!(response.status(), StatusCode::OK);
+        let bytes = response
+            .into_body()
+            .collect()
+            .await
+            .expect("読める")
+            .to_bytes();
+        String::from_utf8_lossy(&bytes)
+            .lines()
+            .filter_map(|line| serde_json::from_str::<Value>(line).ok())
+            .filter_map(|value| serde_json::from_value(value["event"].clone()).ok())
+            .collect()
+    }
+
+    /// 他席のツモを何件見られるか。**射影が効いているかを測る物差し。**
+    fn foreign_draws(events: &[ClientEvent]) -> usize {
+        let Some(you) = events.iter().find_map(|event| match event {
+            ClientEvent::MatchStart { you, .. } => Some(*you),
+            _ => None,
+        }) else {
+            return 0;
+        };
+        events
+            .iter()
+            .filter(|event| matches!(event, ClientEvent::Draw { seat, .. } if *seat != you))
+            .count()
+    }
+
+    /// 1局が終わって牌譜に落ちるまで待つ。
+    ///
+    /// **時計だけを頼りにしない。**止めた時計を `sleep` で進める書き方は、
+    /// 卓と書き手のどちらが先に動くかで結果が変わり、同じ試験が通ったり
+    /// 落ちたりする（実際にそうなった）。卓を直に見張って、局が終わった
+    /// ことを確かめてから読む。
+    async fn wait_for_a_finished_round(rooms: &Rooms, token: &Token) -> Seat {
+        let (handle, seat) = rooms.seat_of(token).expect("席がある");
+        let (_, mut watcher) = handle.attach(seat, None).await.expect("卓は生きている");
+        while let Some(envelope) = watcher.recv().await {
+            if matches!(envelope.event, ClientEvent::RoundEnd { .. }) {
+                break;
+            }
+        }
+        // 書き手は別の task なので、吐き出す順番を回す。
+        for _ in 0..500 {
+            tokio::task::yield_now().await;
+        }
+        seat
+    }
+
+    async fn my_records(app: &Router, key: &str) -> Vec<Value> {
+        let (_, body) = call(app, with_player(get("/api/records"), key)).await;
+        body["records"].as_array().cloned().unwrap_or_default()
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn a_finished_room_shows_up_in_my_list() {
+        let (app, _db, _) = app_with_store("list");
+        played(&app, "まさ", "key-a").await;
+
+        let mine = my_records(&app, "key-a").await;
+        assert_eq!(mine.len(), 1, "一覧に出ていない");
+        assert_eq!(mine[0]["players"].as_array().expect("ある").len(), 4);
+
+        // **他人の鍵では出ない。**
+        assert!(
+            my_records(&app, "key-b").await.is_empty(),
+            "他人の牌譜が見えている"
+        );
+    }
+
+    #[tokio::test]
+    async fn listing_needs_a_player_key() {
+        let (app, _db, _) = app_with_store("nokey");
+        let (status, body) = call(&app, get("/api/records")).await;
+        assert_eq!(status, StatusCode::UNAUTHORIZED);
+        assert_eq!(body["error"], "bad_player");
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn reading_a_record_needs_the_seat_token() {
+        let (app, _db, _) = app_with_store("auth");
+        let (_, token) = played(&app, "まさ", "key-a").await;
+        let id = my_records(&app, "key-a").await[0]["id"]
+            .as_str()
+            .expect("ある")
+            .to_owned();
+
+        let (status, _) = call(&app, with_token(get(&format!("/api/records/{id}")), &token)).await;
+        assert_eq!(status, StatusCode::OK);
+
+        let (status, body) = call(&app, get(&format!("/api/records/{id}"))).await;
+        assert_eq!(status, StatusCode::UNAUTHORIZED);
+        assert_eq!(body["error"], "bad_token");
+    }
+
+    /// **無い id と、見る資格の無い id を同じ答えにする。**
+    /// 違う答えを返すと、id の総当たりに手がかりを与える。
+    #[tokio::test(start_paused = true)]
+    async fn a_missing_id_looks_like_a_forbidden_one() {
+        let (app, _db, _) = app_with_store("same");
+        let (_, mine) = played(&app, "まさ", "key-a").await;
+        let (_, theirs) = played(&app, "たろう", "key-b").await;
+        let id = my_records(&app, "key-a").await[0]["id"]
+            .as_str()
+            .expect("ある")
+            .to_owned();
+
+        // 他人の牌譜を、自分の証明で覗く。
+        let (forbidden, body_a) = call(
+            &app,
+            with_token(get(&format!("/api/records/{id}")), &theirs),
+        )
+        .await;
+        // まったく無い id。
+        let (missing, body_b) = call(
+            &app,
+            with_token(
+                get("/api/records/0000000000000000000000000000dead"),
+                &theirs,
+            ),
+        )
+        .await;
+
+        assert_eq!(forbidden, missing, "無い id と資格の無い id で答えが違う");
+        assert_eq!(body_a["error"], body_b["error"]);
+        assert_eq!(forbidden, StatusCode::UNAUTHORIZED);
+        drop(mine);
+    }
+
+    /// **牌譜は自分の席の視界で返る。**他家の手牌は入っていない。
+    ///
+    /// 読み出しは生の配信と同じ `project_envelope` を通る。牌譜のために
+    /// 別の絞り方を書くと、そこだけ抜けが生まれる。
+    #[tokio::test(start_paused = true)]
+    async fn the_record_comes_back_through_the_same_filter() {
+        let (app, _db, rooms) = app_with_store("view");
+
+        // **2人で入り、席0でない方を見る。**1人だと4分の1の確率で席0に
+        // 当たり、「いつも席0の視界で返す」誤りを見逃す回が出る。
+        let (status, body) = call(
+            &app,
+            with_player(post_json("/api/rooms", r#"{"name":"まさ"}"#), "key-a"),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        let code = body["code"].as_str().expect("ある").to_owned();
+        let host = body["token"].as_str().expect("ある").to_owned();
+        let (_, body) = call(
+            &app,
+            with_player(
+                post_json(&format!("/api/rooms/{code}/join"), r#"{"name":"たろう"}"#),
+                "key-b",
+            ),
+        )
+        .await;
+        let guest = body["token"].as_str().expect("ある").to_owned();
+        call(
+            &app,
+            with_token(post_json(&format!("/api/rooms/{code}/start"), ""), &host),
+        )
+        .await;
+
+        // 席0でない方を選ぶ。
+        let (token, key) = [(host.as_str(), "key-a"), (guest.as_str(), "key-b")]
+            .into_iter()
+            .find(|(token, _)| {
+                rooms
+                    .seat_of(&Token((*token).to_owned()))
+                    .is_some_and(|(_, seat)| seat.index() != 0)
+            })
+            .expect("2人のどちらかは席0でない");
+
+        let mut live_seat = Seat::new(0);
+        let mut events = Vec::new();
+        let mut id = String::new();
+        // **他席のツモが十分に溜まるまで局を重ねる。**1局で終わる和了だと
+        // 数件しか出ず、「漏れなし」の確認が空回りに近づく。実際に 30 回に
+        // 1 回、3 件で落ちた。
+        for _ in 0..6 {
+            live_seat = wait_for_a_finished_round(&rooms, &Token(token.to_owned())).await;
+            id = my_records(&app, key).await[0]["id"]
+                .as_str()
+                .expect("ある")
+                .to_owned();
+            events = events_of(&app, &id, token).await;
+            if foreign_draws(&events) >= 8 {
+                break;
+            }
+        }
+        assert_ne!(live_seat.index(), 0, "席0を選んでしまっている");
+        assert!(
+            events
+                .iter()
+                .any(|event| matches!(event, ClientEvent::RoundEnd { .. })),
+            "1局も残っていない（{} 件）",
+            events.len()
+        );
+
+        // **対局中に着いていた席と突き合わせる。**射影後の `you` だけを
+        // 基準にすると、どの席で射影しても辻褄が合ってしまい、席を取り
+        // 違えたことに気付けない。
+        let you = events
+            .iter()
+            .find_map(|event| match event {
+                ClientEvent::MatchStart { you, .. } => Some(*you),
+                _ => None,
+            })
+            .expect("MatchStart が無い");
+        assert_eq!(you, live_seat, "牌譜が別の席の視界で返っている");
+
+        // 見出しの `you` も同じ席を指す。
+        let (_, head) = call(&app, with_token(get(&format!("/api/records/{id}")), token)).await;
+        assert_eq!(
+            head["you"].as_u64(),
+            Some(live_seat.index() as u64),
+            "見出しの席が違う"
+        );
+
+        // 配牌が自分のものであること。
+        let dealt = events.iter().find_map(|event| match event {
+            ClientEvent::Deal { your_hand, .. } => Some(your_hand.len()),
+            _ => None,
+        });
+        assert_eq!(dealt, Some(13), "自分の配牌が入っていない");
+
+        // **他席のツモに牌が乗っていない。**数えないと空回りに気付けない。
+        for event in &events {
+            if let ClientEvent::Draw { seat, tile, .. } = event {
+                if *seat != you {
+                    assert!(tile.is_none(), "牌譜に他席のツモ牌が入っている");
+                }
+            }
+        }
+        let foreign = foreign_draws(&events);
+        assert!(foreign >= 8, "他席のツモを {foreign} 件しか見ていない");
+    }
+
+    /// 倉を持たない口でも、一覧は空を返すだけで落ちない。
+    #[tokio::test]
+    async fn a_storeless_api_answers_with_nothing() {
+        let app = api(Rooms::new());
+        let (status, body) = call(&app, with_player(get("/api/records"), "key-a")).await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(body["records"].as_array().expect("ある").len(), 0);
     }
 }

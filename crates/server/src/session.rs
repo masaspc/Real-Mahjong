@@ -1808,9 +1808,8 @@ mod recording_tests {
     /// **局の切れ目で塊が増える。**終局まで待たない。
     #[tokio::test(start_paused = true)]
     async fn chunks_grow_as_rounds_finish() {
-        let path = std::env::temp_dir().join(format!("mj-round-{}.sqlite", std::process::id()));
-        let _ = std::fs::remove_file(&path);
-        let store = Store::open(&path).expect("開ける");
+        let db = crate::persistence::TempDb::new("round");
+        let store = Store::open(&db.path).expect("開ける");
         store.begin_match(&head("r"), &seats()).expect("書ける");
         let scribe = Scribe::spawn(store);
 
@@ -1839,7 +1838,7 @@ mod recording_tests {
             }
         }
         // 書き手は別 task なので、届くまで待つ。
-        let reader = Store::open(&path).expect("開ける");
+        let reader = Store::open(&db.path).expect("開ける");
         let mut chunks = 0;
         for _ in 0..400 {
             chunks = reader.chunk_count("r").expect("数えられる");
@@ -1851,16 +1850,13 @@ mod recording_tests {
             tokio::task::yield_now().await;
         }
         assert!(chunks >= 3, "3局終わったのに塊が {chunks} しかない");
-
-        let _ = std::fs::remove_file(&path);
     }
 
     /// 終局まで打つと、見出しに終わりと順位が入る。
     #[tokio::test(start_paused = true)]
     async fn finishing_writes_the_result() {
-        let path = std::env::temp_dir().join(format!("mj-end-{}.sqlite", std::process::id()));
-        let _ = std::fs::remove_file(&path);
-        let store = Store::open(&path).expect("開ける");
+        let db = crate::persistence::TempDb::new("end");
+        let store = Store::open(&db.path).expect("開ける");
         store.begin_match(&head("e"), &seats()).expect("書ける");
         let scribe = Scribe::spawn(store);
 
@@ -1879,7 +1875,7 @@ mod recording_tests {
             .expect("卓は生きている");
         while watcher.recv().await.is_some() {}
 
-        let reader = Store::open(&path).expect("開ける");
+        let reader = Store::open(&db.path).expect("開ける");
         let mut done = None;
         for _ in 0..400 {
             let head = reader.head("e").expect("引ける").expect("ある");
@@ -1892,8 +1888,6 @@ mod recording_tests {
         let result = done.expect("終局が書かれていない");
         assert!(result.contains("placements"), "{result}");
         assert!(result.contains("final_scores"), "{result}");
-
-        let _ = std::fs::remove_file(&path);
     }
 
     /// **渡し終えた分をまた渡さない。**間を置いているあいだ毎周回呼ばれる。

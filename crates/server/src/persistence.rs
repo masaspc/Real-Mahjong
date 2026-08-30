@@ -63,6 +63,52 @@ fn gunzip(bytes: &[u8]) -> std::io::Result<String> {
     Ok(text)
 }
 
+/// 試験のあいだだけ生きる倉のファイル。
+///
+/// **名前を pid だけで作らない。**pid は使い回されるので、前の試験が
+/// 残した `-wal` を次の試験が掴む。実際にそれで 10 回に 1 回落ちた。
+/// **`-wal` と `-shm` も消す。**SQLite は本体だけを消しても、隣に
+/// 残った WAL から古い中身を読み戻す。
+#[cfg(test)]
+pub(crate) struct TempDb {
+    pub path: std::path::PathBuf,
+}
+
+#[cfg(test)]
+impl TempDb {
+    pub fn new(tag: &str) -> TempDb {
+        use std::sync::atomic::{AtomicU64, Ordering};
+        static COUNTER: AtomicU64 = AtomicU64::new(0);
+        let unique = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_nanos())
+            .unwrap_or(0);
+        let serial = COUNTER.fetch_add(1, Ordering::Relaxed);
+        let path = std::env::temp_dir().join(format!(
+            "mj-{tag}-{}-{unique}-{serial}.sqlite",
+            std::process::id()
+        ));
+        let db = TempDb { path };
+        db.remove();
+        db
+    }
+
+    fn remove(&self) {
+        for suffix in ["", "-wal", "-shm"] {
+            let mut name = self.path.clone().into_os_string();
+            name.push(suffix);
+            let _ = std::fs::remove_file(std::path::PathBuf::from(name));
+        }
+    }
+}
+
+#[cfg(test)]
+impl Drop for TempDb {
+    fn drop(&mut self) {
+        self.remove();
+    }
+}
+
 /// 牌譜を置くところ。
 pub struct Store {
     conn: Connection,
@@ -667,16 +713,14 @@ mod scribe_tests {
 
     #[tokio::test]
     async fn the_errands_are_written_in_order() {
-        let path = std::env::temp_dir().join(format!("mj-scribe-{}.sqlite", std::process::id()));
-        let _ = std::fs::remove_file(&path);
-
-        let scribe = Scribe::spawn(Store::open(&path).expect("開ける"));
+        let db = TempDb::new("scribe");
+        let scribe = Scribe::spawn(Store::open(&db.path).expect("開ける"));
         scribe.begin(head("a", 100), seats());
         scribe.append("a", chunk(0, 5));
         scribe.append("a", chunk(5, 5));
         scribe.finish("a", 900, Some(r#"{"placements":[1,2,3,4]}"#.to_owned()));
 
-        let reader = Store::open(&path).expect("開ける");
+        let reader = Store::open(&db.path).expect("開ける");
         assert_eq!(
             settle(&reader, "a", 10).await,
             10,
@@ -689,8 +733,6 @@ mod scribe_tests {
             .map(|e| e.seq)
             .collect();
         assert_eq!(seqs, (0..10).collect::<Vec<_>>(), "順番が崩れている");
-
-        let _ = std::fs::remove_file(&path);
     }
 
     /// **書き込みが失敗しても、書き手は死なない。**
@@ -700,9 +742,8 @@ mod scribe_tests {
     /// ことを確かめる。
     #[tokio::test]
     async fn a_failing_write_does_not_kill_the_scribe() {
-        let path = std::env::temp_dir().join(format!("mj-hurt-{}.sqlite", std::process::id()));
-        let _ = std::fs::remove_file(&path);
-        let store = Store::open(&path).expect("開ける");
+        let db = TempDb::new("hurt");
+        let store = Store::open(&db.path).expect("開ける");
         store
             .begin_match(&head("a", 100), &seats())
             .expect("書ける");
@@ -717,7 +758,7 @@ mod scribe_tests {
         tokio::time::sleep(std::time::Duration::from_millis(50)).await;
 
         // 表を戻す。書き手が生きていれば、次の局は書ける。
-        let repair = Store::open(&path).expect("開ける");
+        let repair = Store::open(&db.path).expect("開ける");
         scribe.append("a", chunk(5, 5));
 
         assert_eq!(
@@ -725,7 +766,6 @@ mod scribe_tests {
             5,
             "1局書けなかっただけで書き手が死んでいる"
         );
-        let _ = std::fs::remove_file(&path);
     }
 
     /// **溢れたら捨てる。待たない。**待つと卓が止まり、無制限にすると
