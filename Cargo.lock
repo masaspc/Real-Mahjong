@@ -649,6 +649,7 @@ dependencies = [
  "mahjong-engine",
  "protocol",
  "rand",
+ "serde",
  "serde_json",
  "tokio",
  "tower-http",

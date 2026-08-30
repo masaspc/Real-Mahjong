@@ -56,7 +56,12 @@ git commit -m "refactor(server): 卓の台帳を部屋の台帳へ改める土�
 
 ---
 
-### Task 2: 部屋を作る・入る
+### Task 2: 部屋の台帳（作る・入る・覗く・始める・席を引く・掃く）
+
+> **計画からの逸脱（2026-08-30）:** 当初 Task 2〜5 に分けていたが、`RoomState::Playing`
+> は Task 4 まで、`Room::find` は Task 3 まで構築されないため、途中のコミットが
+> `dead_code` で clippy に落ちる。人工的な `#[allow]` を挟むより、1つの塊として
+> 出す方が正しい。Task 3〜5 の内容と検証はこのタスクに畳んだ。
 
 **Files:**
 - Modify: `crates/server/src/rooms.rs`
