@@ -8,12 +8,18 @@
 //! アクセスログや `Referer` に席の証明が残る。
 
 use crate::rooms::{Code, JoinError, Lobby, Rooms, StartError, Token};
-use axum::extract::{Path, State};
+use crate::session::TableHandle;
+use axum::extract::ws::{Message, WebSocket, WebSocketUpgrade};
+use axum::extract::{Extension, Path, Query, Request, State};
 use axum::http::{HeaderMap, StatusCode};
+use axum::middleware::{from_fn_with_state, Next};
 use axum::response::{IntoResponse, Response};
-use axum::routing::{get, post};
+use axum::routing::{any, get, post};
 use axum::{Json, Router};
+use protocol::command::Command;
+use protocol::seat::Seat;
 use serde::{Deserialize, Serialize};
+use std::collections::HashMap;
 
 /// 席の証明を運ぶヘッダ。
 pub const TOKEN_HEADER: &str = "x-mahjong-token";
@@ -107,13 +113,116 @@ async fn start(State(rooms): State<Rooms>, headers: HeaderMap) -> Response {
     }
 }
 
-/// 部屋の口だけを束ねる。静的配信と WebSocket は呼び手が足す。
+/// 席の証明が通った接続に持たせる切符。
+#[derive(Clone)]
+struct Ticket {
+    handle: TableHandle,
+    seat: Seat,
+}
+
+/// 卓へ繋ぐ前に席を検める。
+///
+/// **握手より先に検める。**`WebSocketUpgrade` の抽出器を先に置くと、
+/// 席の検査は握手が成り立った後にしか走らない。認証は入口で済ませる
+/// のが順序として正しく、試験からも叩けるようになる。
+///
+/// **ここだけはトークンをクエリで受ける。**ブラウザは WebSocket の
+/// 要求にヘッダを付けられないため、他に運ぶ道が無い。
+///
+/// 席はトークンが決める。**クライアントは席を名乗れない。**卓の id を
+/// 知っているだけで座れた頃は、席ごとの視界フィルタが意味を持たなかった。
+async fn require_seat(State(rooms): State<Rooms>, mut request: Request, next: Next) -> Response {
+    // 終わった卓を捨てる機会は、接続のたびで足りる。
+    rooms.sweep(rooms.now_ms());
+
+    let token = request
+        .uri()
+        .query()
+        .map(serde_urlencoded::from_str::<HashMap<String, String>>)
+        .and_then(Result::ok)
+        .and_then(|params| params.get("token").cloned())
+        .map(Token);
+
+    // **卓が立つ前と、知らないトークンを区別しない。**合言葉の総当たりに
+    // 手がかりを与えない。
+    let Some((handle, seat)) = token.and_then(|token| rooms.seat_of(&token)) else {
+        return fail(StatusCode::UNAUTHORIZED, "bad_token");
+    };
+    request.extensions_mut().insert(Ticket { handle, seat });
+    next.run(request).await
+}
+
+async fn socket(
+    Extension(ticket): Extension<Ticket>,
+    Query(params): Query<HashMap<String, String>>,
+    upgrade: WebSocketUpgrade,
+) -> Response {
+    let last_seq = params.get("last_seq").and_then(|s| s.parse::<u32>().ok());
+    upgrade.on_upgrade(move |ws| play(ws, ticket.handle, ticket.seat, last_seq))
+}
+
+async fn play(mut socket: WebSocket, handle: TableHandle, seat: Seat, last_seq: Option<u32>) {
+    let Ok((connection, mut inbox)) = handle.attach(seat, last_seq).await else {
+        return;
+    };
+
+    loop {
+        tokio::select! {
+            // **順序を固定する。**受け口を先に見る。
+            //
+            // 同じ席に新しい接続が来ると、卓はこちらの送り口を捨てる。
+            // そのとき `inbox.recv()` は `None` を返す。公平に選ぶと、
+            // それを知る前に古い画面から遅れて届いた枠を拾ってしまう。
+            // **`Discard` は `window_id` を持たないので、いまの要求に
+            // 偶然かなってしまい、意図しない牌を捨てる。**
+            //
+            // 受け口を先に見れば、閉じたことに必ず先に気づいて抜ける。
+            // 送るものが無く、かつ開いている間だけ枠を読む。
+            biased;
+
+            outgoing = inbox.recv() => {
+                let Some(envelope) = outgoing else { break };
+                let Ok(text) = serde_json::to_string(&envelope) else { break };
+                if socket.send(Message::Text(text.into())).await.is_err() {
+                    break;
+                }
+            }
+            incoming = socket.recv() => {
+                match incoming {
+                    Some(Ok(Message::Text(text))) => {
+                        // **枠を読んだ直後に測る。**後ろで測ると、他席の混雑が
+                        // 自分の締切を削る（Wave 3c で決めた契約）。
+                        let at_ms = handle.now_ms();
+                        let Ok(command) = serde_json::from_str::<Command>(&text) else {
+                            continue;
+                        };
+                        if handle.command(seat, command, at_ms).await.is_err() {
+                            break;
+                        }
+                    }
+                    // Close は明示的に抜ける。`detach` の時点がはっきりする。
+                    Some(Ok(Message::Close(_))) => break,
+                    Some(Ok(_)) => {}
+                    _ => break,
+                }
+            }
+        }
+    }
+
+    let _ = handle.detach(seat, connection).await;
+}
+
+/// 部屋の口と卓への接続を束ねる。静的配信は呼び手が足す。
 pub fn api(rooms: Rooms) -> Router {
     Router::new()
         .route("/api/rooms", post(create))
         .route("/api/rooms/{code}", get(look))
         .route("/api/rooms/{code}/join", post(join))
         .route("/api/rooms/{code}/start", post(start))
+        .route(
+            "/ws",
+            any(socket).layer(from_fn_with_state(rooms.clone(), require_seat)),
+        )
         .with_state(rooms)
 }
 
@@ -287,6 +396,49 @@ mod tests {
         let (_, body) = call(&app, with_token(get(&format!("/api/rooms/{code}")), &host)).await;
         assert_eq!(body["state"], "playing");
         assert_eq!(body["can_start"], false, "始まった卓をまた立てられる");
+    }
+
+    /// **トークンの無い接続は張らせない。**卓の id を知っていれば座れた
+    /// 頃は、席ごとの視界フィルタが意味を持たなかった。
+    #[tokio::test]
+    async fn a_socket_without_a_token_is_refused() {
+        let app = api(Rooms::new());
+        for uri in ["/ws", "/ws?token=dead", "/ws?table=default"] {
+            let (status, body) = call(&app, get(uri)).await;
+            assert_eq!(status, StatusCode::UNAUTHORIZED, "{uri} が通った");
+            assert_eq!(body["error"], "bad_token", "{uri}");
+        }
+    }
+
+    /// **待合のうちは繋がせない。**知らないトークンと同じ答えにするのは、
+    /// 合言葉の総当たりに手がかりを与えないため。
+    #[tokio::test]
+    async fn a_socket_before_the_start_is_refused_the_same_way() {
+        let app = api(Rooms::new());
+        let (_, token) = make_room(&app, "まさ").await;
+        let (status, body) = call(&app, get(&format!("/ws?token={token}"))).await;
+        assert_eq!(status, StatusCode::UNAUTHORIZED);
+        assert_eq!(body["error"], "bad_token");
+    }
+
+    /// **拒む試験だけでは、全部拒んでいても通ってしまう。**正しい
+    /// トークンが席の検査を抜けることを確かめる。
+    ///
+    /// 抜けた先は `WebSocketUpgrade` で、この要求は握手の形をしていない
+    /// ので 400 で断られる。**401 でないこと**が、席の検査を通った証拠。
+    #[tokio::test]
+    async fn a_real_token_gets_past_the_gate() {
+        let app = api(Rooms::new());
+        let (code, token) = make_room(&app, "まさ").await;
+        call(
+            &app,
+            with_token(post_json(&format!("/api/rooms/{code}/start"), ""), &token),
+        )
+        .await;
+
+        let (status, _) = call(&app, get(&format!("/ws?token={token}"))).await;
+        assert_ne!(status, StatusCode::UNAUTHORIZED, "正しい席が拒まれている");
+        assert_eq!(status, StatusCode::BAD_REQUEST, "握手の手前まで来ていない");
     }
 
     /// 名前は入口で整える。**画面の側の作法に頼らない。**
