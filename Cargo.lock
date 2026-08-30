@@ -645,6 +645,7 @@ name = "server"
 version = "0.1.0"
 dependencies = [
  "axum",
+ "http-body-util",
  "mahjong-ai",
  "mahjong-engine",
  "protocol",
@@ -652,6 +653,7 @@ dependencies = [
  "serde",
  "serde_json",
  "tokio",
+ "tower",
  "tower-http",
 ]
 

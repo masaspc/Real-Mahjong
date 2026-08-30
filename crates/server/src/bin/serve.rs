@@ -15,7 +15,7 @@ use axum::routing::any;
 use axum::Router;
 use protocol::command::Command;
 use protocol::seat::Seat;
-use server::rooms::{TableId, Tables};
+use server::rooms::{Rooms, TableId, Tables};
 use std::collections::HashMap;
 use tower_http::compression::CompressionLayer;
 use tower_http::services::ServeDir;
@@ -115,15 +115,18 @@ async fn main() {
     }
 
     let tables = Tables::new();
+    let rooms = Rooms::new();
     let app = Router::new()
         .route("/ws", any(ws_handler))
         .fallback_service(ServeDir::new(&dist))
+        .with_state(tables)
+        // 部屋の口。**卓の配信とは別の状態を持つ**ので、束ねてから混ぜる。
+        .merge(server::http::api(rooms))
         // **画面の束は 1MB 近い。**牌図34枚を文字列として抱えているのが
         // 効いている。中身は SVG とスクリプト、つまり圧縮のよく効く文字列
         // なので、そのまま送る理由が無い。**WebSocket には掛からない**
         // （アップグレード要求は本体を持たない）。
-        .layer(CompressionLayer::new())
-        .with_state(tables);
+        .layer(CompressionLayer::new());
 
     // **8080 は取り合いになる。**別のプロジェクトのサーバが先に握っていると
     // ここで落ちる。番号を渡せるようにし、塞がっていたら誰が使っているかを
