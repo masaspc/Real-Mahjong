@@ -1,7 +1,7 @@
 import { soundOf } from "./audio/catalog";
 import { Sfx } from "./audio/sfx";
 import { Presentation } from "./game/presentation";
-import { connect } from "./net/connection";
+import { connect, socketBase } from "./net/connection";
 import { motionsFor } from "./scene/motion";
 import { placementsFor } from "./scene/placement";
 import { TableScene } from "./scene/table";
@@ -110,7 +110,7 @@ const draw = (): void => {
 };
 
 const connection = connect({
-  base: `ws://${location.host}/ws`,
+  base: socketBase(location),
   token,
   // **表示ではなく受信に従う。**演出待ちのぶんを取り直すと二重に積む。
   lastSeq: () => presentation.receivedSeq,

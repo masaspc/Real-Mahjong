@@ -2,6 +2,19 @@ import type { ClientEventEnvelope } from "../protocol/ClientEventEnvelope";
 import type { Command } from "../protocol/Command";
 
 /**
+ * 卓へ繋ぐ口の在りか。
+ *
+ * **`ws://` を決め打ちにしない。**TLS を張った先で平文の WebSocket を
+ * 開こうとすると、ブラウザは混在内容として黙って遮断する。画面は出るのに
+ * 卓にだけ繋がらないという、最も原因に辿り着きにくい壊れ方をする。
+ * 頁がどちらで配られたかに従う。
+ */
+export function socketBase(location: { protocol: string; host: string }): string {
+  const scheme = location.protocol === "https:" ? "wss" : "ws";
+  return `${scheme}://${location.host}/ws`;
+}
+
+/**
  * 接続先の URL を組み立てる。
  *
  * **席の証明だけはクエリに置く。**他の口ではヘッダで送っているが、
