@@ -713,6 +713,119 @@ mod material_tests {
 }
 
 #[cfg(test)]
+mod two_humans_tests {
+    use super::*;
+    use protocol::client_event::{ClientEvent, ClientEventEnvelope};
+
+    async fn drain(
+        inbox: &mut tokio::sync::mpsc::Receiver<ClientEventEnvelope>,
+    ) -> Vec<ClientEvent> {
+        let mut seen = Vec::new();
+        while let Ok(envelope) = inbox.try_recv() {
+            seen.push(envelope.event);
+        }
+        seen
+    }
+
+    /// **2人が別の席で打てる。**第2段の目的そのもの。
+    #[tokio::test(start_paused = true)]
+    async fn two_people_sit_at_different_seats_of_one_table() {
+        let rooms = Rooms::new();
+        let (code, host) = rooms.create("まさ", 0);
+        let guest = rooms.join(&code, "たろう", 0).expect("入れる");
+        rooms.start(&host, 0).expect("始められる");
+
+        let (table, host_seat) = rooms.seat_of(&host).expect("席がある");
+        let (_, guest_seat) = rooms.seat_of(&guest).expect("席がある");
+        assert_ne!(host_seat, guest_seat, "2人が同じ席に着いている");
+
+        let (_, mut host_inbox) = table.attach(host_seat, None).await.expect("卓は生きている");
+        let (_, mut guest_inbox) = table
+            .attach(guest_seat, None)
+            .await
+            .expect("卓は生きている");
+
+        for (seat, events) in [
+            (host_seat, drain(&mut host_inbox).await),
+            (guest_seat, drain(&mut guest_inbox).await),
+        ] {
+            let you = events.iter().find_map(|event| match event {
+                ClientEvent::MatchStart { you, .. } => Some(*you),
+                _ => None,
+            });
+            assert_eq!(you, Some(seat), "自席の伝わり方が違う");
+        }
+    }
+
+    /// **他人の手牌が見えない。**視界フィルタの最後の砦。
+    ///
+    /// 席をトークンで縛る変更が効いていなくても、他の試験は全部通ったまま
+    /// この状態になりうる。だから1本を独立させて見張る。
+    #[tokio::test(start_paused = true)]
+    async fn neither_player_can_see_the_other_hand() {
+        let rooms = Rooms::new();
+        let (code, host) = rooms.create("まさ", 0);
+        let guest = rooms.join(&code, "たろう", 0).expect("入れる");
+        rooms.start(&host, 0).expect("始められる");
+
+        let (table, host_seat) = rooms.seat_of(&host).expect("席がある");
+        let (_, guest_seat) = rooms.seat_of(&guest).expect("席がある");
+        let (_, mut host_inbox) = table.attach(host_seat, None).await.expect("卓は生きている");
+        let (_, mut guest_inbox) = table
+            .attach(guest_seat, None)
+            .await
+            .expect("卓は生きている");
+
+        // 局が終わるまで打たせる。誰も打たないので締切でツモ切りされ、
+        // 鳴きも和了も流局も一通り通る。
+        tokio::time::sleep(std::time::Duration::from_millis(120_000)).await;
+        let host_events = drain(&mut host_inbox).await;
+        let guest_events = drain(&mut guest_inbox).await;
+
+        // **数えないと空回りに気づけない。**他席のツモが1件も含まれない
+        // 区間を調べて「漏れなし」と言っても、何も見ていないのと同じ。
+        let mut foreign_draws = 0;
+        for (seat, events) in [(host_seat, &host_events), (guest_seat, &guest_events)] {
+            for event in events.iter() {
+                match event {
+                    // 配牌は自席のぶんだけ。
+                    ClientEvent::Deal { your_hand, .. } => {
+                        assert_eq!(your_hand.len(), 13, "配牌の枚数が違う");
+                    }
+                    // **ツモ牌は自席のみ。**他席のツモに牌が乗っていたら漏れ。
+                    ClientEvent::Draw {
+                        seat: drawer, tile, ..
+                    } if *drawer != seat => {
+                        foreign_draws += 1;
+                        assert!(
+                            tile.is_none(),
+                            "席{drawer:?} のツモ牌が席{seat:?} に見えている"
+                        );
+                    }
+                    _ => {}
+                }
+            }
+        }
+
+        assert!(
+            foreign_draws >= 4,
+            "他席のツモを {foreign_draws} 件しか見ていない。試験が空回りしている"
+        );
+
+        // 配牌が同じなら、そもそも別の席として配られていない。
+        let hand_of = |events: &[ClientEvent]| {
+            events.iter().find_map(|event| match event {
+                ClientEvent::Deal { your_hand, .. } => Some(your_hand.clone()),
+                _ => None,
+            })
+        };
+        let mine = hand_of(&host_events).expect("配牌が届いていない");
+        let theirs = hand_of(&guest_events).expect("配牌が届いていない");
+        assert_ne!(mine, theirs, "2人に同じ手牌が配られている");
+    }
+}
+
+#[cfg(test)]
 mod connection_tests {
     use super::*;
     use protocol::client_event::ClientEvent;
