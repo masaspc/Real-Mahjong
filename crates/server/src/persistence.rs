@@ -227,6 +227,15 @@ impl Store {
         Ok(all)
     }
 
+    /// 書かれた塊の数。**局がいくつ残ったかを測るのに使う。**
+    pub fn chunk_count(&self, record_id: &str) -> rusqlite::Result<u32> {
+        self.conn.query_row(
+            "SELECT COUNT(*) FROM record_events WHERE record_id = ?1",
+            params![record_id],
+            |row| row.get(0),
+        )
+    }
+
     pub fn head(&self, record_id: &str) -> rusqlite::Result<Option<MatchHead>> {
         self.conn
             .query_row(
@@ -312,8 +321,13 @@ impl Scribe {
     /// 倉を抱えた書き手を立てる。
     pub fn spawn(store: Store) -> Scribe {
         let (tx, mut rx) = tokio::sync::mpsc::channel::<Errand>(ERRANDS);
-        tokio::task::spawn_blocking(move || {
-            while let Some(errand) = rx.blocking_recv() {
+        // **`spawn_blocking` は使わない。**止まったままの blocking task が
+        // あると、`start_paused` の試験で時計が進まなくなり、卓が1局も
+        // 終わらない。書き込みは 14KB ほどの INSERT を局に1回だけなので、
+        // 通常の task の中で済ませてよい。**避けたかったのは「卓が待つ」
+        // ことであって、「どこも待たない」ことではない。**
+        tokio::spawn(async move {
+            while let Some(errand) = rx.recv().await {
                 // **失敗しても次を続ける。**1局書けなかったからといって
                 // 以降の局まで落とす理由が無い。
                 let _ = match errand {
@@ -663,8 +677,17 @@ mod scribe_tests {
         scribe.finish("a", 900, Some(r#"{"placements":[1,2,3,4]}"#.to_owned()));
 
         let reader = Store::open(&path).expect("開ける");
-        assert_eq!(settle(&reader, "a", 10).await, 10, "投げたものが書かれていない");
-        let seqs: Vec<u32> = reader.events("a").expect("読める").iter().map(|e| e.seq).collect();
+        assert_eq!(
+            settle(&reader, "a", 10).await,
+            10,
+            "投げたものが書かれていない"
+        );
+        let seqs: Vec<u32> = reader
+            .events("a")
+            .expect("読める")
+            .iter()
+            .map(|e| e.seq)
+            .collect();
         assert_eq!(seqs, (0..10).collect::<Vec<_>>(), "順番が崩れている");
 
         let _ = std::fs::remove_file(&path);
@@ -680,7 +703,9 @@ mod scribe_tests {
         let path = std::env::temp_dir().join(format!("mj-hurt-{}.sqlite", std::process::id()));
         let _ = std::fs::remove_file(&path);
         let store = Store::open(&path).expect("開ける");
-        store.begin_match(&head("a", 100), &seats()).expect("書ける");
+        store
+            .begin_match(&head("a", 100), &seats())
+            .expect("書ける");
         // 書けない状態にする。
         store
             .conn
@@ -721,7 +746,10 @@ mod scribe_tests {
         while rx.try_recv().is_ok() {
             queued += 1;
         }
-        assert_eq!(queued, ERRANDS, "捨てずに溜め込んでいる（投げたのは {sent} 件）");
+        assert_eq!(
+            queued, ERRANDS,
+            "捨てずに溜め込んでいる（投げたのは {sent} 件）"
+        );
     }
 
     /// 空の局は投げない。

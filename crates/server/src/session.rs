@@ -5,6 +5,7 @@ mod time;
 
 pub use time::{Clock, SeedSource};
 
+use crate::persistence::Scribe;
 use crate::table::{Occupant, Table};
 use mahjong_engine::match_flow::Reject;
 use mahjong_engine::wall::Seed;
@@ -1143,11 +1144,67 @@ pub fn spawn<S: Seeds>(
     occupants: [Occupant; 4],
     seeds: S,
 ) -> (TableHandle, tokio::task::JoinHandle<()>) {
+    spawn_recorded(rules, occupants, seeds, None)
+}
+
+/// 牌譜を残す卓の宛先。
+///
+/// **見出しの行は部屋が作る。**席と名前と証明を知っているのは部屋の方で、
+/// 卓は自分が誰に配っているかを知らない。卓が受け持つのは出来事だけ。
+#[derive(Clone)]
+pub struct Recording {
+    pub scribe: Scribe,
+    pub record_id: String,
+}
+
+/// 牌譜を残しながら卓を立ち上げる。
+pub fn spawn_recorded<S: Seeds>(
+    rules: Ruleset,
+    occupants: [Occupant; 4],
+    seeds: S,
+    recording: Option<Recording>,
+) -> (TableHandle, tokio::task::JoinHandle<()>) {
     let (tx, rx) = mpsc::channel(INBOX);
     let clock = Arc::new(Clock::start());
     let table = Table::new(rules, occupants, clock.now_ms());
-    let actor = tokio::spawn(run(table, seeds, Arc::clone(&clock), rx));
+    let actor = tokio::spawn(run(table, seeds, Arc::clone(&clock), rx, recording));
     (TableHandle { tx, clock }, actor)
+}
+
+/// まだ書き出していないぶんを書き手へ渡す。
+///
+/// **何度呼んでも増えない。**局の切れ目を待つあいだ毎周回呼ばれるので、
+/// 渡し終えた分をまた渡さないことが要る。
+fn hand_over(recording: &Option<Recording>, table: &Table, written_upto: &mut usize) {
+    let Some(recording) = recording else { return };
+    let pending = table.log_from(*written_upto);
+    if pending.is_empty() {
+        return;
+    }
+    recording
+        .scribe
+        .append(&recording.record_id, pending.to_vec());
+    *written_upto = table.log_len();
+}
+
+/// 終局の点数と順位。牌譜の見出しに入れる。
+fn match_result_json(table: &Table) -> Option<String> {
+    table
+        .log_from(0)
+        .iter()
+        .rev()
+        .find_map(|envelope| match &envelope.event {
+            protocol::event::Event::MatchEnd {
+                final_scores,
+                placements,
+            } => serde_json::json!({
+                "final_scores": final_scores,
+                "placements": placements,
+            })
+            .to_string()
+            .into(),
+            _ => None,
+        })
 }
 
 struct Sinks {
@@ -1313,6 +1370,7 @@ async fn run<S: Seeds>(
     mut seeds: S,
     clock: Arc<Clock>,
     mut rx: mpsc::Receiver<TableMsg>,
+    recording: Option<Recording>,
 ) {
     let mut sinks = Sinks::new();
     let mut ticker = tokio::time::interval(Duration::from_millis(POLL_MS));
@@ -1321,12 +1379,20 @@ async fn run<S: Seeds>(
     let mut resume_at: Option<u64> = None;
     // 1局でも打ったか。**開始の1局目に間を置かない。**
     let mut played_any = false;
+    // 牌譜へ渡し終えたところまで。`table.log` への添字。
+    let mut written_upto = 0usize;
 
     loop {
         let now = clock.now_ms();
         sinks.flush(&table, now);
         if table.is_over() {
             break;
+        }
+        if table.needs_seed() {
+            // **局の切れ目で渡す。**落ちても失うのは進行中の1局だけになる
+            // （仕様 8.3）。間を置いているあいだ毎周回呼ばれるが、渡し終えた
+            // 分は増えない。
+            hand_over(&recording, &table, &mut written_upto);
         }
         if table.needs_seed() && !interlude(now, played_any, &mut resume_at) {
             // **シードを受け取ってから局を始める。**Wave 3d はこの `await` の
@@ -1377,6 +1443,14 @@ async fn run<S: Seeds>(
 
     let now = clock.now_ms();
     sinks.flush(&table, now);
+
+    // 終局。**残りを渡してから閉じる。**最後の局が丸ごと落ちる。
+    hand_over(&recording, &table, &mut written_upto);
+    if let Some(recording) = &recording {
+        recording
+            .scribe
+            .finish(&recording.record_id, now, match_result_json(&table));
+    }
 }
 
 #[cfg(test)]
@@ -1678,5 +1752,170 @@ mod tests {
             elapsed <= 25_850,
             "ポーリング1周を超えて遅れた: {elapsed}ms"
         );
+    }
+}
+
+#[cfg(test)]
+mod recording_tests {
+    use super::tests::{one_human_three_cpus, rules};
+    use super::*;
+    use crate::persistence::{MatchHead, SeatRow, Store};
+    use protocol::client_event::ClientEvent;
+    use protocol::seat::Seat;
+
+    fn head(id: &str) -> MatchHead {
+        MatchHead {
+            id: id.to_owned(),
+            rules_json: "{}".to_owned(),
+            started_ms: 0,
+            ended_ms: None,
+            players: vec!["p0".into(), "c1".into(), "c2".into(), "c3".into()],
+            result_json: None,
+        }
+    }
+
+    fn seats() -> Vec<SeatRow> {
+        (0..4)
+            .map(|seat| SeatRow {
+                seat,
+                name: format!("p{seat}"),
+                is_cpu: seat != 0,
+                token_hash: (seat == 0).then(|| crate::persistence::hash_token("t")),
+                player_key: (seat == 0).then(|| "key".to_owned()),
+            })
+            .collect()
+    }
+
+    /// 牌譜の宛先を渡さなくても卓は動く。**既存の道を塞がない。**
+    #[tokio::test(start_paused = true)]
+    async fn a_table_without_a_scribe_still_plays() {
+        let (handle, _actor) = spawn(
+            rules(),
+            one_human_three_cpus(),
+            SeedSource::from_master([5; 32]),
+        );
+        let (_, mut inbox) = handle
+            .attach(Seat::new(0), None)
+            .await
+            .expect("卓は生きている");
+        let mut seen = 0;
+        while inbox.try_recv().is_ok() {
+            seen += 1;
+        }
+        assert!(seen > 0, "牌譜なしで卓が動いていない");
+    }
+
+    /// **局の切れ目で塊が増える。**終局まで待たない。
+    #[tokio::test(start_paused = true)]
+    async fn chunks_grow_as_rounds_finish() {
+        let path = std::env::temp_dir().join(format!("mj-round-{}.sqlite", std::process::id()));
+        let _ = std::fs::remove_file(&path);
+        let store = Store::open(&path).expect("開ける");
+        store.begin_match(&head("r"), &seats()).expect("書ける");
+        let scribe = Scribe::spawn(store);
+
+        let (handle, _actor) = spawn_recorded(
+            rules(),
+            std::array::from_fn(|i| Occupant::Cpu(protocol::event::PlayerId(format!("c{i}")))),
+            SeedSource::from_master([5; 32]),
+            Some(Recording {
+                scribe,
+                record_id: "r".to_owned(),
+            }),
+        );
+        let (_, mut watcher) = handle
+            .attach(Seat::new(0), None)
+            .await
+            .expect("卓は生きている");
+
+        // 3局ぶん進める。半荘は10局前後なので、途中で測れる。
+        let mut rounds = 0;
+        while let Some(envelope) = watcher.recv().await {
+            if matches!(envelope.event, ClientEvent::RoundEnd { .. }) {
+                rounds += 1;
+                if rounds == 3 {
+                    break;
+                }
+            }
+        }
+        // 書き手は別 task なので、届くまで待つ。
+        let reader = Store::open(&path).expect("開ける");
+        let mut chunks = 0;
+        for _ in 0..400 {
+            chunks = reader.chunk_count("r").expect("数えられる");
+            if chunks >= 3 {
+                break;
+            }
+            // **`yield_now` で書き手に順番を回す。**時計を止めた試験では
+            // `sleep` は即座に飛ぶので、待っても書き手は動かない。
+            tokio::task::yield_now().await;
+        }
+        assert!(chunks >= 3, "3局終わったのに塊が {chunks} しかない");
+
+        let _ = std::fs::remove_file(&path);
+    }
+
+    /// 終局まで打つと、見出しに終わりと順位が入る。
+    #[tokio::test(start_paused = true)]
+    async fn finishing_writes_the_result() {
+        let path = std::env::temp_dir().join(format!("mj-end-{}.sqlite", std::process::id()));
+        let _ = std::fs::remove_file(&path);
+        let store = Store::open(&path).expect("開ける");
+        store.begin_match(&head("e"), &seats()).expect("書ける");
+        let scribe = Scribe::spawn(store);
+
+        let (handle, _actor) = spawn_recorded(
+            rules(),
+            std::array::from_fn(|i| Occupant::Cpu(protocol::event::PlayerId(format!("c{i}")))),
+            SeedSource::from_master([9; 32]),
+            Some(Recording {
+                scribe,
+                record_id: "e".to_owned(),
+            }),
+        );
+        let (_, mut watcher) = handle
+            .attach(Seat::new(0), None)
+            .await
+            .expect("卓は生きている");
+        while watcher.recv().await.is_some() {}
+
+        let reader = Store::open(&path).expect("開ける");
+        let mut done = None;
+        for _ in 0..400 {
+            let head = reader.head("e").expect("引ける").expect("ある");
+            if head.ended_ms.is_some() {
+                done = head.result_json;
+                break;
+            }
+            tokio::task::yield_now().await;
+        }
+        let result = done.expect("終局が書かれていない");
+        assert!(result.contains("placements"), "{result}");
+        assert!(result.contains("final_scores"), "{result}");
+
+        let _ = std::fs::remove_file(&path);
+    }
+
+    /// **渡し終えた分をまた渡さない。**間を置いているあいだ毎周回呼ばれる。
+    #[tokio::test]
+    async fn handing_over_twice_adds_nothing() {
+        let table = Table::new(rules(), one_human_three_cpus(), 0);
+        let mut upto = 0usize;
+        hand_over(&None, &table, &mut upto);
+        assert_eq!(upto, 0, "宛先が無いのに進んでいる");
+
+        // 宛先がある場合は、1度目で全部渡り、2度目は空になる。
+        let store = Store::open_in_memory().expect("開ける");
+        store.begin_match(&head("x"), &seats()).expect("書ける");
+        let recording = Some(Recording {
+            scribe: Scribe::spawn(store),
+            record_id: "x".to_owned(),
+        });
+        let mut upto = 0usize;
+        hand_over(&recording, &table, &mut upto);
+        let after_first = upto;
+        assert!(after_first > 0, "1度目で何も渡っていない");
+        hand_over(&recording, &table, &mut upto);
+        assert_eq!(upto, after_first, "2度目でまた渡している");
     }
 }

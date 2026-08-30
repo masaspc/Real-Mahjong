@@ -131,6 +131,18 @@ impl Table {
     }
 
     /// その席へまだ届けていない分を取り出す。
+    /// まだ書き出していないぶんの真実。**牌譜はここから取る。**
+    ///
+    /// 射影しない。保存するのはサーバの真実であって、席ごとの見え方では
+    /// ない。読み出すときに `project()` を通す。
+    pub fn log_from(&self, from: usize) -> &[EventEnvelope] {
+        &self.log[from.min(self.log.len())..]
+    }
+
+    pub fn log_len(&self) -> usize {
+        self.log.len()
+    }
+
     pub fn drain_for(&mut self, seat: Seat) -> Vec<ClientEventEnvelope> {
         std::mem::take(&mut self.pending[seat.index()])
             .into_iter()
