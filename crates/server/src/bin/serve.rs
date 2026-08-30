@@ -5,15 +5,18 @@
 //! PORT=8081 cargo run -p server --bin serve
 //! ```
 //!
-//! 外から届かせるときは待ち受けるアドレスを渡す。
+//! 外から届かせるときは待ち受けるアドレスを渡す。牌譜の置き場所も渡せる。
 //!
 //! ```text
 //! BIND=0.0.0.0 PORT=8080 cargo run -p server --bin serve
+//! RECORDS=:memory: cargo run -p server --bin serve   # 残さない
 //! ```
 //!
 //! 部屋と卓の口は `server::http`、台帳は `server::rooms` にある。
 
 use axum::Router;
+use server::http::{AppState, Records};
+use server::persistence::{Scribe, Store};
 use server::rooms::Rooms;
 use tower_http::compression::CompressionLayer;
 use tower_http::services::ServeDir;
@@ -45,6 +48,50 @@ fn listen_at(bind: Option<String>, port: Option<String>) -> (String, u16) {
     (host, port)
 }
 
+/// 牌譜を置く既定の場所。
+///
+/// **カレントディレクトリを基準にしない。**静的ファイルと同じ理由で、
+/// どこから起動しても同じ場所を指す必要がある。倉が起動場所ごとに
+/// 分かれると、昨日の牌譜が消えたように見える。
+fn default_records_path() -> std::path::PathBuf {
+    std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../data/records.sqlite")
+}
+
+/// 牌譜の置き場所を決める。
+fn records_path(given: Option<String>) -> String {
+    given
+        .map(|value| value.trim().to_owned())
+        .filter(|value| !value.is_empty())
+        .unwrap_or_else(|| default_records_path().to_string_lossy().into_owned())
+}
+
+fn open_store(path: &str) -> rusqlite::Result<Store> {
+    if path == ":memory:" {
+        return Store::open_in_memory();
+    }
+    if let Some(parent) = std::path::Path::new(path).parent() {
+        let _ = std::fs::create_dir_all(parent);
+    }
+    Store::open(path)
+}
+
+/// 牌譜の倉を開く。
+///
+/// **開けなくても起動する。**牌譜は対局の前提ではない。置き場所が
+/// 書けない状況で対局そのものを止める理由が無いので、言うだけ言って進む。
+fn open_records(path: &str) -> Option<Store> {
+    match open_store(path) {
+        Ok(store) => {
+            println!("牌譜: {path}");
+            Some(store)
+        }
+        Err(error) => {
+            eprintln!("牌譜を開けません（対局は続けられます）: {path}: {error}");
+            None
+        }
+    }
+}
+
 #[tokio::main]
 async fn main() {
     let dist = dist_dir();
@@ -56,8 +103,21 @@ async fn main() {
         std::process::exit(1);
     }
 
+    // 牌譜の置き場所。**既定はリポジトリの下の data/**。
+    let records_path = records_path(std::env::var("RECORDS").ok());
+    let records = open_records(&records_path);
+    let rooms = Rooms::with_scribe(
+        records
+            .as_ref()
+            .and_then(|_| open_store(&records_path).ok())
+            .map(Scribe::spawn),
+    );
+
     let app = Router::new()
-        .merge(server::http::api(Rooms::new()))
+        .merge(server::http::api_with(AppState {
+            rooms,
+            records: records.map(Records::new),
+        }))
         .fallback_service(ServeDir::new(&dist))
         // **画面の束は 1MB 近い。**牌図34枚を文字列として抱えているのが
         // 効いている。中身は SVG とスクリプト、つまり圧縮のよく効く文字列
@@ -82,6 +142,29 @@ async fn main() {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn the_records_go_next_to_the_repository_by_default() {
+        // **起動場所で分かれてはいけない。**分かれると、昨日の牌譜が
+        // 消えたように見える。
+        let path = records_path(None);
+        assert!(path.ends_with("records.sqlite"), "{path}");
+        assert!(path.contains("data"), "{path}");
+        assert_eq!(
+            records_path(Some("  ".to_owned())),
+            path,
+            "空白は既定に倒す"
+        );
+    }
+
+    #[test]
+    fn a_given_place_wins() {
+        assert_eq!(
+            records_path(Some("/tmp/x.sqlite".to_owned())),
+            "/tmp/x.sqlite"
+        );
+        assert_eq!(records_path(Some(":memory:".to_owned())), ":memory:");
+    }
 
     #[test]
     fn the_default_is_closed_to_the_outside() {

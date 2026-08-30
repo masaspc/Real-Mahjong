@@ -33,6 +33,22 @@ BIND=0.0.0.0 PORT=8080 cargo run -p server --bin serve
 TLS を張った先に置く場合、画面は頁の配られ方に従って `wss://` を選ぶので、
 こちら側で切り替えるものは無い。
 
+## 牌譜を見る
+
+打った半荘は自動で残る。ロビーの **牌譜を見る** から選ぶと、対局中と同じ
+演出で見直せる。速さは1/2/4倍、局の頭へ飛べる。
+
+- **見えるのは自分の席の視界だけ。**他家の手牌は牌譜にも入っていない
+- 一覧はこの端末に紐づく。**`localStorage` を消すと辿れなくなる**
+  （アカウントを入れるまでの繋ぎ）
+
+倉は SQLite ファイル1つ。既定は `data/records.sqlite`。
+
+```bash
+RECORDS=/var/lib/mahjong/records.sqlite cargo run -p server --bin serve
+RECORDS=:memory: cargo run -p server --bin serve   # 残さない
+```
+
 ## 卓の見た目だけを見る
 
 `http://127.0.0.1:8080/preview.html` は**動かない盤面**である。副露5種・リーチ
