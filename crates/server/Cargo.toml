@@ -10,6 +10,9 @@ mahjong-engine = { path = "../mahjong-engine" }
 mahjong-ai = { path = "../mahjong-ai" }
 tokio = { version = "1.53.1", features = ["rt", "rt-multi-thread", "macros", "net", "sync", "time"] }
 rand = "0.9.5"
+rusqlite = { version = "0.32.1", features = ["bundled"] }
+flate2 = "1.0.35"
+sha2 = "0.10.9"
 axum = { version = "0.8.9", features = ["ws"] }
 tower-http = { version = "0.7.0", features = ["fs", "compression-gzip", "compression-br"] }
 serde = { version = "1.0.228", features = ["derive"] }
