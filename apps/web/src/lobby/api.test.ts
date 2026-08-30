@@ -50,6 +50,22 @@ describe("部屋の口", () => {
     expect(headers["X-Mahjong-Token"]).toBe("9f3c");
   });
 
+  it("browser の鍵もヘッダで送る", async () => {
+    // **部屋を作る時点で渡さないと間に合わない。**卓が立つときに牌譜の
+    // 見出しへ入る。
+    const calls = serve(200, { code: "K7QM2X", token: "9f3c" });
+    await createRoom("まさ", "player-1");
+    const headers = calls[0]?.init.headers as Record<string, string>;
+    expect(headers["X-Mahjong-Player"]).toBe("player-1");
+  });
+
+  it("鍵を渡さなくても部屋は作れる", async () => {
+    const calls = serve(200, { code: "K7QM2X", token: "9f3c" });
+    await createRoom("まさ");
+    const headers = calls[0]?.init.headers as Record<string, string>;
+    expect(headers["X-Mahjong-Player"]).toBeUndefined();
+  });
+
   it("合言葉は大文字に揃えてから送る", async () => {
     // 口で伝えられた合言葉を小文字で打つ人がいる。**入口で揃える。**
     const calls = serve(200, { token: "1a8e" });

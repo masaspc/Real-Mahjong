@@ -5,6 +5,7 @@
  * `mountLobby` が持つ。試験は前者を DOM の上で直接叩く。
  */
 
+import { playerKey } from "../records/api";
 import type { Lobby, MemberView } from "./api";
 import {
   clearSeat,
@@ -197,7 +198,7 @@ export function mountLobby(root: HTMLElement): Promise<string> {
 
     const begin = async (name: string, alone: boolean): Promise<void> => {
       try {
-        const made = await createRoom(name);
+        const made = await createRoom(name, playerKey());
         saveSeat(made.code, made.token);
         if (alone) {
           await startRoom(made.code, made.token);
@@ -217,7 +218,7 @@ export function mountLobby(root: HTMLElement): Promise<string> {
         return;
       }
       try {
-        const joined = await joinRoom(wanted, name);
+        const joined = await joinRoom(wanted, name, playerKey());
         saveSeat(wanted, joined.token);
         watch(wanted, joined.token);
       } catch (error) {

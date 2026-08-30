@@ -10,6 +10,9 @@
 /** 席の証明を運ぶヘッダ。サーバの `TOKEN_HEADER` と対になる。 */
 const TOKEN_HEADER = "X-Mahjong-Token";
 
+/** この browser を指す鍵を運ぶヘッダ。牌譜の一覧に要る。 */
+const PLAYER_HEADER = "X-Mahjong-Player";
+
 const TOKEN_KEY = "real-mahjong.token";
 const CODE_KEY = "real-mahjong.code";
 
@@ -47,11 +50,17 @@ export class RoomError extends Error {
 
 async function ask<T>(
   path: string,
-  init: { method?: string; token?: string | null; body?: unknown } = {},
+  init: {
+    method?: string;
+    token?: string | null;
+    player?: string | null;
+    body?: unknown;
+  } = {},
 ): Promise<T> {
   const headers: Record<string, string> = {};
   if (init.body !== undefined) headers["Content-Type"] = "application/json";
   if (init.token) headers[TOKEN_HEADER] = init.token;
+  if (init.player) headers[PLAYER_HEADER] = init.player;
 
   const response = await fetch(path, {
     method: init.method ?? "GET",
@@ -70,14 +79,24 @@ async function ask<T>(
   return payload as T;
 }
 
-export function createRoom(name: string): Promise<{ code: string; token: string }> {
-  return ask("/api/rooms", { method: "POST", body: { name } });
+export function createRoom(
+  name: string,
+  player?: string,
+): Promise<{ code: string; token: string }> {
+  // **部屋を作る時点で鍵を渡す。**卓が立つときに牌譜の見出しへ入るので、
+  // 後から渡しても間に合わない。
+  return ask("/api/rooms", { method: "POST", player, body: { name } });
 }
 
-export function joinRoom(code: string, name: string): Promise<{ token: string }> {
+export function joinRoom(
+  code: string,
+  name: string,
+  player?: string,
+): Promise<{ token: string }> {
   // 合言葉は小文字で入れられても通す。**字を揃えるのは入口の仕事。**
   return ask(`/api/rooms/${encodeURIComponent(code.toUpperCase())}/join`, {
     method: "POST",
+    player,
     body: { name },
   });
 }
