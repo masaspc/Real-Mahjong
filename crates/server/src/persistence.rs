@@ -282,13 +282,81 @@ fn read_head(row: &rusqlite::Row<'_>) -> rusqlite::Result<MatchHead> {
     })
 }
 
+/// 倉へ投げる仕事。
+enum Errand {
+    Begin(Box<MatchHead>, Vec<SeatRow>),
+    Append(String, Vec<EventEnvelope>),
+    Finish(String, u64, Option<String>),
+}
+
+/// 牌譜の書き手。
+///
+/// **書き込みで卓を止めない。**SQLite への書き込みは同期的なので、卓の
+/// Actor から直接叩くと局の切れ目で4人全員が待つ。投げて戻る形にする。
+///
+/// **落としても対局は続く。**牌譜が欠けることはあっても、打っている
+/// 最中が固まるよりはよい。倉が壊れていても投げ側は素通りする。
+#[derive(Clone)]
+pub struct Scribe {
+    tx: tokio::sync::mpsc::Sender<Errand>,
+}
+
+/// 溜められる仕事の数。
+///
+/// **溢れたら捨てる。**待つと卓が止まり、無制限にすると記憶が膨らむ。
+/// 局に1回しか投げないので、ここが詰まるのは倉が壊れているときだけ
+/// である。そのときに守るべきは対局の方であって牌譜ではない。
+const ERRANDS: usize = 64;
+
+impl Scribe {
+    /// 倉を抱えた書き手を立てる。
+    pub fn spawn(store: Store) -> Scribe {
+        let (tx, mut rx) = tokio::sync::mpsc::channel::<Errand>(ERRANDS);
+        tokio::task::spawn_blocking(move || {
+            while let Some(errand) = rx.blocking_recv() {
+                // **失敗しても次を続ける。**1局書けなかったからといって
+                // 以降の局まで落とす理由が無い。
+                let _ = match errand {
+                    Errand::Begin(head, seats) => store.begin_match(&head, &seats),
+                    Errand::Append(id, events) => store.append(&id, &events),
+                    Errand::Finish(id, ended_ms, result) => {
+                        store.finish(&id, ended_ms, result.as_deref())
+                    }
+                };
+            }
+        });
+        Scribe { tx }
+    }
+
+    fn send(&self, errand: Errand) {
+        // 溢れても待たない。**捨てたことを騒がない**——牌譜が欠けるだけで、
+        // 対局は続く。
+        let _ = self.tx.try_send(errand);
+    }
+
+    pub fn begin(&self, head: MatchHead, seats: Vec<SeatRow>) {
+        self.send(Errand::Begin(Box::new(head), seats));
+    }
+
+    pub fn append(&self, record_id: &str, events: Vec<EventEnvelope>) {
+        if events.is_empty() {
+            return;
+        }
+        self.send(Errand::Append(record_id.to_owned(), events));
+    }
+
+    pub fn finish(&self, record_id: &str, ended_ms: u64, result_json: Option<String>) {
+        self.send(Errand::Finish(record_id.to_owned(), ended_ms, result_json));
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use protocol::event::{Event, PlayerId};
     use protocol::seat::Seat;
 
-    fn head(id: &str, started_ms: u64) -> MatchHead {
+    pub(super) fn head(id: &str, started_ms: u64) -> MatchHead {
         MatchHead {
             id: id.to_owned(),
             rules_json: r#"{"length":"Hanchan"}"#.to_owned(),
@@ -299,7 +367,7 @@ mod tests {
         }
     }
 
-    fn seats() -> Vec<SeatRow> {
+    pub(super) fn seats() -> Vec<SeatRow> {
         vec![
             SeatRow {
                 seat: 0,
@@ -332,7 +400,7 @@ mod tests {
         ]
     }
 
-    fn chunk(from: u32, count: u32) -> Vec<EventEnvelope> {
+    pub(super) fn chunk(from: u32, count: u32) -> Vec<EventEnvelope> {
         (from..from + count)
             .map(|seq| EventEnvelope {
                 seq,
@@ -562,5 +630,106 @@ mod tests {
         let packed = gzip(&text).expect("縮む");
         assert!(packed.len() * 10 < text.len(), "圧縮が効いていない");
         assert_eq!(gunzip(&packed).expect("戻る"), text);
+    }
+}
+
+#[cfg(test)]
+mod scribe_tests {
+    use super::tests::{chunk, head, seats};
+    use super::*;
+
+    /// 書かれるまで待つ。**投げるのは非同期なので、すぐには見えない。**
+    async fn settle(store: &Store, id: &str, want: usize) -> usize {
+        for _ in 0..200 {
+            let count = store.events(id).map(|all| all.len()).unwrap_or(0);
+            if count >= want {
+                return count;
+            }
+            tokio::task::yield_now().await;
+            tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+        }
+        store.events(id).map(|all| all.len()).unwrap_or(0)
+    }
+
+    #[tokio::test]
+    async fn the_errands_are_written_in_order() {
+        let path = std::env::temp_dir().join(format!("mj-scribe-{}.sqlite", std::process::id()));
+        let _ = std::fs::remove_file(&path);
+
+        let scribe = Scribe::spawn(Store::open(&path).expect("開ける"));
+        scribe.begin(head("a", 100), seats());
+        scribe.append("a", chunk(0, 5));
+        scribe.append("a", chunk(5, 5));
+        scribe.finish("a", 900, Some(r#"{"placements":[1,2,3,4]}"#.to_owned()));
+
+        let reader = Store::open(&path).expect("開ける");
+        assert_eq!(settle(&reader, "a", 10).await, 10, "投げたものが書かれていない");
+        let seqs: Vec<u32> = reader.events("a").expect("読める").iter().map(|e| e.seq).collect();
+        assert_eq!(seqs, (0..10).collect::<Vec<_>>(), "順番が崩れている");
+
+        let _ = std::fs::remove_file(&path);
+    }
+
+    /// **書き込みが失敗しても、書き手は死なない。**
+    ///
+    /// 1局書けなかったからといって、以降の局まで落とす理由が無い。
+    /// 表を落とした倉へ投げてから、表を戻して次を投げ、それが書かれる
+    /// ことを確かめる。
+    #[tokio::test]
+    async fn a_failing_write_does_not_kill_the_scribe() {
+        let path = std::env::temp_dir().join(format!("mj-hurt-{}.sqlite", std::process::id()));
+        let _ = std::fs::remove_file(&path);
+        let store = Store::open(&path).expect("開ける");
+        store.begin_match(&head("a", 100), &seats()).expect("書ける");
+        // 書けない状態にする。
+        store
+            .conn
+            .execute_batch("DROP TABLE record_events;")
+            .expect("落とせる");
+
+        let scribe = Scribe::spawn(store);
+        scribe.append("a", chunk(0, 5)); // 失敗する
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+
+        // 表を戻す。書き手が生きていれば、次の局は書ける。
+        let repair = Store::open(&path).expect("開ける");
+        scribe.append("a", chunk(5, 5));
+
+        assert_eq!(
+            settle(&repair, "a", 5).await,
+            5,
+            "1局書けなかっただけで書き手が死んでいる"
+        );
+        let _ = std::fs::remove_file(&path);
+    }
+
+    /// **溢れたら捨てる。待たない。**待つと卓が止まり、無制限にすると
+    /// 記憶が膨らむ。局に1回しか投げないので、ここが詰まるのは倉が
+    /// 壊れているときだけである。そのときに守るべきは対局の方である。
+    #[tokio::test]
+    async fn an_overflowing_queue_drops_instead_of_waiting() {
+        let (tx, mut rx) = tokio::sync::mpsc::channel::<Errand>(ERRANDS);
+        // 誰も受け取らないまま、器の4倍を投げる。
+        let scribe = Scribe { tx };
+        let sent = ERRANDS * 4;
+        for index in 0..sent {
+            scribe.append("a", chunk(index as u32, 1));
+        }
+
+        // 溜まっているのは器のぶんだけ。**残りは捨てられている。**
+        let mut queued = 0;
+        while rx.try_recv().is_ok() {
+            queued += 1;
+        }
+        assert_eq!(queued, ERRANDS, "捨てずに溜め込んでいる（投げたのは {sent} 件）");
+    }
+
+    /// 空の局は投げない。
+    #[tokio::test]
+    async fn an_empty_round_is_not_sent() {
+        let (tx, mut rx) = tokio::sync::mpsc::channel::<Errand>(4);
+        let scribe = Scribe { tx };
+        scribe.append("a", Vec::new());
+        assert!(rx.try_recv().is_err(), "空の局が投げられている");
     }
 }
