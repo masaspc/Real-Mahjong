@@ -1,9 +1,14 @@
 import type { ClientEventEnvelope } from "../protocol/ClientEventEnvelope";
 import type { Command } from "../protocol/Command";
 
-/** 接続先の URL を組み立てる。 */
-export function buildUrl(base: string, table: string, lastSeq: number | null): string {
-  const params = new URLSearchParams({ table });
+/**
+ * 接続先の URL を組み立てる。
+ *
+ * **席の証明だけはクエリに置く。**他の口ではヘッダで送っているが、
+ * ブラウザは WebSocket の要求にヘッダを付けられないので道が無い。
+ */
+export function buildUrl(base: string, token: string, lastSeq: number | null): string {
+  const params = new URLSearchParams({ token });
   // **0 を「無い」と取り違えると、対局の頭から送り直される。**
   if (lastSeq !== null) {
     params.set("last_seq", String(lastSeq));
@@ -18,7 +23,8 @@ export type Connection = {
 
 export type Options = {
   base: string;
-  table: string;
+  /** 席の証明。どの席に着くかはサーバが決める。 */
+  token: string;
   /** いま届いている連番。再接続のときに渡す。 */
   lastSeq(): number | null;
   onEvent(envelope: ClientEventEnvelope): void;
@@ -40,7 +46,7 @@ export function connect(options: Options): Connection {
     if (closed) {
       return;
     }
-    socket = new WebSocket(buildUrl(options.base, options.table, options.lastSeq()));
+    socket = new WebSocket(buildUrl(options.base, options.token, options.lastSeq()));
     socket.onopen = () => {
       retry = 0;
       options.onStatus("接続");

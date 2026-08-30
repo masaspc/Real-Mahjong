@@ -1,0 +1,161 @@
+/* ロビーと待合。**対局の盤面とは別の画面**なので、色だけを揃える。 */
+
+.lobby {
+  position: fixed;
+  inset: 0;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 14px;
+  padding: 24px;
+  background: #14321f;
+  color: #f2ede1;
+  font-family: system-ui, -apple-system, "Hiragino Sans", "Noto Sans JP", sans-serif;
+  overflow-y: auto;
+}
+
+.lobby-title {
+  margin: 0 0 8px;
+  font-size: 32px;
+  font-weight: 600;
+  letter-spacing: 0.3em;
+}
+
+.lobby-lead {
+  margin: 0;
+  font-size: 13px;
+  opacity: 0.8;
+}
+
+/* 合言葉。**口で伝えるものなので大きく、字間を空ける。** */
+.lobby-code {
+  padding: 10px 20px;
+  border: 1px solid #4a7a5c;
+  border-radius: 10px;
+  background: #0e2416;
+  color: #f7e7a8;
+  font-family: ui-monospace, "SF Mono", Menlo, monospace;
+  font-size: 40px;
+  letter-spacing: 0.22em;
+  text-indent: 0.22em;
+  cursor: pointer;
+}
+
+.lobby-code:hover {
+  border-color: #f7e7a8;
+}
+
+.lobby-name,
+.lobby-code-input {
+  width: 260px;
+  padding: 10px 12px;
+  border: 1px solid #3d6b4d;
+  border-radius: 8px;
+  background: #0e2416;
+  color: inherit;
+  font-size: 16px;
+}
+
+.lobby-code-input {
+  width: 150px;
+  font-family: ui-monospace, "SF Mono", Menlo, monospace;
+  letter-spacing: 0.15em;
+  text-transform: uppercase;
+}
+
+.lobby-join {
+  display: flex;
+  gap: 8px;
+  align-items: center;
+}
+
+.lobby-button {
+  min-width: 160px;
+  padding: 11px 18px;
+  border: 1px solid #4a7a5c;
+  border-radius: 8px;
+  background: #1c4429;
+  color: inherit;
+  font-size: 15px;
+  cursor: pointer;
+}
+
+.lobby-button:hover {
+  background: #245634;
+}
+
+.lobby-button.primary {
+  border-color: #f7e7a8;
+  background: #2c6b3e;
+  font-weight: 600;
+}
+
+.lobby-button.quiet {
+  min-width: 0;
+  border-color: transparent;
+  background: transparent;
+  font-size: 13px;
+  opacity: 0.65;
+}
+
+.slots {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  width: 300px;
+  margin: 6px 0;
+  padding: 0;
+  list-style: none;
+}
+
+.slot {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 10px 14px;
+  border: 1px solid #3d6b4d;
+  border-radius: 8px;
+  background: #0e2416;
+  font-size: 15px;
+}
+
+/* 空席は薄く。**隠さない**——あと何人入れるかが分かるようにする。 */
+.slot.empty {
+  border-style: dashed;
+  color: #8fae9b;
+  font-size: 13px;
+}
+
+.slot-name {
+  flex: 1;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.slot-mark {
+  padding: 2px 7px;
+  border-radius: 999px;
+  background: #2c6b3e;
+  font-size: 11px;
+}
+
+.slot-mark.away {
+  background: #5a4520;
+  color: #e8d29a;
+}
+
+.lobby-wait {
+  margin: 0;
+  font-size: 13px;
+  opacity: 0.75;
+}
+
+.lobby-notice {
+  margin: 0;
+  max-width: 320px;
+  color: #f0b8a8;
+  font-size: 13px;
+  text-align: center;
+}

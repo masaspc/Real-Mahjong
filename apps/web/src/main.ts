@@ -14,16 +14,9 @@ import {
   updateTimer,
 } from "./ui/board";
 import "./ui/board.css";
-
-function tableId(): string {
-  const key = "real-mahjong.table";
-  let id = localStorage.getItem(key);
-  if (!id) {
-    id = Math.random().toString(36).slice(2, 10);
-    localStorage.setItem(key, id);
-  }
-  return id;
-}
+import { clearSeat } from "./lobby/api";
+import { mountLobby } from "./lobby/screen";
+import "./lobby/lobby.css";
 
 /**
  * 演出を切って遊ぶ口。
@@ -35,6 +28,10 @@ const effectsOff = new URLSearchParams(location.search).get("effects") === "off"
 
 const root = document.querySelector<HTMLElement>("#app");
 if (!root) throw new Error("#app が無い");
+
+// **卓が立つまでは盤面を組み立てない。**3D の卓と牌の用意は重く、
+// 待合を見ている間に走らせる意味が無い。
+const token = await mountLobby(root);
 
 const tableRoot = document.createElement("div");
 tableRoot.id = "table";
@@ -114,7 +111,7 @@ const draw = (): void => {
 
 const connection = connect({
   base: `ws://${location.host}/ws`,
-  table: tableId(),
+  token,
   // **表示ではなく受信に従う。**演出待ちのぶんを取り直すと二重に積む。
   lastSeq: () => presentation.receivedSeq,
   onEvent(envelope) {
@@ -182,6 +179,6 @@ document.addEventListener("visibilitychange", () => {
 draw();
 
 (globalThis as unknown as { newTable: () => void }).newTable = () => {
-  localStorage.removeItem("real-mahjong.table");
+  clearSeat();
   location.reload();
 };

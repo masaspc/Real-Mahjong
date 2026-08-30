@@ -126,6 +126,17 @@ const { sessionId } = await browser.send("Target.attachToTarget", {
   flatten: true,
 });
 
+// **撮る前に画面を押せるようにする。**待合のように「状態を作らないと
+// 出てこない画面」は、URL を開くだけでは辿り着けない。環境変数
+// `SHOOT_EVAL` に JavaScript を渡すと、読み込み直後に一度だけ走らせる。
+if (process.env.SHOOT_EVAL) {
+  await browser.send(
+    "Runtime.evaluate",
+    { expression: process.env.SHOOT_EVAL, awaitPromise: true },
+    sessionId,
+  );
+}
+
 await sleep(Number(waitMs));
 
 const clip = clipOf(clipArg);
