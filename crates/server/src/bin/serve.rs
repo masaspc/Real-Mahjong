@@ -15,7 +15,7 @@ use axum::routing::any;
 use axum::Router;
 use protocol::command::Command;
 use protocol::seat::Seat;
-use server::matchmaking::{TableId, Tables};
+use server::rooms::{TableId, Tables};
 use std::collections::HashMap;
 use tower_http::compression::CompressionLayer;
 use tower_http::services::ServeDir;
