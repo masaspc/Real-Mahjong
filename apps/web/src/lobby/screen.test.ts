@@ -18,10 +18,28 @@ beforeEach(() => {
 });
 
 describe("ロビー", () => {
-  it("入口は3つ", () => {
-    renderLobby(root, { alone: () => {}, create: () => {}, join: () => {} });
+  it("入口は4つ", () => {
+    // 牌譜を見る口をロビーに足した（2026-08-31）。**意図した変更である。**
+    renderLobby(root, {
+      alone: () => {},
+      create: () => {},
+      join: () => {},
+      records: () => {},
+    });
     const labels = [...root.querySelectorAll("button")].map((b) => b.textContent);
-    expect(labels).toEqual(["ひとりで打つ", "部屋を作る", "部屋に入る"]);
+    expect(labels).toEqual(["ひとりで打つ", "部屋を作る", "部屋に入る", "牌譜を見る"]);
+  });
+
+  it("牌譜を見るは、牌譜の画面へ渡す", () => {
+    let asked = 0;
+    renderLobby(root, {
+      alone: () => {},
+      create: () => {},
+      join: () => {},
+      records: () => (asked += 1),
+    });
+    [...root.querySelectorAll("button")][3]?.dispatchEvent(new Event("click"));
+    expect(asked).toBe(1);
   });
 
   it("名前と合言葉をそのまま渡す", () => {
@@ -30,6 +48,7 @@ describe("ロビー", () => {
       alone: () => {},
       create: () => {},
       join: (code, name) => seen.push(code, name),
+      records: () => {},
     });
     const inputs = root.querySelectorAll("input");
     (inputs[0] as HTMLInputElement).value = "まさ";
@@ -148,7 +167,17 @@ describe("ロビーの配線", () => {
     });
     vi.stubGlobal("fetch", (url: string, init: RequestInit = {}) => {
       calls.push({ url, init });
-      const body = url === "/api/rooms" ? { code: "K7QM2X", token: "tok" } : { token: "tok" };
+      const body = url.startsWith("/api/rooms/") && init.method === undefined
+        ? {
+            code: "K7QM2X",
+            state: "waiting",
+            you: { name: "まさ", host: true, present: true },
+            members: [{ name: "まさ", host: true, present: true }],
+            can_start: true,
+          }
+        : url === "/api/rooms"
+          ? { code: "K7QM2X", token: "tok" }
+          : { token: "tok" };
       return Promise.resolve({
         ok: true,
         status: 200,

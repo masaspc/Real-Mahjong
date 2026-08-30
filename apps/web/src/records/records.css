@@ -1,0 +1,173 @@
+/* 牌譜の一覧と再生の操作盤。 */
+
+.records {
+  position: fixed;
+  inset: 0;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 12px;
+  padding: 32px 24px;
+  background: #14321f;
+  color: #f2ede1;
+  font-family: system-ui, -apple-system, "Hiragino Sans", "Noto Sans JP", sans-serif;
+  overflow-y: auto;
+}
+
+.records-title {
+  margin: 0 0 4px;
+  font-size: 26px;
+  letter-spacing: 0.2em;
+}
+
+.records-empty {
+  max-width: 380px;
+  color: #a8c0b0;
+  font-size: 13px;
+  line-height: 1.7;
+  text-align: center;
+}
+
+.record-list {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  width: min(460px, 100%);
+  padding: 0;
+  list-style: none;
+}
+
+.record-open {
+  display: grid;
+  grid-template-columns: 92px 1fr auto;
+  gap: 10px;
+  align-items: center;
+  width: 100%;
+  padding: 12px 14px;
+  border: 1px solid #3d6b4d;
+  border-radius: 8px;
+  background: #0e2416;
+  color: inherit;
+  font-size: 14px;
+  text-align: left;
+  cursor: pointer;
+}
+
+.record-open:hover {
+  border-color: #f7e7a8;
+}
+
+.record-when {
+  color: #a8c0b0;
+  font-family: ui-monospace, "SF Mono", Menlo, monospace;
+  font-size: 12px;
+}
+
+.record-players {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.record-outcome {
+  color: #8fae9b;
+  font-size: 12px;
+}
+
+.records-button {
+  padding: 9px 16px;
+  border: 1px solid #4a7a5c;
+  border-radius: 8px;
+  background: #1c4429;
+  color: inherit;
+  font-size: 14px;
+  cursor: pointer;
+}
+
+.records-button.quiet {
+  border-color: transparent;
+  background: transparent;
+  opacity: 0.7;
+}
+
+.records-notice {
+  color: #f0b8a8;
+  font-size: 13px;
+}
+
+/* 再生中は盤面を操作盤のぶん下げる。
+   **重ねたままにすると局名とドラ表示が隠れる。**牌譜で真っ先に見たいのが
+   そこなので、被せてはいけない。 */
+/* **`.board` に余白を足しても効かない。**中の見出しも点棒の行も絶対配置
+   なので、親の padding では動かない。`#ui` ごと下げる。下端は 0 のままな
+   ので、手番の一行は元の位置に残る。 */
+body.replaying #ui {
+  top: 52px;
+}
+
+/* 再生の操作盤。盤面の上に重ねる。 */
+.replay-bar {
+  position: fixed;
+  top: 0;
+  left: 0;
+  right: 0;
+  z-index: 20;
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  align-items: center;
+  padding: 8px 12px;
+  background: rgba(10, 28, 17, 0.92);
+  color: #f2ede1;
+  font-family: system-ui, -apple-system, "Hiragino Sans", "Noto Sans JP", sans-serif;
+  font-size: 13px;
+}
+
+.replay-button,
+.replay-round,
+.replay-rate {
+  padding: 5px 10px;
+  border: 1px solid #4a7a5c;
+  border-radius: 6px;
+  background: #17381f;
+  color: inherit;
+  font-size: 12px;
+  cursor: pointer;
+}
+
+.replay-rounds {
+  display: flex;
+  gap: 4px;
+  overflow-x: auto;
+}
+
+/* 通り過ぎた局は薄く。**いまどこにいるかが分かる。** */
+.replay-round.passed {
+  color: #8fae9b;
+  border-color: #2c5238;
+}
+
+.replay-rate.active {
+  border-color: #f7e7a8;
+  background: #2c6b3e;
+  font-weight: 600;
+}
+
+.replay-progress {
+  flex: 1;
+  min-width: 80px;
+  height: 4px;
+  border-radius: 999px;
+  background: #23472f;
+  overflow: hidden;
+}
+
+.replay-progress-fill {
+  height: 100%;
+  background: #f7e7a8;
+}
+
+.replay-who {
+  color: #a8c0b0;
+  font-size: 12px;
+}

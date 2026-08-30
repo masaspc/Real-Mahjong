@@ -86,6 +86,16 @@ describe("牌譜の中身", () => {
     expect(headers["X-Mahjong-Token"]).toBe("tok");
   });
 
+  it("席の証明が無くても鍵で開ける", async () => {
+    // **証明は部屋ごとに配られる。**対局が終わって画面を閉じれば
+    // 手元に残らない。一覧に出ているのに開けない、では困る。
+    const calls = serve(200, { id: "abc", you: 1, players: [], started_ms: 1 });
+    await readRecord("abc");
+    const headers = calls[0]?.init.headers as Record<string, string>;
+    expect(headers["X-Mahjong-Player"]).toHaveLength(32);
+    expect(headers["X-Mahjong-Token"]).toBeUndefined();
+  });
+
   it("本文は JSONL として読む", async () => {
     const lines = [
       '{"seq":0,"event":{"type":"dora_reveal","indicator":3}}',

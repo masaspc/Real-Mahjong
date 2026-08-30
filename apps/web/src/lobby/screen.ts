@@ -67,6 +67,7 @@ export type LobbyHandlers = {
   alone(name: string): void;
   create(name: string): void;
   join(code: string, name: string): void;
+  records(): void;
 };
 
 /** ロビー。入口は3つだけ。 */
@@ -97,6 +98,10 @@ export function renderLobby(
   join.addEventListener("click", () => handlers.join(code.value, name.value));
   row.append(code, join);
   panel.append(row);
+
+  const records = node("button", "lobby-button quiet", "牌譜を見る");
+  records.addEventListener("click", () => handlers.records());
+  panel.append(records);
 
   if (notice) {
     panel.append(node("p", "lobby-notice", notice));
@@ -138,8 +143,11 @@ export function renderWaiting(
   panel.append(code);
 
   const list = node("ul", "slots");
+  // **形が違う応答でも枠は出す。**ここで落ちると1秒ごとの見張りが止まり、
+  // 待合が固まったまま何も言わない画面になる。
+  const members = lobby.members ?? [];
   for (let index = 0; index < SEATS; index += 1) {
-    list.append(memberSlot(lobby.members[index]));
+    list.append(memberSlot(members[index]));
   }
   panel.append(list);
 
@@ -161,13 +169,18 @@ export function renderWaiting(
   root.replaceChildren(panel);
 }
 
+/** ロビーを抜けた先。 */
+export type Entry =
+  | { kind: "play"; token: string }
+  | { kind: "records" };
+
 /**
  * ロビーを動かし、卓が立ったら席の証明を返す。
  *
  * **覚えている席から始める。**再読み込みで対局へ戻れることが、
  * 遊びやすさに直結する。
  */
-export function mountLobby(root: HTMLElement): Promise<string> {
+export function mountLobby(root: HTMLElement): Promise<Entry> {
   return new Promise((resolve) => {
     let timer: ReturnType<typeof setTimeout> | null = null;
 
@@ -191,6 +204,10 @@ export function mountLobby(root: HTMLElement): Promise<string> {
           join: (code, name) => {
             void enter(code, name);
           },
+          records: () => {
+            stop();
+            resolve({ kind: "records" });
+          },
         },
         notice,
       );
@@ -202,7 +219,7 @@ export function mountLobby(root: HTMLElement): Promise<string> {
         saveSeat(made.code, made.token);
         if (alone) {
           await startRoom(made.code, made.token);
-          resolve(made.token);
+          resolve({ kind: "play", token: made.token });
           return;
         }
         watch(made.code, made.token);
@@ -240,10 +257,11 @@ export function mountLobby(root: HTMLElement): Promise<string> {
         }
         if (lobby.state === "playing") {
           stop();
-          resolve(token);
+          resolve({ kind: "play", token });
           return;
         }
-        renderWaiting(
+        try {
+          renderWaiting(
           root,
           lobby,
           {
@@ -258,7 +276,11 @@ export function mountLobby(root: HTMLElement): Promise<string> {
             },
           },
           notice,
-        );
+          );
+        } catch (error) {
+          // **描けなくても見張りは続ける。**次の応答で直るかもしれない。
+          console.error("待合を描けなかった", error);
+        }
         notice = undefined;
         timer = setTimeout(() => void tick(), POLL_MS);
       };

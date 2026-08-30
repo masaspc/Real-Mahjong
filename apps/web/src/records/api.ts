@@ -61,12 +61,21 @@ export async function listRecords(): Promise<RecordCard[]> {
   return body.records ?? [];
 }
 
-/** 1対局の見出し。自分がどの席だったかを含む。 */
-export async function readRecord(id: string, token: string): Promise<RecordHead> {
-  const response = await ask(`/api/records/${encodeURIComponent(id)}`, {
-    [TOKEN_HEADER]: token,
-  });
+/**
+ * 1対局の見出し。自分がどの席だったかを含む。
+ *
+ * **鍵だけで開ける。**席の証明は部屋ごとに配られるので、対局が終わって
+ * 画面を閉じれば手元に残らない。一覧に出ているのに開けない、では困る。
+ */
+export async function readRecord(id: string, token?: string): Promise<RecordHead> {
+  const response = await ask(`/api/records/${encodeURIComponent(id)}`, credentials(token));
   return (await response.json()) as RecordHead;
+}
+
+function credentials(token?: string): Record<string, string> {
+  const headers: Record<string, string> = { [PLAYER_HEADER]: playerKey() };
+  if (token) headers[TOKEN_HEADER] = token;
+  return headers;
 }
 
 /**
@@ -76,11 +85,12 @@ export async function readRecord(id: string, token: string): Promise<RecordHead>
  */
 export async function recordEvents(
   id: string,
-  token: string,
+  token?: string,
 ): Promise<ClientEventEnvelope[]> {
-  const response = await ask(`/api/records/${encodeURIComponent(id)}/events`, {
-    [TOKEN_HEADER]: token,
-  });
+  const response = await ask(
+    `/api/records/${encodeURIComponent(id)}/events`,
+    credentials(token),
+  );
   const text = await response.text();
   const events: ClientEventEnvelope[] = [];
   for (const line of text.split("\n")) {
