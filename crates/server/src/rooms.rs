@@ -9,7 +9,8 @@
 //! 座れない。**ここが緩いと、席ごとの視界フィルタが意味を失う——どの席と
 //! して繋ぐかを自称できるなら、他人の手牌を要求できてしまう。
 
-use crate::session::{spawn, Clock, SeedSource, TableHandle};
+use crate::persistence::{hash_token, MatchHead, Scribe, SeatRow};
+use crate::session::{spawn_recorded, Clock, Recording, SeedSource, TableHandle};
 use crate::table::Occupant;
 use protocol::event::PlayerId;
 use protocol::ruleset::{MatchLength, Ruleset};
@@ -109,6 +110,12 @@ struct Member {
     host: bool,
     /// 最後に待合を覗いた時刻。「接続中」の判定と部屋主の生死に使う。
     seen_ms: u64,
+    /// その人の browser を指す鍵。牌譜の一覧を引くのに使う。
+    ///
+    /// **アカウントが入るまでの繋ぎである。**トークンは部屋ごとなので
+    /// 1本＝1対局にしかならず、「自分の打った半荘」を並べられない。
+    /// 送ってこない画面もありうるので `Option` にしてある。
+    player_key: Option<String>,
 }
 
 /// 部屋の居場所。
@@ -119,6 +126,8 @@ enum RoomState {
     Playing {
         handle: TableHandle,
         seats: Vec<Seat>,
+        /// 牌譜の対局 id。残していなければ `None`。
+        record_id: Option<String>,
     },
 }
 
@@ -205,6 +214,17 @@ pub struct Lobby {
     pub can_start: bool,
 }
 
+/// 壁時計のミリ秒。**牌譜の見出しに入れる時刻だけはこれを使う。**
+///
+/// 卓の中で使う `Clock` は卓が生まれてからの経過であって、いつ打ったかを
+/// 表さない。一覧を新しい順に並べるには実時刻が要る。
+fn wall_clock_ms() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_millis() as u64)
+        .unwrap_or(0)
+}
+
 /// 席の配り方を決める。
 ///
 /// **開始を押した瞬間に混ぜる。**入室順に配ると部屋主が必ず起家になる。
@@ -229,6 +249,8 @@ struct Ledger {
 pub struct Rooms {
     inner: Arc<Mutex<Ledger>>,
     clock: Arc<Clock>,
+    /// 牌譜の書き手。無ければ牌譜を残さない。
+    scribe: Option<Scribe>,
 }
 
 impl Default for Rooms {
@@ -239,12 +261,18 @@ impl Default for Rooms {
 
 impl Rooms {
     pub fn new() -> Self {
+        Rooms::with_scribe(None)
+    }
+
+    /// 牌譜を残す台帳。
+    pub fn with_scribe(scribe: Option<Scribe>) -> Self {
         Rooms {
             inner: Arc::new(Mutex::new(Ledger {
                 rooms: HashMap::new(),
                 by_token: HashMap::new(),
             })),
             clock: Arc::new(Clock::start()),
+            scribe,
         }
     }
 
@@ -262,7 +290,7 @@ impl Rooms {
     }
 
     /// 部屋を作る。作った人が部屋主になり、そのまま入室する。
-    pub fn create(&self, name: &str, now_ms: u64) -> (Code, Token) {
+    pub fn create(&self, name: &str, player_key: Option<&str>, now_ms: u64) -> (Code, Token) {
         let mut ledger = self.inner.lock().expect("毒されていない");
         // 10億通りに対して衝突はまず起きないが、起きたときに他人の部屋を
         // 上書きするわけにはいかないので引き直す。
@@ -281,6 +309,7 @@ impl Rooms {
                     token: token.clone(),
                     host: true,
                     seen_ms: now_ms,
+                    player_key: player_key.map(str::to_owned),
                 }],
                 state: RoomState::Waiting,
                 touched_ms: now_ms,
@@ -291,7 +320,13 @@ impl Rooms {
     }
 
     /// 部屋に入る。
-    pub fn join(&self, code: &Code, name: &str, now_ms: u64) -> Result<Token, JoinError> {
+    pub fn join(
+        &self,
+        code: &Code,
+        name: &str,
+        player_key: Option<&str>,
+        now_ms: u64,
+    ) -> Result<Token, JoinError> {
         let mut ledger = self.inner.lock().expect("毒されていない");
         let room = ledger.rooms.get_mut(code).ok_or(JoinError::NoSuchRoom)?;
         // **満室より先に開始済みを見る。**始まった部屋に来た人へ「満室」と
@@ -308,6 +343,7 @@ impl Rooms {
             token: token.clone(),
             host: false,
             seen_ms: now_ms,
+            player_key: player_key.map(str::to_owned),
         });
         room.touched_ms = now_ms;
         ledger.by_token.insert(token.clone(), code.clone());
@@ -371,12 +407,62 @@ impl Rooms {
             })
         });
 
-        let (handle, _actor) = spawn(
-            Ruleset::kin_no_ma(MatchLength::Hanchan),
-            occupants,
-            SeedSource::from_os(),
-        );
-        room.state = RoomState::Playing { handle, seats };
+        let rules = Ruleset::kin_no_ma(MatchLength::Hanchan);
+
+        // 牌譜の見出しを先に立てる。**席と名前と証明を知っているのは
+        // ここだけである。**卓は自分が誰に配っているかを知らない。
+        let recording = self.scribe.as_ref().map(|scribe| {
+            let record_id = new_token().0;
+            let players: Vec<String> = occupants
+                .iter()
+                .map(|occupant| occupant.player_id().0)
+                .collect();
+            let rows: Vec<SeatRow> = occupants
+                .iter()
+                .enumerate()
+                .map(|(index, occupant)| {
+                    // その席に座っている人を探す。CPU なら見つからない。
+                    let who = room
+                        .members
+                        .iter()
+                        .zip(seats.iter())
+                        .find(|(_, seat)| seat.index() == index)
+                        .map(|(member, _)| member);
+                    SeatRow {
+                        seat: index as u8,
+                        name: occupant.player_id().0,
+                        is_cpu: who.is_none(),
+                        // **CPU の席には証明も鍵も入れない。**入れると
+                        // CPU の席として牌譜を引ける道ができる。
+                        token_hash: who.map(|member| hash_token(&member.token.0)),
+                        player_key: who.and_then(|member| member.player_key.clone()),
+                    }
+                })
+                .collect();
+            scribe.begin(
+                MatchHead {
+                    id: record_id.clone(),
+                    rules_json: serde_json::to_string(&rules).unwrap_or_else(|_| "{}".to_owned()),
+                    started_ms: wall_clock_ms(),
+                    ended_ms: None,
+                    players,
+                    result_json: None,
+                },
+                rows,
+            );
+            Recording {
+                scribe: scribe.clone(),
+                record_id,
+            }
+        });
+
+        let (handle, _actor) =
+            spawn_recorded(rules, occupants, SeedSource::from_os(), recording.clone());
+        room.state = RoomState::Playing {
+            handle,
+            seats,
+            record_id: recording.map(|r| r.record_id),
+        };
         room.touched_ms = now_ms;
         Ok(())
     }
@@ -391,7 +477,25 @@ impl Rooms {
         let index = room.find(token)?;
         match &room.state {
             RoomState::Waiting => None,
-            RoomState::Playing { handle, seats } => Some((handle.clone(), *seats.get(index)?)),
+            RoomState::Playing { handle, seats, .. } => Some((handle.clone(), *seats.get(index)?)),
+        }
+    }
+
+    /// トークンの指す牌譜と席。
+    ///
+    /// **卓が生きているあいだの引き当てにしか使えない。**部屋が掃かれた
+    /// 後は、倉に残った `record_seats` の側から引く。だからこそ証明の
+    /// ハッシュを倉にも入れてある。
+    pub fn record_of(&self, token: &Token) -> Option<(String, Seat)> {
+        let ledger = self.inner.lock().expect("毒されていない");
+        let code = ledger.by_token.get(token)?;
+        let room = ledger.rooms.get(code)?;
+        let index = room.find(token)?;
+        match &room.state {
+            RoomState::Waiting => None,
+            RoomState::Playing {
+                seats, record_id, ..
+            } => Some((record_id.clone()?, *seats.get(index)?)),
         }
     }
 
@@ -428,7 +532,7 @@ mod ledger_tests {
     #[tokio::test(start_paused = true)]
     async fn the_one_who_makes_the_room_is_the_host() {
         let rooms = Rooms::new();
-        let (_, token) = rooms.create("まさ", 0);
+        let (_, token) = rooms.create("まさ", None, 0);
         let lobby = rooms.look(&token, 0).expect("覗ける");
         assert!(lobby.you.host, "作った人が部屋主になっていない");
         assert_eq!(lobby.you.name, "まさ");
@@ -439,8 +543,8 @@ mod ledger_tests {
     #[tokio::test(start_paused = true)]
     async fn a_guest_is_not_the_host() {
         let rooms = Rooms::new();
-        let (code, _) = rooms.create("まさ", 0);
-        let guest = rooms.join(&code, "たろう", 0).expect("入れる");
+        let (code, _) = rooms.create("まさ", None, 0);
+        let guest = rooms.join(&code, "たろう", None, 0).expect("入れる");
         let lobby = rooms.look(&guest, 0).expect("覗ける");
         assert!(!lobby.you.host);
         assert_eq!(lobby.members.iter().filter(|m| m.host).count(), 1);
@@ -449,18 +553,18 @@ mod ledger_tests {
     #[tokio::test(start_paused = true)]
     async fn a_fifth_person_is_turned_away() {
         let rooms = Rooms::new();
-        let (code, _) = rooms.create("1", 0);
+        let (code, _) = rooms.create("1", None, 0);
         for name in ["2", "3", "4"] {
-            rooms.join(&code, name, 0).expect("4人までは入れる");
+            rooms.join(&code, name, None, 0).expect("4人までは入れる");
         }
-        assert_eq!(rooms.join(&code, "5", 0), Err(JoinError::Full));
+        assert_eq!(rooms.join(&code, "5", None, 0), Err(JoinError::Full));
     }
 
     #[tokio::test(start_paused = true)]
     async fn an_unknown_code_is_not_a_room() {
         let rooms = Rooms::new();
         assert_eq!(
-            rooms.join(&Code("ZZZZZZ".to_owned()), "まさ", 0),
+            rooms.join(&Code("ZZZZZZ".to_owned()), "まさ", None, 0),
             Err(JoinError::NoSuchRoom)
         );
     }
@@ -469,10 +573,10 @@ mod ledger_tests {
     #[tokio::test(start_paused = true)]
     async fn joining_a_started_room_says_so() {
         let rooms = Rooms::new();
-        let (code, host) = rooms.create("まさ", 0);
+        let (code, host) = rooms.create("まさ", None, 0);
         rooms.start(&host, 0).expect("部屋主は始められる");
         assert_eq!(
-            rooms.join(&code, "たろう", 0),
+            rooms.join(&code, "たろう", None, 0),
             Err(JoinError::AlreadyStarted)
         );
     }
@@ -480,7 +584,7 @@ mod ledger_tests {
     #[tokio::test(start_paused = true)]
     async fn an_unknown_token_sees_nothing() {
         let rooms = Rooms::new();
-        rooms.create("まさ", 0);
+        rooms.create("まさ", None, 0);
         assert!(rooms.look(&Token("dead".to_owned()), 0).is_none());
         assert!(rooms.seat_of(&Token("dead".to_owned())).is_none());
         assert_eq!(
@@ -493,8 +597,8 @@ mod ledger_tests {
     #[tokio::test(start_paused = true)]
     async fn presence_follows_who_is_looking() {
         let rooms = Rooms::new();
-        let (code, host) = rooms.create("まさ", 0);
-        let guest = rooms.join(&code, "たろう", 0).expect("入れる");
+        let (code, host) = rooms.create("まさ", None, 0);
+        let guest = rooms.join(&code, "たろう", None, 0).expect("入れる");
 
         // 11秒後、部屋主だけが覗く。
         let lobby = rooms.look(&host, 11_000).expect("覗ける");
@@ -511,8 +615,8 @@ mod ledger_tests {
     #[tokio::test(start_paused = true)]
     async fn a_guest_may_start_once_the_host_is_long_gone() {
         let rooms = Rooms::new();
-        let (code, host) = rooms.create("まさ", 0);
-        let guest = rooms.join(&code, "たろう", 0).expect("入れる");
+        let (code, host) = rooms.create("まさ", None, 0);
+        let guest = rooms.join(&code, "たろう", None, 0).expect("入れる");
         rooms.look(&host, 0).expect("覗ける");
 
         // 29秒ではまだ押せない。
@@ -529,7 +633,7 @@ mod ledger_tests {
     #[tokio::test(start_paused = true)]
     async fn a_second_start_is_refused() {
         let rooms = Rooms::new();
-        let (_, host) = rooms.create("まさ", 0);
+        let (_, host) = rooms.create("まさ", None, 0);
         rooms.start(&host, 0).expect("1度目は通る");
         assert_eq!(rooms.start(&host, 0), Err(StartError::AlreadyStarted));
     }
@@ -565,7 +669,7 @@ mod ledger_tests {
     #[tokio::test(start_paused = true)]
     async fn a_waiting_room_has_no_seat_yet() {
         let rooms = Rooms::new();
-        let (_, host) = rooms.create("まさ", 0);
+        let (_, host) = rooms.create("まさ", None, 0);
         assert!(rooms.seat_of(&host).is_none(), "卓が立つ前に席が返っている");
     }
 
@@ -573,8 +677,8 @@ mod ledger_tests {
     #[tokio::test(start_paused = true)]
     async fn the_empty_seats_are_filled_by_cpus() {
         let rooms = Rooms::new();
-        let (code, host) = rooms.create("まさ", 0);
-        let guest = rooms.join(&code, "たろう", 0).expect("入れる");
+        let (code, host) = rooms.create("まさ", None, 0);
+        let guest = rooms.join(&code, "たろう", None, 0).expect("入れる");
         rooms.start(&host, 0).expect("始められる");
 
         let (handle, seat) = rooms.seat_of(&host).expect("席がある");
@@ -603,8 +707,8 @@ mod ledger_tests {
     #[tokio::test(start_paused = true)]
     async fn an_abandoned_room_is_swept_with_its_tokens() {
         let rooms = Rooms::new();
-        let (code, host) = rooms.create("まさ", 0);
-        rooms.join(&code, "たろう", 0).expect("入れる");
+        let (code, host) = rooms.create("まさ", None, 0);
+        rooms.join(&code, "たろう", None, 0).expect("入れる");
 
         assert_eq!(rooms.sweep(IDLE_MS - 1), 0, "29分で捨てられている");
         assert_eq!(rooms.sweep(IDLE_MS), 1, "30分経っても残っている");
@@ -625,7 +729,7 @@ mod ledger_tests {
     #[tokio::test(start_paused = true)]
     async fn looking_keeps_a_room_alive() {
         let rooms = Rooms::new();
-        let (_, host) = rooms.create("まさ", 0);
+        let (_, host) = rooms.create("まさ", None, 0);
         rooms.look(&host, IDLE_MS - 1).expect("覗ける");
         assert_eq!(rooms.sweep(IDLE_MS), 0, "覗いたばかりの部屋が捨てられた");
     }
@@ -633,7 +737,7 @@ mod ledger_tests {
     #[tokio::test(start_paused = true)]
     async fn a_finished_room_is_swept_away() {
         let rooms = Rooms::new();
-        let (_, host) = rooms.create("ひとり", 0);
+        let (_, host) = rooms.create("ひとり", None, 0);
         rooms.start(&host, 0).expect("始められる");
         let (handle, seat) = rooms.seat_of(&host).expect("席がある");
         let (_, mut watcher) = handle.attach(seat, None).await.expect("卓は生きている");
@@ -731,8 +835,8 @@ mod two_humans_tests {
     #[tokio::test(start_paused = true)]
     async fn two_people_sit_at_different_seats_of_one_table() {
         let rooms = Rooms::new();
-        let (code, host) = rooms.create("まさ", 0);
-        let guest = rooms.join(&code, "たろう", 0).expect("入れる");
+        let (code, host) = rooms.create("まさ", None, 0);
+        let guest = rooms.join(&code, "たろう", None, 0).expect("入れる");
         rooms.start(&host, 0).expect("始められる");
 
         let (table, host_seat) = rooms.seat_of(&host).expect("席がある");
@@ -764,8 +868,8 @@ mod two_humans_tests {
     #[tokio::test(start_paused = true)]
     async fn neither_player_can_see_the_other_hand() {
         let rooms = Rooms::new();
-        let (code, host) = rooms.create("まさ", 0);
-        let guest = rooms.join(&code, "たろう", 0).expect("入れる");
+        let (code, host) = rooms.create("まさ", None, 0);
+        let guest = rooms.join(&code, "たろう", None, 0).expect("入れる");
         rooms.start(&host, 0).expect("始められる");
 
         let (table, host_seat) = rooms.seat_of(&host).expect("席がある");
@@ -839,7 +943,7 @@ mod connection_tests {
         use tokio::sync::mpsc::error::TryRecvError;
 
         let rooms = Rooms::new();
-        let (_, token) = rooms.create("まさ", 0);
+        let (_, token) = rooms.create("まさ", None, 0);
         rooms.start(&token, 0).expect("始められる");
         let (handle, seat) = rooms.seat_of(&token).expect("席がある");
 
@@ -865,7 +969,7 @@ mod connection_tests {
     #[tokio::test(start_paused = true)]
     async fn the_same_token_returns_to_the_same_seat() {
         let rooms = Rooms::new();
-        let (_, token) = rooms.create("まさ", 0);
+        let (_, token) = rooms.create("まさ", None, 0);
         rooms.start(&token, 0).expect("始められる");
 
         let (handle, seat) = rooms.seat_of(&token).expect("席がある");
@@ -913,5 +1017,156 @@ mod connection_tests {
             }
         }
         assert!(restarted, "last_seq なしなら最初から送り直すはず");
+    }
+}
+
+#[cfg(test)]
+mod recording_tests {
+    use super::*;
+    use crate::persistence::Store;
+
+    /// 倉と、それを抱えた台帳。試験のあいだだけ生きるファイルを使う。
+    fn ledger_with_store(tag: &str) -> (Rooms, std::path::PathBuf) {
+        let path =
+            std::env::temp_dir().join(format!("mj-rooms-{tag}-{}.sqlite", std::process::id()));
+        let _ = std::fs::remove_file(&path);
+        let store = Store::open(&path).expect("開ける");
+        (Rooms::with_scribe(Some(Scribe::spawn(store))), path)
+    }
+
+    async fn wait_for_head(path: &std::path::Path) -> Option<MatchHead> {
+        let reader = Store::open(path).expect("開ける");
+        for _ in 0..500 {
+            if let Ok(mut all) = reader.list("key-a", 10) {
+                if let Some(head) = all.pop() {
+                    return Some(head);
+                }
+            }
+            tokio::task::yield_now().await;
+        }
+        None
+    }
+
+    /// 卓が立つと見出しの行ができる。
+    #[tokio::test(start_paused = true)]
+    async fn starting_writes_the_head() {
+        let (rooms, path) = ledger_with_store("head");
+        let (_, host) = rooms.create("まさ", Some("key-a"), 0);
+        rooms.start(&host, 0).expect("始められる");
+
+        let head = wait_for_head(&path).await.expect("見出しが書かれていない");
+        assert_eq!(head.players.len(), 4);
+        assert!(
+            head.players.contains(&"まさ".to_owned()),
+            "{:?}",
+            head.players
+        );
+        assert!(head.rules_json.contains("Hanchan"), "{}", head.rules_json);
+        assert!(head.started_ms > 0, "実時刻が入っていない");
+        assert_eq!(head.ended_ms, None);
+
+        let _ = std::fs::remove_file(&path);
+    }
+
+    /// **人の席にだけ証明と鍵が入り、CPU の席には入らない。**
+    #[tokio::test(start_paused = true)]
+    async fn only_people_carry_credentials() {
+        let (rooms, path) = ledger_with_store("cred");
+        let (code, host) = rooms.create("まさ", Some("key-a"), 0);
+        let guest = rooms
+            .join(&code, "たろう", Some("key-b"), 0)
+            .expect("入れる");
+        rooms.start(&host, 0).expect("始められる");
+
+        let head = wait_for_head(&path).await.expect("見出しが書かれていない");
+        let reader = Store::open(&path).expect("開ける");
+        let rows = reader.seats(&head.id).expect("引ける");
+        assert_eq!(rows.len(), 4);
+
+        let people: Vec<&SeatRow> = rows.iter().filter(|r| !r.is_cpu).collect();
+        assert_eq!(people.len(), 2, "人の数が合わない");
+        for row in &people {
+            assert!(row.token_hash.is_some(), "席{} に証明が無い", row.seat);
+            assert!(row.player_key.is_some(), "席{} に鍵が無い", row.seat);
+        }
+        for row in rows.iter().filter(|r| r.is_cpu) {
+            assert!(
+                row.token_hash.is_none(),
+                "CPU の席{} に証明がある",
+                row.seat
+            );
+            assert!(row.player_key.is_none(), "CPU の席{} に鍵がある", row.seat);
+        }
+
+        // 席の証明が、その席の行に入っていること。
+        let (_, host_seat) = rooms.seat_of(&host).expect("席がある");
+        let mine = rows
+            .iter()
+            .find(|r| r.seat == host_seat.index() as u8)
+            .expect("行がある");
+        assert_eq!(mine.token_hash, Some(hash_token(&host.0)));
+        assert_eq!(mine.player_key.as_deref(), Some("key-a"));
+
+        let (_, guest_seat) = rooms.seat_of(&guest).expect("席がある");
+        let theirs = rows
+            .iter()
+            .find(|r| r.seat == guest_seat.index() as u8)
+            .expect("行がある");
+        assert_eq!(theirs.token_hash, Some(hash_token(&guest.0)));
+
+        let _ = std::fs::remove_file(&path);
+    }
+
+    /// **鍵を送らなくても対局はできる。**一覧に出ないだけ。
+    #[tokio::test(start_paused = true)]
+    async fn a_keyless_player_can_still_play() {
+        let (rooms, path) = ledger_with_store("nokey");
+        let (_, host) = rooms.create("まさ", None, 0);
+        rooms.start(&host, 0).expect("始められる");
+        assert!(rooms.seat_of(&host).is_some(), "卓に着けていない");
+
+        let reader = Store::open(&path).expect("開ける");
+        for _ in 0..200 {
+            tokio::task::yield_now().await;
+        }
+        assert!(
+            reader.list("key-a", 10).expect("引ける").is_empty(),
+            "鍵を送っていないのに一覧に出ている"
+        );
+        let _ = std::fs::remove_file(&path);
+    }
+
+    /// 卓が生きているあいだは、トークンから牌譜を引ける。
+    #[tokio::test(start_paused = true)]
+    async fn a_token_points_at_its_record_while_the_table_lives() {
+        let (rooms, path) = ledger_with_store("point");
+        let (code, host) = rooms.create("まさ", Some("key-a"), 0);
+        let guest = rooms
+            .join(&code, "たろう", Some("key-b"), 0)
+            .expect("入れる");
+
+        // 卓が立つ前は何も指さない。
+        assert!(rooms.record_of(&host).is_none(), "待合で牌譜が引けている");
+
+        rooms.start(&host, 0).expect("始められる");
+        let (mine, my_seat) = rooms.record_of(&host).expect("引ける");
+        let (theirs, their_seat) = rooms.record_of(&guest).expect("引ける");
+        assert_eq!(mine, theirs, "同じ卓なのに別の牌譜を指している");
+        assert_ne!(my_seat, their_seat, "2人が同じ席を指している");
+
+        assert!(
+            rooms.record_of(&Token("知らない".to_owned())).is_none(),
+            "知らない証明で牌譜が引けている"
+        );
+        let _ = std::fs::remove_file(&path);
+    }
+
+    /// 倉を持たない台帳でも卓は立つ。**牌譜は第2段で足したもので、対局の前提ではない。**
+    #[tokio::test(start_paused = true)]
+    async fn a_ledger_without_a_store_still_seats_people() {
+        let rooms = Rooms::new();
+        let (_, host) = rooms.create("まさ", Some("key-a"), 0);
+        rooms.start(&host, 0).expect("始められる");
+        assert!(rooms.seat_of(&host).is_some());
     }
 }

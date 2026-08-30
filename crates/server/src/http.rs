@@ -24,6 +24,12 @@ use std::collections::HashMap;
 /// 席の証明を運ぶヘッダ。
 pub const TOKEN_HEADER: &str = "x-mahjong-token";
 
+/// その browser を指す鍵を運ぶヘッダ。
+///
+/// **席の証明とは別物である。**証明は1対局にしか効かないので、
+/// 「自分の打った半荘」を並べるには対局をまたぐ名札が要る。
+pub const PLAYER_HEADER: &str = "x-mahjong-player";
+
 #[derive(Deserialize, Default)]
 pub struct NameBody {
     #[serde(default)]
@@ -62,19 +68,35 @@ fn token_of(headers: &HeaderMap) -> Option<Token> {
         .map(|text| Token(text.to_owned()))
 }
 
-async fn create(State(rooms): State<Rooms>, body: Option<Json<NameBody>>) -> Response {
+fn player_of(headers: &HeaderMap) -> Option<String> {
+    let text = headers.get(PLAYER_HEADER)?.to_str().ok()?.trim();
+    (!text.is_empty()).then(|| text.to_owned())
+}
+
+async fn create(
+    State(rooms): State<Rooms>,
+    headers: HeaderMap,
+    body: Option<Json<NameBody>>,
+) -> Response {
     let name = body.map(|Json(b)| b.name).unwrap_or_default();
-    let (Code(code), Token(token)) = rooms.create(&name, rooms.now_ms());
+    let (Code(code), Token(token)) =
+        rooms.create(&name, player_of(&headers).as_deref(), rooms.now_ms());
     Json(Created { code, token }).into_response()
 }
 
 async fn join(
     State(rooms): State<Rooms>,
     Path(code): Path<String>,
+    headers: HeaderMap,
     body: Option<Json<NameBody>>,
 ) -> Response {
     let name = body.map(|Json(b)| b.name).unwrap_or_default();
-    match rooms.join(&Code(code), &name, rooms.now_ms()) {
+    match rooms.join(
+        &Code(code),
+        &name,
+        player_of(&headers).as_deref(),
+        rooms.now_ms(),
+    ) {
         Ok(Token(token)) => Json(Joined { token }).into_response(),
         Err(JoinError::NoSuchRoom) => fail(StatusCode::NOT_FOUND, JoinError::NoSuchRoom.slug()),
         Err(other) => fail(StatusCode::CONFLICT, other.slug()),

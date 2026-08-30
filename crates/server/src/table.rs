@@ -23,7 +23,7 @@ pub enum Occupant {
 }
 
 impl Occupant {
-    fn player_id(&self) -> PlayerId {
+    pub fn player_id(&self) -> PlayerId {
         match self {
             Occupant::Human(id) | Occupant::Cpu(id) => id.clone(),
         }
