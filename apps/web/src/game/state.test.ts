@@ -1,7 +1,8 @@
 import { describe, expect, it } from "vitest";
 
 import type { ClientEvent } from "../protocol/ClientEvent";
-import { apply, emptyState } from "./state";
+import type { Ruleset } from "../protocol/Ruleset";
+import { apply, emptyState, nameOf } from "./state";
 
 let seq = 0;
 function fold(events: ClientEvent[], nowMs = 0) {
@@ -550,5 +551,59 @@ describe("直前の捨て牌の在り処", () => {
       { type: "call", seat: 2, from: 1, kind: "pon", tiles: [5, 5, 5] },
     ]);
     expect(state.recentDiscard).toBeNull();
+  });
+});
+
+describe("席に着いている人の名前", () => {
+  const rules: Ruleset = {
+    length: "Hanchan",
+    start_score: 25_000,
+    return_score: 30_000,
+    uma: [15, 5, -5, -15],
+    red_dora_count: 3,
+    kuitan: true,
+    double_ron: true,
+    formal_tenpai: true,
+    noten_penalty: 3_000,
+    nagashi_mangan: true,
+    liability: true,
+    round_up_mangan: false,
+    busted_ends_match: true,
+    base_think_ms: 5_000,
+    think_bank_ms: 20_000,
+    network_grace_ms: 500,
+    min_reaction_window_ms: 350,
+  };
+
+  const matchStart: ClientEvent = {
+    type: "match_start",
+    players: ["まさ", "たろう", "CPU1", "CPU2"],
+    rules,
+    you: 1,
+  };
+
+  it("MatchStart が名前を運ぶ", () => {
+    // **凍結された protocol に手を入れずに名前を出せる。**players は
+    // 最初から `[PlayerId; 4]` として載っていた。
+    const state = fold([matchStart]);
+    expect(state.players).toEqual(["まさ", "たろう", "CPU1", "CPU2"]);
+    expect(state.you).toBe(1);
+  });
+
+  it("名前は局をまたいで残る", () => {
+    // **局頭で消すと席番号に戻る。**round_start は盤面を作り直す。
+    const state = fold([matchStart, roundStart, deal]);
+    expect(state.players).toEqual(["まさ", "たろう", "CPU1", "CPU2"]);
+  });
+
+  it("名前が届く前は席番号で凌ぐ", () => {
+    const state = fold([roundStart, deal]);
+    expect(nameOf(state, 2)).toBe("席2");
+  });
+
+  it("届いていれば名前を返す", () => {
+    const state = fold([matchStart]);
+    expect(nameOf(state, 0)).toBe("まさ");
+    expect(nameOf(state, 3)).toBe("CPU2");
   });
 });

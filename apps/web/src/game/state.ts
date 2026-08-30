@@ -65,6 +65,13 @@ export type Pending = {
 
 export type GameState = {
   you: Seat;
+  /**
+   * 席に着いている人の名前。
+   *
+   * **`MatchStart` が運んでくる。**卓の側は `PlayerId` としか思っていない
+   * ので、凍結された protocol に手を入れずに名前を出せる。
+   */
+  players: string[];
   seats: [SeatView, SeatView, SeatView, SeatView];
   /** 自分の手牌。ツモ牌は含まない。 */
   hand: Tile[];
@@ -159,9 +166,20 @@ function emptySeat(): SeatView {
   return { handSize: 0, river: [], melds: [], riichi: false, declaring: false };
 }
 
+/**
+ * 席に着いている人の呼び名。
+ *
+ * **名前が届く前は席番号で凌ぐ。**`MatchStart` より前に盤面を描く瞬間が
+ * あり、そこで空文字を出すと誰の点棒か分からなくなる。
+ */
+export function nameOf(state: GameState, seat: number): string {
+  return state.players[seat] ?? `席${seat}`;
+}
+
 export function emptyState(you: Seat): GameState {
   return {
     you,
+    players: [],
     seats: [emptySeat(), emptySeat(), emptySeat(), emptySeat()],
     hand: [],
     drawn: null,
@@ -213,6 +231,7 @@ export function apply(
   switch (event.type) {
     case "match_start":
       state.you = event.you;
+      state.players = [...event.players];
       state.phase = "playing";
       state.rules = event.rules;
       break;
@@ -227,6 +246,8 @@ export function apply(
         phase: "playing" as const,
         result: state.result,
         rules: state.rules,
+        // **名前は対局のあいだ変わらない。**局頭で消すと席番号に戻る。
+        players: state.players,
       };
       Object.assign(state, carried);
       state.round = event.round;

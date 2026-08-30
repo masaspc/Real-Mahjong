@@ -32,6 +32,7 @@ function seat(river: Tile[]): SeatView {
 function stateWithRivers(): GameState {
   return {
     you: 0 as Seat,
+    players: [],
     seats: [
       seat([0 as Tile, 1 as Tile]),
       seat([2 as Tile, 3 as Tile]),

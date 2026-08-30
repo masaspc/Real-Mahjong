@@ -2,7 +2,7 @@ import type { AgariResult } from "../protocol/AgariResult";
 import type { RyuukyokuKind } from "../protocol/RyuukyokuKind";
 import type { Tile } from "../protocol/Tile";
 import type { YakuId } from "../protocol/YakuId";
-import type { GameState, RoundResult } from "../game/state";
+import { nameOf, type GameState, type RoundResult } from "../game/state";
 
 /**
  * 局の結果を出す。
@@ -111,11 +111,16 @@ type Make = {
 };
 
 /** 1人ぶんの和了。 */
-function agariBlock(result: AgariResult, viewer: number, make: Make): HTMLElement {
+function agariBlock(
+  result: AgariResult,
+  state: GameState,
+  make: Make,
+): HTMLElement {
   const box = make.node("div", "result-win");
 
-  const who = result.seat === viewer ? "あなた" : `席${result.seat}`;
-  const how = result.from === null ? "ツモ" : `ロン（席${result.from}）`;
+  const who = result.seat === state.you ? "あなた" : nameOf(state, result.seat);
+  const how =
+    result.from === null ? "ツモ" : `ロン（${nameOf(state, result.from)}）`;
   box.append(make.node("div", "result-who", `${who}の和了 ・ ${how}`));
 
   // 手牌。**和了牌を最後に離して置く。**どれで上がったのかが読めない。
@@ -182,7 +187,7 @@ function deltaBlock(
       `result-delta-cell${delta > 0 ? " plus" : delta < 0 ? " minus" : ""}`,
     );
     cell.append(
-      make.node("b", undefined, seat === state.you ? "あなた" : `席${seat}`),
+      make.node("b", undefined, seat === state.you ? "あなた" : nameOf(state, seat)),
       make.node("span", undefined, `${sign}${delta.toLocaleString()}`),
     );
     row.append(cell);
@@ -201,14 +206,17 @@ export function resultPanel(
 
   if (result.kind === "agari") {
     for (const one of result.results) {
-      panel.append(agariBlock(one, state.you, make));
+      panel.append(agariBlock(one, state, make));
     }
   } else {
     const name =
       result.ryuukyoku === null ? "流局" : RYUUKYOKU_NAMES[result.ryuukyoku];
     panel.append(make.node("div", "result-who", name));
     const tenpai = result.tenpai
-      .map((ok, seat) => `${seat === state.you ? "あなた" : `席${seat}`}: ${ok ? "聴牌" : "不聴"}`)
+      .map(
+        (ok, seat) =>
+          `${seat === state.you ? "あなた" : nameOf(state, seat)}: ${ok ? "聴牌" : "不聴"}`,
+      )
       .join(" / ");
     panel.append(make.node("div", "result-tenpai", tenpai));
   }

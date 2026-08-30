@@ -1,6 +1,6 @@
 import type { Command } from "../protocol/Command";
 import type { Tile } from "../protocol/Tile";
-import type { GameState } from "../game/state";
+import { nameOf, type GameState } from "../game/state";
 import { tileLabel } from "../game/tiles";
 import { BODY_FILL_COLOR } from "../scene/face-atlas";
 import { isWinningShape } from "../game/complete";
@@ -185,7 +185,9 @@ function turnLabel(state: GameState): string {
   if (state.turn === null) {
     return "";
   }
-  return state.turn === state.you ? "あなたの番" : `席${state.turn} を待っています`;
+  return state.turn === state.you
+    ? "あなたの番"
+    : `${nameOf(state, state.turn)} を待っています`;
 }
 
 /**
@@ -234,7 +236,7 @@ export function finalPanel(
     const tr = make("tr", row.seat === state.you ? "mine" : undefined);
     const cells: string[] = [
       `${row.rank}位`,
-      row.seat === state.you ? "あなた" : `席${row.seat}`,
+      row.seat === state.you ? "あなた" : nameOf(state, row.seat),
       row.raw.toLocaleString(),
       rules === null ? "-" : signed(row.base),
       rules === null ? "-" : signed(row.uma),
@@ -321,7 +323,7 @@ export function renderBoard(
     const cell = node(
       "span",
       `score seat-${offset}${active ? " active" : ""}`,
-      `席${seat}${marks ? ` ${marks}` : ""} ${(state.scores[seat] ?? 0).toLocaleString()}点`,
+      `${nameOf(state, seat)}${marks ? ` ${marks}` : ""} ${(state.scores[seat] ?? 0).toLocaleString()}点`,
     );
     // 直前の局の増減。**結果の板を閉じても、誰がいくら動いたかは残す。**
     const delta = state.result?.delta[seat] ?? 0;
@@ -345,7 +347,9 @@ export function renderBoard(
   if (state.pending && state.lastDiscard) {
     // **鳴けるときは、何を鳴くのかを真っ先に見せる。**
     const target = node("div", "target");
-    target.append(node("span", undefined, `席${state.lastDiscard.seat} が捨てた`));
+    target.append(
+      node("span", undefined, `${nameOf(state, state.lastDiscard.seat)} が捨てた`),
+    );
     target.append(tileNode(state.lastDiscard.tile));
     row.append(target);
   }

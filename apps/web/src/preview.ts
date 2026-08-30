@@ -76,6 +76,7 @@ const seats: [SeatView, SeatView, SeatView, SeatView] = [
 
 const state: GameState = {
   you: 0,
+  players: ["あなた", "下家", "対面", "上家"],
   seats,
   hand: [M(1), M(2), M(3), P(4), P(5), S(7), EAST],
   drawn: RED_5P,
