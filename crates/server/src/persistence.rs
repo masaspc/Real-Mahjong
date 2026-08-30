@@ -801,3 +801,127 @@ mod scribe_tests {
         assert!(rx.try_recv().is_err(), "空の局が投げられている");
     }
 }
+
+#[cfg(test)]
+mod fidelity_tests {
+    use super::*;
+    use crate::session::{spawn_recorded, Recording, SeedSource};
+    use crate::table::Occupant;
+    use protocol::client_event::{ClientEvent, ClientEventEnvelope};
+    use protocol::event::PlayerId;
+    use protocol::project::project_envelope;
+    use protocol::ruleset::{MatchLength, Ruleset};
+    use protocol::seat::Seat;
+
+    /// 締切だけは配るたびに引き直される。
+    ///
+    /// **`deadline_ms` は発行時点からの残り時間である。**再接続の再送でも
+    /// その場で計算し直すので、保存した真実の値とは一致しない。牌譜の
+    /// 中身が一致するかを見たいので、ここだけ揃えてから比べる。
+    fn without_deadline(envelope: &ClientEventEnvelope) -> ClientEventEnvelope {
+        let mut copy = envelope.clone();
+        if let ClientEvent::RequestAction { deadline_ms, .. } = &mut copy.event {
+            *deadline_ms = 0;
+        }
+        copy
+    }
+
+    /// **保存した牌譜が、対局中に配ったものと1件ずつ一致する。**
+    ///
+    /// ここが牌譜の正しさの最後の砦である。保存も射影も個別には通って
+    /// いるのに、配ったものと違うものが残る——という壊れ方は、他の試験が
+    /// 全部通ったまま起こりうる。
+    #[tokio::test(start_paused = true)]
+    async fn the_record_matches_what_was_delivered() {
+        let db = TempDb::new("fidelity");
+        let writer = Store::open(&db.path).expect("開ける");
+        writer
+            .begin_match(
+                &MatchHead {
+                    id: "f".to_owned(),
+                    rules_json: "{}".to_owned(),
+                    started_ms: 0,
+                    ended_ms: None,
+                    players: (0..4).map(|i| format!("c{i}")).collect(),
+                    result_json: None,
+                },
+                &(0..4)
+                    .map(|seat| SeatRow {
+                        seat,
+                        name: format!("c{seat}"),
+                        is_cpu: true,
+                        token_hash: None,
+                        player_key: None,
+                    })
+                    .collect::<Vec<_>>(),
+            )
+            .expect("書ける");
+
+        let (handle, _actor) = spawn_recorded(
+            Ruleset::kin_no_ma(MatchLength::Hanchan),
+            std::array::from_fn(|i| Occupant::Cpu(PlayerId(format!("c{i}")))),
+            SeedSource::from_master([17; 32]),
+            Some(Recording {
+                scribe: Scribe::spawn(Store::open(&db.path).expect("開ける")),
+                record_id: "f".to_owned(),
+            }),
+        );
+
+        // **席0でない席で見る。**席0だと、射影を取り違えても気付けない。
+        let seat = Seat::new(2);
+        let (_, mut watcher) = handle.attach(seat, None).await.expect("卓は生きている");
+        let mut delivered: Vec<ClientEventEnvelope> = Vec::new();
+        while let Some(envelope) = watcher.recv().await {
+            delivered.push(envelope);
+        }
+        assert!(delivered.len() > 200, "配られたのが {} 件", delivered.len());
+
+        // 書き手が吐き出しきるまで回す。
+        let reader = Store::open(&db.path).expect("開ける");
+        let mut truth = Vec::new();
+        for _ in 0..2_000 {
+            truth = reader.events("f").expect("読める");
+            if reader
+                .head("f")
+                .expect("引ける")
+                .expect("ある")
+                .ended_ms
+                .is_some()
+            {
+                break;
+            }
+            tokio::task::yield_now().await;
+        }
+        assert!(!truth.is_empty(), "牌譜が空");
+
+        let stored: Vec<ClientEventEnvelope> = truth
+            .iter()
+            .filter_map(|envelope| project_envelope(envelope, seat))
+            .collect();
+
+        // 保存は局の境界までなので、残っている範囲で突き合わせる。
+        let last = stored.last().expect("何か残っている").seq;
+        let live: Vec<ClientEventEnvelope> = delivered
+            .iter()
+            .filter(|envelope| envelope.seq <= last)
+            .map(without_deadline)
+            .collect();
+        let kept: Vec<ClientEventEnvelope> = stored.iter().map(without_deadline).collect();
+
+        assert_eq!(
+            kept.len(),
+            live.len(),
+            "件数が違う（牌譜 {} / 配った {}）",
+            kept.len(),
+            live.len()
+        );
+        for (index, (a, b)) in kept.iter().zip(live.iter()).enumerate() {
+            assert_eq!(a, b, "{index} 件目が違う");
+        }
+        assert!(
+            kept.len() > 200,
+            "突き合わせたのが {} 件しかない",
+            kept.len()
+        );
+    }
+}
